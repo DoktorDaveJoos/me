@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$project_dir"
+
+if [ "$(uname -s)" != Darwin ]; then
+    printf '%s\n' 'This development bundle helper requires macOS.' >&2
+    exit 1
+fi
+
+mode=${1:-release}
+case "$mode" in
+    debug) ./scripts/cargo build --locked ;;
+    release) ./scripts/cargo build --locked --release ;;
+    *) printf '%s\n' 'Usage: ./scripts/bundle-macos [debug|release]' >&2; exit 2 ;;
+esac
+
+build_dir=${CARGO_TARGET_DIR:-"$project_dir/target"}
+bundle_dir="$build_dir/$mode/ME.app"
+mkdir -p "$bundle_dir/Contents/MacOS"
+cp "$build_dir/$mode/me" "$bundle_dir/Contents/MacOS/me"
+cp packaging/macos/Info.plist "$bundle_dir/Contents/Info.plist"
+codesign --force --sign - "$bundle_dir"
+printf '%s\n' "$bundle_dir"

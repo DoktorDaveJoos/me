@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$project_dir"
+
+# Use the isolated toolchain if available; otherwise use the developer's Cargo.
+if [ -x "$project_dir/.tools/cargo/bin/cargo" ]; then
+    export CARGO_HOME="$project_dir/.tools/cargo"
+    export RUSTUP_HOME="$project_dir/.tools/rustup"
+    export PATH="$CARGO_HOME/bin:$PATH"
+    exec "$CARGO_HOME/bin/cargo" "$@"
+fi
+
+if command -v cargo >/dev/null 2>&1; then
+    exec cargo "$@"
+fi
+
+printf '%s\n' 'Rust is required. Install it from https://rustup.rs and run this command again.' >&2
+exit 127

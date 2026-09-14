@@ -1,0 +1,11 @@
+[package]
+name = "me-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
+description = "Platform-independent foundation for ME"
+
+[lints]
+workspace = true
