@@ -1,0 +1,13 @@
+name: Design system
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  visual-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify shared design tokens and icons
+        run: python3 scripts/check-design-system
+      - name: Verify drift detection
+        run: python3 scripts/test-design-system.py

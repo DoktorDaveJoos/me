@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Lightweight source/asset guard for ME's native UI. No third-party dependencies."""
+import re
+import sys
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def code_only(source):
+    """Mask Rust comments/strings, retaining positions for useful line diagnostics."""
+    pattern = r'/\*[\s\S]*?\*/|//[^\n]*|r(#+)"[\s\S]*?"\1|r"[\s\S]*?"|"(?:\\.|[^"\\])*"'
+    return re.sub(pattern, lambda m: re.sub(r'[^\n]', ' ', m[0]), source)
+
+
+def rust_violations(source, tokens=False, assets=False):
+    code = code_only(source)
+    rules = []
+    if not tokens:
+        rules += [
+            (r'\b0x[\da-fA-F_]{6,}\b', 'Use a semantic color from design_system.rs'),
+            (r'\.(?:text_size|line_height)\s*\(\s*[^\s)]', 'Use type_style(Type::…) for size and leading'),
+            (r'\bFontWeight\s*::', 'Use font::REGULAR, MEDIUM or EMPHASIS'),
+            (r'\.font_family\s*\((?!\s*font::)', 'Use font::SANS or font::MONO'),
+            (r'\.rounded(?:_[a-z]+)?\s*\((?!\s*(?:px\(radius::STANDARD\)|\)))', 'Use radius::STANDARD'),
+            (r'\.rounded_(?!full\b)\w+\s*\(', 'Use radius::STANDARD (pill/dot: rounded_full)'),
+            (r'\.(?:p|px|py|pt|pr|pb|pl|m|mx|my|mt|mr|mb|ml|gap|gap_x|gap_y)\s*\(\s*px\(\s*[-\d]', 'Use the shared space scale'),
+            (r'\.(?:p|px|py|pt|pr|pb|pl|m|mx|my|mt|mr|mb|ml|gap|gap_x|gap_y)_(?!0\b|auto\b)\w+\s*\(', 'Use the shared space scale'),
+            (r'\.text_(?:xs|sm|base|lg|xl|\d+xl)\s*\(', 'Use type_style(Type::…)'),
+            (r'\.(?:bg|text_color|border_color)\s*\(\s*(?:rgb|rgba)\s*\(\s*\d', 'Use a semantic color'),
+        ]
+    if not assets:
+        rules += [
+            (r'\bsvg\s*\(', 'Render bundled icons through assets::icon(Icon::…, IconSize::…, color)'),
+        ]
+    problems = []
+    for pattern, message in rules:
+        for match in re.finditer(pattern, code):
+            problems.append((source.count('\n', 0, match.start()) + 1, message))
+    return sorted(set(problems))
+
+
+def icon_violations(path):
+    expected = {'width': '24', 'height': '24', 'viewBox': '0 0 24 24', 'fill': 'none',
+                'stroke': 'black', 'stroke-width': '1.5', 'stroke-linecap': 'round',
+                'stroke-linejoin': 'round'}
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as error:
+        return [str(error)]
+    errors = [f'{key} must be {value!r}' for key, value in expected.items()
+              if root.get(key) != value]
+    for node in list(root.iter())[1:]:
+        for key in ('fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin'):
+            if key in node.attrib and node.attrib[key] != expected[key]:
+                errors.append(f'Child overrides {key}; use the shared outline style')
+        if 'style' in node.attrib:
+            errors.append('Inline icon styles must be expressed by the shared root attributes')
+    return errors
+
+
+def main():
+    errors = []
+    src = ROOT / 'crates/me-app/src'
+    rust_files = sorted(src.rglob('*.rs')) + sorted((ROOT / 'crates/me-app/examples').rglob('*.rs'))
+    for path in rust_files:
+        for line, message in rust_violations(path.read_text(), path == src / 'design_system.rs', path == src / 'assets.rs'):
+            errors.append(f'{path.relative_to(ROOT)}:{line}: {message}')
+    icons = sorted((ROOT / 'crates/me-app/assets/icons').glob('*.svg'))
+    for path in icons:
+        errors.extend(f'{path.relative_to(ROOT)}: {message}' for message in icon_violations(path))
+    registry = (src / 'assets.rs').read_text()
+    embedded = set(re.findall(r'include_bytes!\("\.\./assets/icons/([\w-]+\.svg)"\)', registry))
+    paths = set(re.findall(r'=> "icons/([\w-]+\.svg)"', registry))
+    files = {p.name for p in icons}
+    if embedded != files or paths != files:
+        errors.append('Icon enum paths, embedded assets and SVG files must match exactly')
+    if errors:
+        print('\n'.join(errors), file=sys.stderr)
+        return 1
+    print(f'Design system OK: {len(rust_files)} Rust files, {len(icons)} consistent icons.')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

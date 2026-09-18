@@ -4,6 +4,11 @@ set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$project_dir"
 
+# Check the visual contract before commands that compile the app.
+case "${1:-}" in
+    build|check|clippy|test|run) python3 "$project_dir/scripts/check-design-system" ;;
+esac
+
 # Use the isolated toolchain if available; otherwise use the developer's Cargo.
 if [ -x "$project_dir/.tools/cargo/bin/cargo" ]; then
     export CARGO_HOME="$project_dir/.tools/cargo"
