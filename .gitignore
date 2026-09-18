@@ -1,7 +1,55 @@
+# Build output and local toolchains
 /target/
 /.tools/
-.DS_Store
+*.app/
+*.dmg
+*.dSYM/
+
+# Local configuration and credentials
 .env
 .env.*
 !.env.example
+/.codex/
+/.cargo/credentials
+/.cargo/credentials.toml
+auth.json
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Vaults, backups, exports, and operational data (never publish personal data)
+/vault/
+/vaults/
+/backups/
+/exports/
+/private/
+/logs/
+vault.db*
+header.json
+session.lock
+**/objects/
+*.1pux
+*.1pif
+*.opvault/
+*.agilekeychain/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
 *.log
+*.log.*
+diagnostics.jsonl*
+
+# Editor and OS files
+.DS_Store
+._*
+*.swp
+*.swo
+__pycache__/
+*.py[cod]

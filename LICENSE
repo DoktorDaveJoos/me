@@ -1,6 +1,94 @@
-Copyright (c) 2026. All rights reserved.
+ME. SOURCE INSPECTION LICENSE
+Version 1.0
 
-This project is proprietary. No permission is granted to use, copy, modify,
-distribute, sublicense, or sell this software without prior written permission
-from the copyright holder. Third-party dependencies retain their respective
-licenses.
+Copyright (c) 2026 David Joos (GitHub: DoktorDaveJoos).
+All rights reserved except as expressly stated below.
+
+1. Scope
+
+This license applies to the original ME. source code, documentation, tests, and
+assets in this repository (the "Software") to the extent owned by David Joos
+(the "Licensor"). Third-party materials are excluded and remain subject to their
+own licenses, as described in section 5 and THIRD_PARTY_NOTICES.md.
+
+This is a proprietary, source-available license. It is not an open-source
+license, a free-software license, or a grant of general evaluation-use rights.
+
+2. Permission to inspect source
+
+Subject to this license, the Licensor grants you a limited, nonexclusive,
+nontransferable permission to view the Software and download a copy solely to
+read and inspect its source, including to decide whether to request a separate
+paid license. Retain this license and all copyright and attribution notices in
+any permitted copy. Inspection permission does not include permission to build,
+execute, modify, or otherwise operate the Software.
+
+3. Separate paid license required for use
+
+Except for section 2, section 5, and rights that cannot lawfully be restricted,
+no permission is granted to use the Software. You must first obtain a separate
+written license from the Licensor, agree its scope and fees, and satisfy its
+payment terms before doing any of the following with all or any part of the
+Software:
+
+  a. compile, build, execute, install for use, deploy, or operate it;
+  b. modify, adapt, translate, or create derivative works of it;
+  c. copy beyond the inspection permission, redistribute, publish, sublicense,
+     rent, lease, sell, or otherwise make it available to third parties;
+  d. incorporate it into another product or service, or host or provide it as a
+     service, whether or not a fee is charged; or
+  e. use it for training or developing artificial intelligence or machine
+     learning models, except to the extent section 5 applies.
+
+These restrictions apply equally to personal, internal-business, educational,
+research, nonprofit, noncommercial, and commercial activities. No free-use
+exception arises from attribution, public availability, a fork, a contribution,
+or the absence of revenue. No rights to the Licensor's trademarks or patents
+are granted by this license. All rights not expressly granted are reserved.
+
+Contact the Licensor through the repository owner's published contact channels:
+https://github.com/DoktorDaveJoos
+
+This document is not a purchase agreement and sets no price or automatic payment
+obligation. Payment alone does not grant a license without the separate written
+agreement. Any separate agreement controls the permissions it expressly grants.
+
+4. No automatic conversion
+
+The Software does not automatically become open source, freely usable, or
+permissively licensed after any period of time. Public access, repository
+activity, and publication of future versions do not expand this license.
+
+5. Third-party, platform, and statutory rights
+
+Third-party dependencies, fonts, and other separately licensed materials retain
+their respective licenses and copyright notices. Nothing in this license
+restricts rights independently granted under those licenses or purports to
+relicense those materials as proprietary ME. code.
+
+Nothing in this license limits rights granted to GitHub or its users under the
+applicable GitHub terms, including the public-repository rights to view and fork
+through that service. Such platform rights do not create an additional general
+license from the Licensor to use ME. outside their scope.
+
+Nothing in this license restricts rights or exceptions that applicable law does
+not allow the Licensor to restrict, including applicable copyright exceptions.
+It does not claim ownership of independently developed software or unprotected
+ideas. Retention of notices does not by itself authorize otherwise restricted use.
+
+6. Termination
+
+The inspection permission in section 2 terminates if you breach its conditions.
+On termination, stop activities that depended on that permission and delete
+copies made under it, except where retention is independently permitted by
+section 5, applicable law, or a separate written agreement. Termination does not
+affect independently granted third-party, platform, or statutory rights.
+
+7. Disclaimer
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE SOFTWARE IS PROVIDED "AS
+IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. TO THE
+MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSOR IS NOT LIABLE FOR CLAIMS,
+DAMAGES, OR OTHER LIABILITY ARISING FROM THE SOFTWARE OR ITS USE. NOTHING HERE
+EXCLUDES OR LIMITS LIABILITY THAT CANNOT LAWFULLY BE EXCLUDED OR LIMITED.

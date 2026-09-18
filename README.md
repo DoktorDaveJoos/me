@@ -1,104 +1,194 @@
-# ME
+# ME.
 
-**You. Your Data.**
+**It's about you. Your data. Your fingerprints.**
 
-A fast personal data app for **macOS and Linux**, built with **Rust + GPUI**.
-Commercial, proprietary software. Windows is outside the product scope.
+ME. is a native personal information app for macOS and Linux, built with Rust
+and GPUI. Keep documents and details in an encrypted local vault, understand
+incoming files, review the evidence, and find information when you need it.
 
-## Current state
+**Development preview.** macOS builds and synthetic regression tests have been
+verified. Linux is a target, but its desktop runtime has not yet been validated.
+This is not a security-audited release, and document interpretation can be wrong
+or incomplete.
 
-This is the initial project scaffold: a GPUI window, an application menu and quit
-shortcut, plus a separate platform-independent core crate. It does **not** yet
-store personal data or implement a vault, encryption, accounts, imports, tray
-integration, or AI. Do not use this scaffold to store real personal documents.
+## License and commercial use
 
-## Run
+Copyright © 2026 David Joos ([@DoktorDaveJoos](https://github.com/DoktorDaveJoos)).
 
-```sh
-./scripts/cargo run --release
-```
+**Source available for inspection; a separate paid license is required for use.**
+ME.'s original code and assets are governed by the [ME. Source Inspection
+License](LICENSE). It permits reading and downloading the source for inspection.
+It does **not** grant permission to build, run, modify, redistribute, embed,
+resell, or offer ME. as a service, including for personal, internal, educational,
+or noncommercial use. Those activities require a separate written paid license
+from the copyright holder.
 
-The helper uses the project-local Rust toolchain in `.tools/` when available and
-otherwise uses Cargo from your PATH. `.tools/` and `target/` are excluded from Git.
-With a normal Rust installation, `cargo run --release` works as well.
+This is **not an open-source license**. Public access to the repository does not
+make the software free to use. Rights granted by applicable law, GitHub's terms,
+and third-party licenses remain unaffected. See [third-party notices](THIRD_PARTY_NOTICES.md).
+Contact the repository owner to discuss licensing; no purchase or license grant
+occurs merely by viewing the repository. External code contributions require a
+separate agreement before acceptance so commercial licensing rights remain clear.
 
-Rust is pinned in `rust-toolchain.toml`. GPUI is pinned to published version 0.2.2;
-use the matching crate sources/docs, because Zed's main branch has newer APIs.
-Commit `Cargo.lock` so application builds resolve the same dependency versions.
+## What works today
 
-## macOS development bundle
+| Area | Current behavior |
+| --- | --- |
+| **Search** | Find saved details and documents, copy values, inspect sources, and match a form against confirmed information. |
+| **Review** | Accept, correct, or reject extracted suggestions and answer questions about uncertain values. Conflicts remain visible. |
+| **Browser** | Browse encrypted originals and organize documents in folders. Export an original when explicitly requested. |
+| **Imports** | Drop one or more files anywhere in the window, review the file list, and confirm intake. Follow each file through processing, retry failures, or stop work. |
+| **Vault** | Password-based unlock, encrypted storage, note history, locking, backup and restore, and local 1Password `.1pux` import. |
 
-```sh
-./scripts/bundle-macos debug
-open target/debug/ME.app
-```
+Imports report meaningful stages: **normalization → interpretation → local
+context → extraction → verification**. Two background workers process files
+concurrently. Checkpoints support retries, and interrupted jobs can resume after
+unlocking. Model suggestions carry source evidence and require review before
+becoming confirmed facts.
 
-Omit `debug` for an optimized release bundle. The helper signs the bundle locally
-for development; it does not perform Developer ID signing or notarization.
+The context stage currently uses local document guidance. Live web research,
+visual model analysis of page images, and universal document understanding are
+not implemented. See [the import pipeline and research](docs/import-pipeline.md)
+for the architecture, progress model, and remaining accuracy work.
 
-## Prerequisites
+### Document support
+
+- PDF text and scans; JPEG, PNG, TIFF, and BMP images.
+- Additional HEIC/HEIF, WebP, and GIF image handling on macOS.
+- DOCX, ODT, RTF, and UTF-8 text such as TXT, Markdown, CSV, and TSV.
+- EML email with MIME headers, decoded body text, and supported attachments.
+- Other files can be preserved as originals; interpretation support varies.
+
+OCR and format parsing run locally. macOS uses PDFKit, Vision, and ImageIO;
+Linux uses external Poppler, Tesseract, and UnRTF tools. The Office parsers read
+text and tables; embedded images and complex layout interpretation remain
+limited. Supported attachments, file limits, and failure behavior are documented
+in [document processing](docs/document-processing.md) and [email import](docs/import-pipeline.md).
+
+## Privacy and AI processing
+
+ME. stores vault data in SQLCipher and separately encrypts original files.
+Background work keeps storage, cryptography, OCR, and model calls off the UI
+thread. Backups require the original password; there is no password-recovery
+service. Exporting a document writes an unencrypted copy at your chosen location.
+
+The current app requires Codex installation and ChatGPT sign-in during setup.
+**Automatic AI analysis is enabled by default:** supported imports are read
+locally and their extracted text is sent to OpenAI through the signed-in ChatGPT
+account. This consumes that account's available usage. Disable automatic analysis
+in Settings to require manual release for analysis. Disabling it cannot retract
+content already sent. ME. does not ship a shared API key or use a paid API fallback.
+
+Credentials imported from 1Password remain local and are excluded from AI
+analysis and document content search. Optional access through the read-only MCP
+bridge requires a separate vault sharing grant. Form handoff to Codex also has
+its own review step.
+
+Vault encryption does not guarantee that RAM, swap, clipboard history, operating
+system caches, or external provider state contain no plaintext. Read the
+[vault limitations](docs/desktop-vault.md), [AI integration](docs/codex-integration.md),
+and [1Password import behavior](docs/1password-import.md) before using real data.
+Never put personal documents, vault backups, credentials, or diagnostic excerpts
+containing private information in public issues or pull requests.
+
+## Development
+
+These instructions are for the copyright holder and licensees whose separate
+written agreement permits development. They do not extend the [license](LICENSE).
+
+The workspace pins **Rust 1.98.1** in `rust-toolchain.toml` and **GPUI 0.2.2**.
+Install Rust using [rustup](https://rustup.rs/), plus Python 3 for the design checks.
 
 ### macOS
 
-- Rust (see <https://rustup.rs>).
-- Full Xcode with the macOS components and Metal compiler, selected with
-  `xcode-select`. The command-line tools alone may not provide the Metal tools.
-  If the build reports a missing Metal Toolchain, install the official component:
+Install full Xcode and select it with `xcode-select`. The build needs Apple's
+Metal compiler as well as the Swift compiler used by the local document helper.
+If Xcode reports a missing Metal toolchain, install its component:
 
-  ```sh
-  xcodebuild -downloadComponent MetalToolchain
-  ```
+```sh
+xcodebuild -downloadComponent MetalToolchain
+```
+
+Run the optimized app:
+
+```sh
+./scripts/cargo run --release --locked
+```
+
+Or build a development app bundle:
+
+```sh
+./scripts/bundle-macos
+open target/release/ME.app
+```
+
+Pass `debug` to the bundle script for `target/debug/ME.app`. Bundles are signed
+locally for development; they are not Developer ID signed or notarized.
 
 ### Linux
 
-Both Wayland and X11 GPUI backends are enabled. A working graphics driver and
-the development libraries required by GPUI are necessary. On Debian/Ubuntu,
-start with:
+GPUI's Wayland and X11 backends are enabled. A working graphics driver and
+development libraries are required. The following Debian/Ubuntu packages are a
+starting point; names vary by distribution and a complete Linux build/runtime
+still needs validation:
 
 ```sh
 sudo apt install build-essential pkg-config clang libclang-dev cmake \
   libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev \
   libwayland-dev libvulkan-dev libxcb1-dev libxcb-render0-dev \
-  libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev
+  libxcb-shape0-dev libxcb-xfixes0-dev libssl-dev \
+  poppler-utils tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng unrtf
+./scripts/cargo run --release --locked
 ```
 
-Package names differ by distribution; this dependency list and Linux runtime
-behavior still need validation on the target machines. See the
-[GPUI source](https://docs.rs/crate/gpui/0.2.2/source/) and
-[Zed Linux development guide](https://zed.dev/docs/development/linux).
+The document processor expects its Linux tools in `/usr/bin`. They are installed
+separately, not downloaded automatically by ME.
 
-## Development checks
+### Checks
 
 ```sh
+./scripts/check-design-system
+python3 scripts/test-design-system.py
 ./scripts/cargo fmt --all -- --check
 ./scripts/cargo check --workspace --locked
 ./scripts/cargo clippy --workspace --all-targets --locked -- -D warnings
 ./scripts/cargo test --workspace --locked
 ```
 
-Use release builds for responsiveness measurements. Measure cold start,
-activation of an already-running app, and vault unlock separately.
+The regular suite uses synthetic data. Tests requiring a real Codex installation
+or signed-in model access are ignored by default; live model tests require an
+explicit `ME_CODEX_TEST_HOME`. Do not point test tools at a personal vault.
+The current GitHub Actions workflow checks the design contract; it does not
+replace the full local Rust suite or platform verification.
 
-## Layout
+The Cargo helper uses a project-local toolchain in `.tools/` when present,
+otherwise Cargo from `PATH`. Keep `Cargo.lock` committed. Build output, local
+toolchains, vaults, backups, and credentials belong outside version control.
+
+### Repository layout
 
 ```text
-crates/me-app/   GPUI views, window lifecycle, and platform integration
-crates/me-core/  UI-independent data and vault foundation
-docs/mvp.md     Product scope and implementation order
-scripts/cargo   Cargo helper with optional project-local toolchain
+crates/me-app/          Native GPUI interface and platform integration
+crates/me-core/         Encrypted vault, facts, sources, migrations, and import state
+crates/me-documents/    Local document parsing, OCR helpers, and synthetic fixtures
+crates/me-agent/        Codex integration, extraction pipeline, and read-only MCP bridge
+crates/me-diagnostics/  Bounded local operational diagnostics
+docs/                  Product notes, architecture, design, and behavior
+packaging/             macOS bundle metadata
+scripts/               Build helpers and design checks
 ```
 
-## Next
+All UI changes follow the [shared design system](docs/design-system.md).
+[AGENTS.md](AGENTS.md) describes development constraints.
 
-Implement Basic's encrypted vault and manually entered facts, then the
-menu-bar/tray quick-access flow. Pro adds document extraction through OpenAI,
-followed later by encrypted device sync. See [the MVP plan](docs/mvp.md).
+## Status and remaining work
 
+The encrypted vault, import pipeline, evidence checks, review, and native UI are
+implemented. Synthetic regression coverage is not a guarantee that every real
+letter, insurance document, email, or payslip will be interpreted correctly.
 
-## Bootstrap verification
-
-- macOS Apple Silicon: debug build and actual GPUI window launch verified.
-- Formatting and workspace Clippy checks pass.
-- Release performance and Linux builds/runtime have not been measured or verified.
-- Cargo reports future-compatibility notices in third-party dependencies
-  `block` and `proc-macro-error2`; these do not prevent this pinned build.
+Remaining work includes broader document evaluations, Linux runtime validation,
+security review, production signing and packaging, and release performance
+measurements. Device sync, embeddings, and tray integration are future work.
+Historical plans in `docs/architecture/` provide design context; the current
+README and root license define the published project's status and licensing.
