@@ -1,0 +1,32 @@
+SYNTHETISCHE GEHALTSABRECHNUNG
+Abrechnungszeitraum: August 2026
+Name: Erika Beispiel
+Anschrift: Musterstrasse 12, 10115 Berlin
+Arbeitgeber: Musterwerk GmbH
+Personal-Nr.: 0004711
+Geburtsdatum: 01.02.1990
+Steuer-ID: 01234567890
+SV-Nummer: 12010290B123
+Eintritt: 01.03.2020
+Steuerklasse: 1
+Kinderfreibetrag: 0,0
+Krankenkasse: Techniker Krankenkasse
+Wochenarbeitszeit: 38,5 Stunden
+Grundgehalt: 4.350,00 EUR
+Zulage: 150,00 EUR
+Gesamt-Brutto: 4.500,00 EUR
+Steuer-Brutto: 4.500,00 EUR
+Lohnsteuer: 650,00 EUR
+Kirchensteuer: 0,00 EUR
+Solidaritaetszuschlag: 0,00 EUR
+KV Arbeitnehmer: 390,00 EUR
+RV Arbeitnehmer: 418,50 EUR
+AV Arbeitnehmer: 58,50 EUR
+PV Arbeitnehmer: 83,00 EUR
+Netto-Verdienst: 2.900,00 EUR
+Vorschuss / Netto-Abzug: -100,00 EUR
+Auszahlungsbetrag: 2.800,00 EUR
+Bank: Musterbank
+IBAN: DE89 3704 0044 0532 0130 00
+BIC: COBADEFFXXX
+Jahresbrutto kumuliert: 36.000,00 EUR
