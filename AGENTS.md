@@ -4,6 +4,9 @@
   webview or add Windows support without a product decision.
 - Responsiveness is priority one. Keep blocking I/O, crypto and network work off
   the UI thread. Use release builds for performance measurements.
+- Runnable clients live in `apps/`; shared Rust libraries live in `crates/`.
+  The desktop package is `apps/desktop` and retains the Cargo name `me-app`.
+  Run repository build and verification commands from the root.
 - `me-app` owns UI/platform integration; `me-core` owns platform-independent data
   and vault behavior. Use the API of the pinned GPUI version, not Zed main.
 - The project is source-available under the restrictive root `LICENSE`. Use
@@ -21,7 +24,7 @@
 ## UI design contract (required for every feature)
 
 - Before adding or changing UI, read `docs/design-system.md` and
-  `crates/me-app/src/design_system.rs`. Preserve the established ME. visual style.
+  `apps/desktop/src/design_system.rs`. Preserve the established ME. visual style.
 - Use shared semantic colors, `space::*`, `radius::STANDARD`, and
   `type_style(Type::…)`; reuse the components in `theme.rs`. Do not add local
   hex colors, fonts, text sizes, spacing values or corner radii to feature views.

@@ -20,7 +20,7 @@ use std::{
 #[path = "codex_pipeline.rs"]
 mod pipeline;
 use pipeline::Retry;
-pub use pipeline::{Checkpoints, ExtractionReport, NoCheckpoints, PIPELINE};
+pub use pipeline::{Checkpoints, ExtractionReport, LEGACY_PIPELINE, NoCheckpoints, PIPELINE};
 
 #[path = "assistant.rs"]
 mod assistant;
@@ -30,14 +30,32 @@ pub use assistant::{
 };
 
 pub const INBOX_MODEL: &str = "gpt-5.6-sol";
+const INBOX_PROVIDER: &str = "me-import-openai";
 const INBOX_EFFORT: &str = "medium";
 const MAX_BATCH_FACTS: usize = 96;
 #[path = "codex_document.rs"]
 mod document;
-use document::extract_batch;
+
 pub enum Progress {
     Stage(me_core::ImportStage),
-    Units { current: u32, total: u32 },
+    Step {
+        stage: me_core::ImportStage,
+        current: u32,
+        total: u32,
+    },
+    Failure(me_core::ImportFailure),
+    Request {
+        provider: me_core::ImportProvider,
+    },
+    Usage {
+        call: String,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+    Units {
+        current: u32,
+        total: u32,
+    },
     Message(String),
     LoginUrl(String),
     SetupRequired(SetupIssue),
@@ -64,11 +82,15 @@ struct Session {
     deadline: Instant,
     next: u64,
     retry: Retry,
+    call_id: Option<String>,
+    failure: Option<me_core::ImportFailure>,
+    reader_stop: Arc<AtomicBool>,
 }
 impl Drop for Session {
     fn drop(&mut self) {
         // The npm launcher starts a native child. Kill only our dedicated process
         // group so teardown also closes inherited pipes and browser callbacks.
+        self.reader_stop.store(true, Ordering::SeqCst);
         if self.child.id() > 1 {
             let _ = rustix::process::kill_process_group(
                 rustix::process::Pid::from_child(&self.child),
@@ -112,12 +134,19 @@ impl Session {
         cmd.env("CODEX_HOME", home)
             .env_remove("OPENAI_API_KEY")
             .env_remove("CODEX_API_KEY")
+            .env_remove("TYPESAFE_API_KEY")
+            .env_remove("ME_TYPESAFE_ENV_FILE")
             .current_dir(scratch)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         for setting in [
-            "model_provider=\"openai\"",
+            "model_provider=\"me-import-openai\"",
+            "model_providers.me-import-openai.name=\"OpenAI\"",
+            "model_providers.me-import-openai.base_url=\"https://chatgpt.com/backend-api/codex\"",
+            "model_providers.me-import-openai.wire_api=\"responses\"",
+            "model_providers.me-import-openai.requires_openai_auth=true",
+            "model_providers.me-import-openai.supports_websockets=false",
             "default_permissions=\"me-inbox\"",
             "permissions.me-inbox.network.enabled=false",
             "features.shell_tool=false",
@@ -138,6 +167,8 @@ impl Session {
             "project_doc_max_bytes=0",
             "web_search=\"disabled\"",
             "history.persistence=\"none\"",
+            "model_providers.me-import-openai.request_max_retries=0",
+            "model_providers.me-import-openai.stream_max_retries=0",
             "cli_auth_credentials_store=\"file\"",
         ] {
             cmd.arg("-c").arg(setting);
@@ -164,6 +195,8 @@ impl Session {
         let input = child.stdin.take().ok_or(FAILURE)?;
         let stdout = child.stdout.take().ok_or(FAILURE)?;
         let (tx, events) = mpsc::sync_channel(128);
+        let reader_stop = Arc::new(AtomicBool::new(false));
+        let reader_cancel = reader_stop.clone();
         let reader = thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             while let Ok(line) = crate::bridge::read_line(&mut reader, 512 * 1024) {
@@ -173,9 +206,19 @@ impl Session {
                 let Ok(value) = serde_json::from_slice::<Value>(&line) else {
                     break;
                 };
-                // Do not block process teardown on a full event queue.
-                if tx.try_send(value).is_err() {
-                    break;
+                let mut pending = value;
+                loop {
+                    if reader_cancel.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    match tx.try_send(pending) {
+                        Ok(()) => break,
+                        Err(mpsc::TrySendError::Full(value)) => {
+                            pending = value;
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(mpsc::TrySendError::Disconnected(_)) => return,
+                    }
                 }
             }
         });
@@ -189,6 +232,9 @@ impl Session {
             deadline: Instant::now() + Duration::from_secs(240),
             next: 0,
             retry: Retry::Never,
+            call_id: None,
+            failure: None,
+            reader_stop,
         })
     }
     fn send(&mut self, value: Value) -> Result<()> {
@@ -203,7 +249,13 @@ impl Session {
             if Instant::now() > self.deadline {
                 self.retry = Retry::Transient;
                 record("codex.timeout", &[]);
-                return Err("The request timed out. Try again.".into());
+                let message = "OpenAI timed out. Saved steps are kept. No automatic retry was made; resume when ready.";
+                self.failure = Some(me_core::ImportFailure::new(
+                    me_core::ImportProvider::OpenAi,
+                    me_core::ImportErrorKind::Timeout,
+                    message,
+                ));
+                return Err(message.into());
             }
             match self.events.recv_timeout(Duration::from_millis(100)) {
                 Ok(event) => {
@@ -250,6 +302,11 @@ impl Session {
                         "codex.rpc.failed",
                         &[F::Label("method", method), F::Integer("code", code)],
                     );
+                    if event.pointer("/error/data/codexErrorInfo").is_some() {
+                        let failure = provider_failure(&event["error"]["data"]);
+                        self.failure = Some(failure.clone());
+                        return Err(failure.message);
+                    }
                     return Err(format!(
                         "Codex couldn't process {method} (error {code}). Update ME. and Codex, then try again."
                     ));
@@ -286,17 +343,19 @@ pub enum SetupIssue {
     SignInRequired,
     WrongAccount,
     ModelUnavailable,
+    UsageLimit,
     Connection(String),
 }
 impl SetupIssue {
     pub fn message(&self) -> String {
         match self {
-            Self::SignInRequired => "Connect your ChatGPT account to use ME.".into(),
+            Self::SignInRequired => "Connect your ChatGPT account to use AI features.".into(),
             Self::WrongAccount => "Sign in with your ChatGPT subscription to continue.".into(),
             Self::ModelUnavailable => {
                 "The analysis model isn't available for this account. Check your subscription and update Codex."
                     .into()
             }
+            Self::UsageLimit => "You've reached your ChatGPT usage limit. AI features can resume when your allowance resets. Your vault is still available.".into(),
             Self::Connection(message) => message.clone(),
         }
     }
@@ -309,7 +368,7 @@ fn initialize(session: &mut Session) -> SetupResult<()> {
         .send(json!({"method":"initialized"}))
         .map_err(SetupIssue::Connection)
 }
-fn verify_configuration(session: &mut Session) -> SetupResult<()> {
+fn verify_configuration(session: &mut Session) -> SetupResult<Value> {
     let account = session
         .rpc("account/read", json!({"refreshToken":true}))
         .map_err(|_| {
@@ -349,15 +408,15 @@ fn verify_configuration(session: &mut Session) -> SetupResult<()> {
         return Err(SetupIssue::ModelUnavailable);
     }
     // This authenticated service call checks connectivity without creating a model turn.
-    // Exhausted quota is still a configured account and does not block access to the vault.
-    session
+    // AI availability is independent of local vault access.
+    let limits = session
         .rpc("account/rateLimits/read", json!({}))
         .map_err(|_| {
             SetupIssue::Connection(
                 "Couldn't connect to ChatGPT. Check your connection or sign in again.".into(),
             )
         })?;
-    Ok(())
+    Ok(limits)
 }
 
 pub fn check_configuration(
@@ -367,7 +426,7 @@ pub fn check_configuration(
 ) -> SetupResult<()> {
     setup_with_binary(home, false, cancel, &mut progress, &executable())
 }
-/// Called only from the setup screen's explicit connect action; never sends document text.
+/// Called only from the connection dialog's explicit connect action; never sends document text.
 pub fn configure(
     home: &Path,
     cancel: Arc<AtomicBool>,
@@ -433,7 +492,10 @@ fn setup_with_binary(
         progress(Progress::Message("Signed in. Checking connection…".into()));
         session.deadline = Instant::now() + Duration::from_secs(30);
     }
-    verify_configuration(&mut session)?;
+    let limits = verify_configuration(&mut session)?;
+    if pipeline::quota_exhausted(&limits) {
+        return Err(SetupIssue::UsageLimit);
+    }
     if cancel.load(Ordering::SeqCst) {
         return Err(SetupIssue::Connection("Connection stopped.".into()));
     }
@@ -447,30 +509,68 @@ fn retry_for_error(error: &Value) -> Retry {
         _ => Retry::Never,
     }
 }
-fn turn_error(error: &Value) -> String {
-    let code = match error.get("codexErrorInfo").and_then(Value::as_str) {
-        Some("usageLimitExceeded") => "usageLimitExceeded",
-        Some("sessionBudgetExceeded") => "sessionBudgetExceeded",
-        Some("unauthorized") => "unauthorized",
-        Some("contextWindowExceeded") => "contextWindowExceeded",
-        Some("serverOverloaded") => "serverOverloaded",
-        Some("internalServerError") => "internalServerError",
-        Some("badRequest") => "badRequest",
-        _ => "unknown",
+fn error_code(error: &Value) -> &str {
+    let info = &error["codexErrorInfo"];
+    info.as_str()
+        .or_else(|| {
+            info.as_object()
+                .and_then(|o| o.keys().next())
+                .map(String::as_str)
+        })
+        .unwrap_or("unknown")
+}
+fn provider_failure(error: &Value) -> me_core::ImportFailure {
+    use me_core::{ImportErrorKind as Kind, ImportFailure, ImportProvider};
+    let (kind, message) = match error_code(error) {
+        "usageLimitExceeded" | "sessionBudgetExceeded" => (
+            Kind::Quota,
+            "OpenAI usage limit reached. Imports are paused. Resume after your account allowance resets.",
+        ),
+        "unauthorized" => (
+            Kind::Authentication,
+            "Your ChatGPT sign-in has expired. Reconnect, then resume imports.",
+        ),
+        "contextWindowExceeded" => (
+            Kind::Unprocessable,
+            "OpenAI could not fit this section in its context. No automatic splitting or retry was made.",
+        ),
+        "serverOverloaded" | "internalServerError" => (
+            Kind::Connection,
+            "OpenAI is temporarily unavailable. Saved steps are kept; resume when ready.",
+        ),
+        "badRequest" => (
+            Kind::InvalidOutput,
+            "OpenAI declined the request. Update ME. and Codex before retrying.",
+        ),
+        "httpConnectionFailed"
+        | "responseStreamDisconnected"
+        | "responseStreamConnectionFailed" => {
+            let status = error["codexErrorInfo"][error_code(error)]["httpStatusCode"].as_u64();
+            match status {
+                Some(429) => (
+                    Kind::RateLimit,
+                    "OpenAI rate limit reached. Imports are paused; wait before resuming.",
+                ),
+                Some(401 | 403) => (
+                    Kind::Authentication,
+                    "OpenAI rejected the connection. Reconnect ChatGPT before resuming.",
+                ),
+                _ => (
+                    Kind::Connection,
+                    "The OpenAI connection was interrupted. Resume to reuse saved steps; no automatic retry was made.",
+                ),
+            }
+        }
+        _ => (
+            Kind::Connection,
+            "OpenAI could not complete this request. Check the connection and account usage, then resume. Saved steps are kept.",
+        ),
     };
-    record("codex.turn.failed", &[F::Label("code", code)]);
-    match error.get("codexErrorInfo").and_then(Value::as_str) {
-        Some("usageLimitExceeded" | "sessionBudgetExceeded") => {
-            "Your ChatGPT usage limit has been reached. Try again after it resets.".into()
-        }
-        Some("unauthorized") => "Your sign-in has expired. Reconnect ChatGPT.".into(),
-        Some("contextWindowExceeded") => "This document is too large for one request.".into(),
-        Some("serverOverloaded" | "internalServerError") => {
-            "ChatGPT is temporarily unavailable. Try again later.".into()
-        }
-        Some("badRequest") => "The request was declined. Update ME. and Codex.".into(),
-        _ => FAILURE.into(),
-    }
+    record("codex.turn.failed", &[F::Label("code", kind.key())]);
+    ImportFailure::new(ImportProvider::OpenAi, kind, message)
+}
+fn turn_error(error: &Value) -> String {
+    provider_failure(error).message
 }
 
 pub fn output_schema() -> Value {
@@ -562,7 +662,7 @@ fn request_model(
     schema: Value,
 ) -> Result<Value> {
     session.deadline = Instant::now() + Duration::from_secs(240);
-    let thread=session.rpc("thread/start",json!({"model":INBOX_MODEL,"modelProvider":"openai","allowProviderModelFallback":false,"cwd":scratch,"ephemeral":true,"permissions":"me-inbox","approvalPolicy":"never","baseInstructions":instructions,"developerInstructions":"Return only the constrained extraction object.","environments":[],"selectedCapabilityRoots":[]}))?;
+    let thread=session.rpc("thread/start",json!({"model":INBOX_MODEL,"modelProvider":INBOX_PROVIDER,"allowProviderModelFallback":false,"cwd":scratch,"ephemeral":true,"permissions":"me-inbox","approvalPolicy":"never","baseInstructions":instructions,"developerInstructions":"Return only the constrained extraction object.","environments":[],"selectedCapabilityRoots":[]}))?;
     let thread_id = thread
         .pointer("/thread/id")
         .and_then(Value::as_str)
@@ -588,6 +688,22 @@ fn await_json(
     loop {
         let event = session.next_event()?;
         let method = event.get("method").and_then(Value::as_str).unwrap_or("");
+        if method == "thread/tokenUsage/updated"
+            && event.pointer("/params/threadId").and_then(Value::as_str) == Some(thread_id)
+        {
+            let usage = &event["params"]["tokenUsage"]["total"];
+            if let (Some(call), Some(input_tokens), Some(output_tokens)) = (
+                session.call_id.clone(),
+                usage["inputTokens"].as_u64(),
+                usage["outputTokens"].as_u64(),
+            ) {
+                progress(Progress::Usage {
+                    call,
+                    input_tokens,
+                    output_tokens,
+                });
+            }
+        }
         if method == "account/updated"
             && event.pointer("/params/authMode") != Some(&json!("chatgpt"))
         {
@@ -602,7 +718,6 @@ fn await_json(
         }
         if method == "error"
             && event.pointer("/params/turnId").and_then(Value::as_str) == Some(turn_id)
-            && event.pointer("/params/willRetry") == Some(&json!(false))
         {
             if event
                 .pointer("/params/error/codexErrorInfo")
@@ -612,6 +727,8 @@ fn await_json(
                 progress(Progress::SetupRequired(SetupIssue::SignInRequired));
             }
             session.retry = retry_for_error(&event["params"]["error"]);
+            let failure = provider_failure(&event["params"]["error"]);
+            session.failure = Some(failure);
             return Err(turn_error(&event["params"]["error"]));
         }
         if method == "item/completed"
@@ -629,10 +746,16 @@ fn await_json(
         {
             if event.pointer("/params/turn/status").and_then(Value::as_str) != Some("completed") {
                 session.retry = retry_for_error(&event["params"]["turn"]["error"]);
+                session.failure = Some(provider_failure(&event["params"]["turn"]["error"]));
                 return Err(turn_error(&event["params"]["turn"]["error"]));
             }
             let answer = answer.ok_or_else(|| {
                 session.retry = Retry::InvalidOutput;
+                session.failure = Some(me_core::ImportFailure::new(
+                    me_core::ImportProvider::OpenAi,
+                    me_core::ImportErrorKind::InvalidOutput,
+                    "OpenAI returned no usable structured answer. No automatic retry was made.",
+                ));
                 record("codex.answer.missing", &[]);
                 "No usable answer was returned. Try again.".to_string()
             })?;
@@ -646,6 +769,11 @@ fn await_json(
             }
             return serde_json::from_str::<Value>(&answer).map_err(|_| {
                 session.retry = Retry::InvalidOutput;
+                session.failure = Some(me_core::ImportFailure::new(
+                    me_core::ImportProvider::OpenAi,
+                    me_core::ImportErrorKind::InvalidOutput,
+                    "OpenAI returned no usable structured answer. No automatic retry was made.",
+                ));
                 record("codex.answer.invalid_schema", &[]);
                 "The response had an unexpected format. Try again.".into()
             });
@@ -670,6 +798,7 @@ for line in sys.stdin:
  elif method=='account/read': result={'account':{'type':'chatgpt'}}
  elif method=='model/list': result={'data':[{'model':'gpt-5.6-sol'}],'nextCursor':None}
  elif method=='thread/start':
+  assert p['modelProvider']=='me-import-openai'
   assert p['ephemeral'] and p['permissions']=='me-inbox' and 'sandbox' not in p and p['approvalPolicy']=='never'
   result={'thread':{'id':'thread-test'}}
  elif method=='turn/start':
@@ -682,13 +811,14 @@ for line in sys.stdin:
    break
   source=json.loads(p['input'][0]['text'][p['input'][0]['text'].find('{'):])
   stage=source.get('stage','extract')
+  with open(sys.argv[0]+'.requests','a') as log: log.write(stage+'\n')
   if stage=='classify':
    text=json.dumps({'document_type':'generic','country':'unknown','language':'de','layout_notes':'synthetic','fields_to_check':['tax ID']})
    send({'id':i,'result':{'turn':{'id':'turn-test'}}})
    send({'method':'item/completed','params':{'threadId':'thread-test','turnId':'turn-test','item':{'type':'agentMessage','phase':'final_answer','text':text}}})
    send({'method':'turn/completed','params':{'threadId':'thread-test','turn':{'id':'turn-test','status':'completed'}}})
    continue
-  if stage in ['extract','repair']: turns+=1
+  if stage in ['extract','repair','audit']: turns+=1
   if mode=='quota' or (mode=='late_failure' and turns==2):
    send({'id':i,'result':{'turn':{'id':'turn-test'}}})
    send({'method':'error','params':{'threadId':'thread-test','turnId':'turn-test','willRetry':False,'error':{'codexErrorInfo':'usageLimitExceeded','message':'SYNTHETIC private provider details'}}})
@@ -706,19 +836,21 @@ for line in sys.stdin:
    send({'method':'error','params':{'threadId':'thread-test','turnId':'turn-test','willRetry':False,'error':{'codexErrorInfo':'serverOverloaded'}}})
    continue
   text='not JSON' if mode=='invalid' else '{"facts":[]}'
-  if stage in ['extract','repair'] and mode in ['batches','late_failure','large','transient','bad_evidence','repair','bad_subject']:
+  if stage in ['extract','repair','audit'] and mode in ['batches','late_failure','large','transient','bad_evidence','repair','bad_subject','unknown_subject']:
    assert sum(len(s['text'].encode('utf-8')) for s in source['segments'])<=12000
    facts=[]
    for s in source['segments']:
     value=re.search(r'Steuer-ID: ([0-9]+)',s['text']).group(1)
     facts.append({'property':'person.tax_id','value':value,'segment_id':s['segment_id'],'quote':value,'subject_quote':'Erika Beispiel'})
-   if mode=='bad_evidence' or (mode=='repair' and turns==1): facts[-1]['quote']='invented '+facts[-1]['value']
-   if mode=='bad_subject': facts[-1]['subject_quote']='Unknown Person'
+   if (mode=='bad_evidence' and any(s['segment_id']=='segment-4' for s in source['segments'])) or (mode=='repair' and turns==1): facts[-1]['quote']='invented '+facts[-1]['value']
+   if mode=='bad_subject' and any(s['segment_id']=='segment-4' for s in source['segments']): facts[-1]['subject_quote']='Unknown Person'
+   if mode=='unknown_subject':
+    for fact in facts: fact['subject_quote']=''
    text=json.dumps({'facts':facts})
    with open(sys.argv[0]+'.calls','a') as log: log.write(json.dumps([s['segment_id'] for s in source['segments']])+'\n')
 
   if mode=='audit_missing':
-   assert source.get('document_profile',{}).get('document_type')=='generic'
+   if stage=='extract': assert source['document_profile']['document_kind']['choice']=='other'
    assert stage in ['extract','audit']
    facts=[]
    if stage=='audit':
@@ -790,6 +922,9 @@ for line in sys.stdin:
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
+        assert!(args.contains(&"model_provider=\"me-import-openai\"".into()));
+        assert!(args.contains(&"model_providers.me-import-openai.request_max_retries=0".into()));
+        assert!(args.contains(&"model_providers.me-import-openai.stream_max_retries=0".into()));
         assert!(args.contains(&"default_permissions=\"me-inbox\"".into()));
         assert!(args.contains(&"permissions.me-inbox.network.enabled=false".into()));
         assert!(args.contains(&"features.plugins=false".into()));

@@ -1,5 +1,10 @@
 # ME: agreed direction
 
+> Current account, independent-client, sync, and login requirements are recorded
+> in [the September 20 decision](architecture/2026-09-20/ACCOUNTS-SYNC-AND-LOGINS.md).
+> Those decisions supersede conflicting sequencing and product assumptions below;
+> they do not claim the planned capabilities are already implemented.
+
 > Historical product outline. The September 14/15 architecture in
 > `docs/architecture/` supersedes the OpenAI-exclusive Pro assumptions below.
 > The first desktop vault implementation is tracked in

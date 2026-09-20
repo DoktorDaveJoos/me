@@ -48,7 +48,7 @@ impl Vault {
     }
 
     pub fn next_automatic_document_excluding(&self, active: &[u64]) -> Result<Option<u64>> {
-        if !self.settings()?.automatic_evaluation {
+        if !self.settings()?.automatic_evaluation || self.import_pause_reason()?.is_some() {
             return Ok(None);
         }
         let mut stmt=self.db.prepare("SELECT i.local_id,i.extension FROM document_evaluation e JOIN collection_item i ON i.source_id=e.source_id JOIN source s ON s.id=e.source_id WHERE e.state='queued' AND i.kind='document' AND i.deleted_at IS NULL AND s.sensitivity!='credential' AND s.retention='keep' AND NOT EXISTS(SELECT 1 FROM job j WHERE j.source_id=e.source_id AND j.kind='extract_facts' AND j.state IN ('done','needs_review')) ORDER BY i.local_id")?;
@@ -66,6 +66,11 @@ impl Vault {
     pub fn begin_evaluation(&mut self, item: u64, automatic: bool) -> Result<bool> {
         if automatic && !self.settings()?.automatic_evaluation {
             return Ok(false);
+        }
+        if self.import_pause_reason()?.is_some() {
+            return Err(Error::Validation(
+                "Automatic imports are paused. Resume the queue after checking the provider connection or usage limit.",
+            ));
         }
         let row:Option<(String,String,String)>=self.db.query_row("SELECT e.state,s.sensitivity,i.extension FROM document_evaluation e JOIN collection_item i ON i.source_id=e.source_id JOIN source s ON s.id=e.source_id WHERE i.local_id=? AND i.kind='document' AND i.deleted_at IS NULL AND s.retention='keep'",[sql_id(item)?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let (state, sensitivity, extension) =
@@ -86,6 +91,8 @@ impl Vault {
             ));
         }
         if !automatic && state == "done" && self.evaluation_warning(item)?.is_none() {
+            self.db.execute("DELETE FROM import_step_cache WHERE source_id=(SELECT source_id FROM collection_item WHERE local_id=?)", [sql_id(item)?])?;
+            self.db.execute("DELETE FROM import_step_progress WHERE source_id=(SELECT source_id FROM collection_item WHERE local_id=?)", [sql_id(item)?])?;
             self.db.execute("DELETE FROM extraction_checkpoint WHERE source_id=(SELECT source_id FROM collection_item WHERE local_id=?)", [sql_id(item)?])?;
         }
         self.db.execute("UPDATE document_evaluation SET state='running',error_message=NULL WHERE source_id=(SELECT source_id FROM collection_item WHERE local_id=?)",[sql_id(item)?])?;

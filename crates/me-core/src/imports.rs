@@ -19,6 +19,9 @@ impl ImportStage {
         Self::Extracting,
         Self::Verifying,
     ];
+    pub fn index(self) -> Option<usize> {
+        Self::STEPS.iter().position(|stage| *stage == self)
+    }
     pub fn label(self) -> &'static str {
         match self {
             Self::Normalizing => "Normalization",
@@ -29,7 +32,7 @@ impl ImportStage {
             Self::Complete => "Ready",
         }
     }
-    fn key(self) -> &'static str {
+    pub fn key(self) -> &'static str {
         match self {
             Self::Normalizing => "normalizing",
             Self::Interpreting => "interpreting",
@@ -39,7 +42,7 @@ impl ImportStage {
             Self::Complete => "complete",
         }
     }
-    fn from_key(key: &str) -> Self {
+    pub fn from_key(key: &str) -> Self {
         match key {
             "interpreting" => Self::Interpreting,
             "context" => Self::Context,
@@ -63,6 +66,9 @@ pub struct ImportJob {
     pub processable: bool,
     pub proposals: u32,
     pub questions: u32,
+    pub steps: [crate::StepProgress; 5],
+    pub usage: crate::ImportUsage,
+    pub failure: Option<crate::ImportFailure>,
 }
 impl Vault {
     /// Keep an explicitly attached Search form out of automatic fact extraction.
@@ -72,8 +78,8 @@ impl Vault {
         Ok(())
     }
     pub fn import_jobs(&self) -> Result<Vec<ImportJob>> {
-        let mut stmt = self.db.prepare("SELECT i.local_id,i.title,e.state,coalesce(p.stage,'normalizing'),coalesce(p.current,0),coalesce(p.total,0),e.error_message,e.warning_message,i.extension,s.sensitivity,(SELECT count(*) FROM ai_proposal a WHERE a.source_id=e.source_id AND a.state='proposed'),(SELECT count(*) FROM ai_question q WHERE q.source_id=e.source_id AND q.state='pending') FROM document_evaluation e JOIN collection_item i ON i.source_id=e.source_id JOIN source s ON s.id=i.source_id LEFT JOIN import_progress p ON p.source_id=e.source_id WHERE i.deleted_at IS NULL AND s.retention='keep' ORDER BY i.local_id DESC")?;
-        Ok(stmt
+        let mut stmt = self.db.prepare("SELECT i.local_id,i.title,e.state,coalesce(p.stage,'normalizing'),coalesce(p.current,0),coalesce(p.total,0),e.error_message,e.warning_message,i.extension,s.sensitivity,(SELECT count(*) FROM ai_proposal a WHERE a.source_id=e.source_id AND a.state='proposed'),(SELECT count(*) FROM ai_question q WHERE q.source_id=e.source_id AND q.state='pending'),p.error_code,p.error_provider FROM document_evaluation e JOIN collection_item i ON i.source_id=e.source_id JOIN source s ON s.id=i.source_id LEFT JOIN import_progress p ON p.source_id=e.source_id WHERE i.kind='document' AND i.deleted_at IS NULL AND s.retention='keep' ORDER BY i.local_id DESC")?;
+        let mut jobs = stmt
             .query_map([], |r| {
                 let extension: String = r.get(8)?;
                 let sensitivity: String = r.get(9)?;
@@ -88,13 +94,31 @@ impl Vault {
                     warning: r.get(7)?,
                     proposals: r.get(10)?,
                     questions: r.get(11)?,
+                    steps: [crate::StepProgress::default(); 5],
+                    usage: crate::ImportUsage::default(),
+                    failure: r.get::<_, Option<String>>(12)?.map(|code| {
+                        crate::ImportFailure::new(
+                            crate::ImportProvider::from_key(
+                                &r.get::<_, String>(13).unwrap_or_default(),
+                            ),
+                            crate::ImportErrorKind::from_key(&code),
+                            r.get::<_, Option<String>>(6)
+                                .unwrap_or_default()
+                                .unwrap_or_default(),
+                        )
+                    }),
                     processable: sensitivity != "credential" && processable_document(&extension),
                 })
             })?
-            .collect::<std::result::Result<Vec<_>, _>>()?)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for job in &mut jobs {
+            job.steps = self.import_steps(job.item)?;
+            job.usage = self.import_usage(job.item)?;
+        }
+        Ok(jobs)
     }
     pub fn begin_import_progress(&mut self, item: u64, run: &str) -> Result<()> {
-        self.db.execute("INSERT INTO import_progress(source_id,run_id,stage) SELECT source_id,?,'normalizing' FROM collection_item WHERE local_id=? ON CONFLICT(source_id) DO UPDATE SET run_id=excluded.run_id,stage=excluded.stage,current=0,total=0", params![run,sql_id(item)?])?;
+        self.db.execute("INSERT INTO import_progress(source_id,run_id,stage) SELECT source_id,?,'normalizing' FROM collection_item WHERE local_id=? AND kind='document' AND EXISTS(SELECT 1 FROM document_evaluation e WHERE e.source_id=collection_item.source_id AND e.state='running') ON CONFLICT(source_id) DO UPDATE SET run_id=excluded.run_id,stage=excluded.stage,current=0,total=0,error_code=NULL,error_provider=NULL", params![run,sql_id(item)?])?;
         Ok(())
     }
     /// Counters describe real pages/sections; zero means an unknown total.
@@ -106,7 +130,12 @@ impl Vault {
         current: u32,
         total: u32,
     ) -> Result<bool> {
-        let changed = self.db.execute("UPDATE import_progress SET stage=?,current=?,total=? WHERE source_id=(SELECT source_id FROM collection_item WHERE local_id=?) AND run_id=? AND EXISTS(SELECT 1 FROM document_evaluation e WHERE e.source_id=import_progress.source_id AND e.state='running')", params![stage.key(),current.min(total),total,sql_id(item)?,run])?;
+        let tx = self.db.transaction()?;
+        let changed = tx.execute("UPDATE import_progress SET stage=?,current=?,total=? WHERE source_id=(SELECT source_id FROM collection_item WHERE local_id=?) AND run_id=? AND EXISTS(SELECT 1 FROM document_evaluation e WHERE e.source_id=import_progress.source_id AND e.state='running')", params![stage.key(),current.min(total),total,sql_id(item)?,run])?;
+        if changed == 1 && stage != ImportStage::Complete {
+            tx.execute("INSERT INTO import_step_progress(source_id,stage,current,total) SELECT source_id,?,?,? FROM collection_item WHERE local_id=? AND kind='document' ON CONFLICT(source_id,stage) DO UPDATE SET current=excluded.current,total=excluded.total",params![stage.key(),current.min(total),total,sql_id(item)?])?;
+        }
+        tx.commit()?;
         Ok(changed == 1)
     }
 }

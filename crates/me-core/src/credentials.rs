@@ -304,7 +304,10 @@ fn attachment_paths(item: &Value, files: &BTreeMap<String, String>) -> Result<Ve
                         if id.is_empty() {
                             continue;
                         }
-                        let prefix = format!("files/{id}___");
+                        // Current exports use two underscores; the published format
+                        // also documents three. Keep the delimiter so doc1 cannot
+                        // accidentally resolve to a file belonging to doc10.
+                        let prefix = format!("files/{id}__");
                         let exact = format!("files/{id}");
                         let matches: Vec<_> = files
                             .keys()
@@ -340,6 +343,34 @@ fn attachment_paths(item: &Value, files: &BTreeMap<String, String>) -> Result<Ve
     let mut found = BTreeSet::new();
     visit(item, files, &mut found)?;
     Ok(found.into_iter().collect())
+}
+
+// Prefer the original filename metadata: with both delimiters supported, a
+// filename beginning with an underscore cannot be inferred from the ZIP name.
+fn attachment_filename<'a>(item: &'a Value, path: &str) -> Option<&'a str> {
+    match item {
+        Value::Object(object) => {
+            if let Some(id) = object
+                .get("documentId")
+                .or_else(|| object.get("documentID"))
+                .and_then(Value::as_str)
+                && let Some(name) = object.get("fileName").and_then(Value::as_str)
+                && let Some(suffix) = path.strip_prefix("files/").and_then(|p| p.strip_prefix(id))
+                && ["__", "___"]
+                    .iter()
+                    .any(|separator| suffix.strip_prefix(separator) == Some(name))
+            {
+                return Some(name);
+            }
+            object
+                .values()
+                .find_map(|value| attachment_filename(value, path))
+        }
+        Value::Array(array) => array
+            .iter()
+            .find_map(|value| attachment_filename(value, path)),
+        _ => None,
+    }
 }
 
 fn fields(item: &Value) -> Result<Vec<CredentialField>> {
@@ -512,12 +543,15 @@ impl Vault {
         let attachments = paths
             .into_iter()
             .map(|path| {
-                let name = path
-                    .rsplit('/')
-                    .next()
+                let name = attachment_filename(&data.0, &path)
+                    .or_else(|| {
+                        path.rsplit('/')
+                            .next()?
+                            .split_once("__")
+                            .map(|(_, name)| name.strip_prefix('_').unwrap_or(name))
+                    })
                     .unwrap_or("Attachment")
-                    .split_once("___")
-                    .map_or_else(|| "Attachment".to_string(), |(_, n)| n.to_string());
+                    .to_string();
                 CredentialAttachment { name, path }
             })
             .collect();
@@ -738,6 +772,84 @@ mod tests {
         no_plaintext(&dir.path().join("restored"));
     }
     #[test]
+    fn imports_two_and_three_underscore_attachments_with_original_names_and_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        for (index, separator) in ["__", "___"].iter().enumerate() {
+            let mut item = login();
+            item["uuid"] = json!(format!("item{index}"));
+            item["details"]["documentAttributes"] =
+                json!({"documentId":"doc1","fileName":"_Key ___ backup 🗝.txt"});
+            // Cover section attachments and the alternate documentID spelling too.
+            item["details"]["sections"][0]["fields"].as_array_mut().unwrap().push(
+                json!({"title":"Recovery file","value":{"file":{"documentID":"doc2","fileName":"recovery.txt"}}}),
+            );
+            let document_path = format!("files/doc1{separator}_Key ___ backup 🗝.txt");
+            let attachment_path = format!("files/doc2{separator}recovery.txt");
+            let original = archive(
+                &data(vec![item]),
+                &[
+                    (&document_path, b"SYNTHETIC-DOCUMENT"),
+                    (&attachment_path, b"SYNTHETIC-ATTACHMENT"),
+                    ("files/doc10__unrelated.txt", b"unrelated"),
+                ],
+            );
+            // Use the file entry point as the native picker does.
+            let export = dir.path().join(format!("export{index}.1PUX"));
+            fs::write(&export, original.as_slice()).unwrap();
+            let import = OnePasswordImport::read(&export).unwrap();
+            assert_eq!(v.preview_onepassword(&import).unwrap().new, 1);
+            assert_eq!(v.import_onepassword(&import).unwrap().new, 1);
+            let item_id: i64 =
+                v.db.query_row(
+                    "SELECT item_id FROM credential_record WHERE item_uuid=?",
+                    [format!("item{index}")],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let details = v.credential_details(item_id as u64).unwrap();
+            assert_eq!(details.attachments.len(), 2);
+            assert_eq!(details.attachments[0].name, "_Key ___ backup 🗝.txt");
+            assert_eq!(details.attachments[1].name, "recovery.txt");
+            for (attachment, expected) in
+                [b"SYNTHETIC-DOCUMENT".as_slice(), b"SYNTHETIC-ATTACHMENT"]
+                    .iter()
+                    .enumerate()
+            {
+                let destination = dir.path().join(format!("file{index}-{attachment}.txt"));
+                v.export_credential_attachment(item_id as u64, attachment, &destination)
+                    .unwrap();
+                assert_eq!(fs::read(destination).unwrap(), *expected);
+            }
+            let recovered = dir.path().join(format!("recovered{index}.1pux"));
+            v.export_credential_original(item_id as u64, &recovered)
+                .unwrap();
+            assert_eq!(fs::read(recovered).unwrap(), *original);
+            assert_eq!(v.import_onepassword(&import).unwrap().duplicates, 1);
+        }
+    }
+    #[test]
+    fn attachment_resolution_rejects_ambiguous_names_and_id_prefix_collisions() {
+        let mut item = login();
+        item["details"]["documentAttributes"] = json!({"documentId":"doc1"});
+        let input = data(vec![item]);
+        for extras in [
+            vec![
+                ("files/doc1__key.txt", b"a".as_slice()),
+                ("files/doc1___key.txt", b"b"),
+            ],
+            vec![
+                ("files/doc1__key.txt", b"a".as_slice()),
+                ("files/doc1__other.txt", b"b"),
+            ],
+            vec![("files/doc10__key.txt", b"a".as_slice())],
+            vec![("files/doc1_key.txt", b"a".as_slice())],
+        ] {
+            assert!(OnePasswordImport::from_bytes(archive(&input, &extras)).is_err());
+        }
+    }
+
+    #[test]
     fn duplicates_are_idempotent_and_changed_versions_do_not_overwrite() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = vault(&dir);
@@ -785,6 +897,114 @@ mod tests {
         let import = OnePasswordImport::from_bytes(archive(&input, &[])).unwrap();
         assert_eq!(v.import_onepassword(&import).unwrap().new, 4);
         assert_eq!(v.collection("", false).unwrap().total, 4);
+    }
+    #[test]
+    fn local_search_finds_all_collection_kinds_and_imported_categories() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        let mut entries = Vec::new();
+        for (index, category) in ["001", "002", "003", "004", "999"].iter().enumerate() {
+            let mut entry = login();
+            entry["uuid"] = json!(format!("search-{index}"));
+            entry["overview"]["title"] = json!(format!("Instagram {index}"));
+            entry["categoryUuid"] = json!(category);
+            if index == 4 {
+                entry["state"] = json!("archived");
+            }
+            entries.push(entry);
+        }
+        v.import_onepassword(&batch(entries)).unwrap();
+        let note = v
+            .save_note(None, "Instagram reminder", "Synthetic account reference")
+            .unwrap();
+        let path = dir.path().join("Instagram guide.txt");
+        fs::write(&path, "UniqueIndexedContent").unwrap();
+        let document = v
+            .import_document(&path, "filename-match", crate::DocumentClass::Unclassified)
+            .unwrap();
+        let path = dir.path().join("Other.txt");
+        fs::write(&path, "Instagram content match").unwrap();
+        let content = v
+            .import_document(&path, "content-match", crate::DocumentClass::Personal)
+            .unwrap();
+        v.enable_text_search(content).unwrap();
+        let path = dir.path().join("Instagram recovery.txt");
+        fs::write(&path, "HiddenRecoverySecret").unwrap();
+        let restricted = v
+            .import_document(
+                &path,
+                "credential-document",
+                crate::DocumentClass::Credential,
+            )
+            .unwrap();
+        // Exercise the same collection query as the main Search page, including
+        // existing imports after unlocking, with no AI or provider dependency.
+        drop(v);
+        let v = Vault::unlock(&dir.path().join("vault"), PASSWORD).unwrap();
+        for query in ["Instagram", "  INSTAGRAM  ", "insta"] {
+            let result = v.collection(query, false).unwrap();
+            assert_eq!(result.items.len(), 9, "{query}");
+            assert!(result.get(note).is_some());
+            assert!(result.get(document).is_some());
+            assert!(result.get(content).is_some());
+            assert!(result.get(restricted).is_some());
+            assert_eq!(
+                result
+                    .items
+                    .iter()
+                    .filter(|item| matches!(item.content, crate::Content::Credential { .. }))
+                    .count(),
+                5
+            );
+        }
+        assert!(
+            v.collection("UniqueIndexedContent", false)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(
+            v.collection("doesnotexist", false)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(v.collection("86402", false).unwrap().items.is_empty());
+        assert!(
+            v.collection("HiddenRecoverySecret", false)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(v.collection("personal", false).unwrap().items.len(), 5);
+        v.db.execute(
+            "UPDATE collection_item SET deleted_at='synthetic' WHERE local_id=?",
+            [sql_id(document).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(v.collection("Instagram", false).unwrap().items.len(), 8);
+    }
+    #[test]
+    fn knowledge_map_exposes_credential_metadata_without_protected_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        v.import_onepassword(&batch(vec![login()])).unwrap();
+        let graph = v.knowledge_map().unwrap();
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].kind, crate::KnowledgeKind::Credential);
+        assert_eq!(graph.nodes[0].status, crate::KnowledgeStatus::Restricted);
+        let displayed = format!("{graph:?}");
+        for secret in [
+            SECRET,
+            "86402",
+            "001234",
+            "TESTSECRET",
+            "private note",
+            "tester",
+        ] {
+            assert!(!displayed.contains(secret));
+        }
+        assert!(graph.edges.is_empty());
     }
     #[test]
     fn credentials_never_enter_search_content_ai_jobs_or_agent_scope() {
@@ -939,7 +1159,7 @@ mod tests {
         let mut v = vault(&dir);
         v.save_note(None, "Existing", "original content").unwrap();
         v.db.execute_batch(
-            "DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; PRAGMA user_version=5;",
+            "DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; PRAGMA user_version=5;",
         )
         .unwrap();
         drop(v);

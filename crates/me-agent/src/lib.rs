@@ -22,3 +22,5 @@ pub fn default_vault_path() -> Option<PathBuf> {
     };
     Some(base.join("ME/vault"))
 }
+
+pub mod typesafe;

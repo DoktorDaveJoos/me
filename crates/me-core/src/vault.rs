@@ -13,6 +13,10 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+#[cfg(any(debug_assertions, feature = "development-tools"))]
+#[path = "development.rs"]
+mod development;
+
 const MAX_FILE: u64 = 64 * 1024 * 1024;
 const MAX_TEXT: usize = 1024 * 1024;
 const SCHEMA: &str = include_str!("../migrations/001_vault.sql");
@@ -120,6 +124,8 @@ impl Vault {
             tx.execute_batch(include_str!("../migrations/007_browser.sql"))?;
             tx.execute_batch(include_str!("../migrations/008_data_recent.sql"))?;
             tx.execute_batch(include_str!("../migrations/009_import_progress.sql"))?;
+            tx.execute_batch(include_str!("../migrations/010_import_recovery.sql"))?;
+            tx.execute_batch(include_str!("../migrations/011_knowledge_map.sql"))?;
             let profile = id();
             tx.execute("INSERT INTO entity(id,kind,label,created_at) VALUES(?,'person','Ich',strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [&profile])?;
             tx.execute(
@@ -152,7 +158,7 @@ impl Vault {
         let keys = header.unlock(password)?;
         let mut db = database(&root.join("vault.db"), &keys[..32], false)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(1..=9).contains(&version) {
+        if !(1..=11).contains(&version) {
             return Err(Error::Format);
         }
         if version == 1 {
@@ -195,6 +201,16 @@ impl Vault {
             tx.execute_batch(include_str!("../migrations/009_import_progress.sql"))?;
             tx.commit()?;
         }
+        if version < 10 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/010_import_recovery.sql"))?;
+            tx.commit()?;
+        }
+        if version < 11 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/011_knowledge_map.sql"))?;
+            tx.commit()?;
+        }
         let vault_id: String =
             db.query_row("SELECT vault_id FROM vault_meta", [], |row| row.get(0))?;
         if vault_id != header.vault_id {
@@ -216,7 +232,8 @@ impl Vault {
             "UPDATE extraction_run SET status='failed' WHERE status='running'",
             [],
         )?;
-        vault.db.execute("UPDATE document_evaluation SET state=CASE WHEN (SELECT automatic_evaluation FROM app_settings WHERE singleton=1)=1 THEN 'queued' ELSE 'manual' END,error_message=NULL WHERE state='running'", [])?;
+        vault.db.execute("UPDATE import_progress SET error_code='interrupted',error_provider='local' WHERE source_id IN (SELECT source_id FROM document_evaluation WHERE state='running')", [])?;
+        vault.db.execute("UPDATE document_evaluation SET state='failed',error_message='Processing was interrupted. Resume to reuse saved steps.' WHERE state='running'", [])?;
         Ok(vault)
     }
 
@@ -247,7 +264,7 @@ impl Vault {
         let mut stmt = self.db.prepare("SELECT i.local_id,i.stable_id,i.title,i.kind,a.value_json,i.extension,i.pinned,CASE WHEN EXISTS(SELECT 1 FROM ai_question q WHERE q.source_id=i.source_id AND q.state='pending') THEN 'needs_answer' WHEN aj.state='needs_review' THEN 'needs_review' WHEN aj.state='done' THEN 'done' WHEN e.state='done' AND aj.state IS NULL THEN 'manual' ELSE coalesce(e.state,j.state,'manual') END,c.category,c.vault_name,c.archived
             FROM collection_item i LEFT JOIN assertion a ON a.id=i.current_assertion_id LEFT JOIN job j ON j.source_id=i.source_id AND j.kind='index_text' LEFT JOIN job aj ON aj.source_id=i.source_id AND aj.kind='extract_facts' LEFT JOIN document_evaluation e ON e.source_id=i.source_id LEFT JOIN credential_record c ON c.item_id=i.local_id
             WHERE i.deleted_at IS NULL AND (?1=0 OR i.pinned=1)
-            AND (?2='' OR i.source_id IN (SELECT s.source_id FROM segment_fts JOIN source_segment s ON s.rowid=segment_fts.rowid WHERE segment_fts MATCH ?2) OR (i.kind='credential' AND instr(lower(i.title || ' ' || c.vault_name),lower(?3))>0))
+            AND (?2='' OR i.source_id IN (SELECT s.source_id FROM segment_fts JOIN source_segment s ON s.rowid=segment_fts.rowid WHERE segment_fts MATCH ?2) OR instr(lower(i.title || ' ' || coalesce(c.vault_name,'')),lower(?3))>0)
             ORDER BY i.pinned DESC,i.local_id DESC LIMIT ?4")?;
         let items = stmt
             .query_map(
@@ -802,6 +819,36 @@ mod recovery_tests {
         }
     }
     #[test]
+    fn schema_ten_migrates_knowledge_without_changing_existing_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("vault");
+        let mut vault = Vault::create(&root, "synthetic-migration-password").unwrap();
+        let item = vault
+            .save_note(None, "Synthetic detail", "Preserved value")
+            .unwrap();
+        vault
+            .db
+            .execute_batch(
+                "DROP TABLE knowledge_view; DROP TABLE knowledge_position; PRAGMA user_version=10;",
+            )
+            .unwrap();
+        drop(vault);
+        let mut vault = Vault::unlock(&root, "synthetic-migration-password").unwrap();
+        assert_eq!(
+            vault
+                .db
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            11
+        );
+        let graph = vault.knowledge_map().unwrap();
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].item, Some(item));
+        assert_eq!(graph.nodes[0].value, "Preserved value");
+        vault.verify().unwrap();
+    }
+
+    #[test]
     fn schema_one_migration_preserves_existing_free_notes() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("vault");
@@ -809,7 +856,7 @@ mod recovery_tests {
         vault
             .save_note(None, "Legacy", "SYNTHETIC migration")
             .unwrap();
-        vault.db.execute_batch("DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; DROP TABLE ai_question; DROP TABLE extraction_checkpoint; DROP TABLE document_evaluation; DROP TABLE app_settings; DROP TABLE ai_proposal; DELETE FROM property_definition WHERE key LIKE 'person.%'; PRAGMA user_version=1;").unwrap();
+        vault.db.execute_batch("DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; ALTER TABLE import_progress DROP COLUMN error_code; ALTER TABLE import_progress DROP COLUMN error_provider; DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; DROP TABLE ai_question; DROP TABLE extraction_checkpoint; DROP TABLE document_evaluation; DROP TABLE app_settings; DROP TABLE ai_proposal; DELETE FROM property_definition WHERE key LIKE 'person.%'; PRAGMA user_version=1;").unwrap();
         drop(vault);
         let vault = Vault::unlock(&root, "synthetic-passphrase-2026").unwrap();
         assert_eq!(vault.collection("migration", false).unwrap().total, 1);
@@ -817,7 +864,7 @@ mod recovery_tests {
             .db
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 11);
         let facts = vault
             .facts_get(&vault.shareable_scope().unwrap(), &["person.tax_id".into()])
             .unwrap();
@@ -837,7 +884,7 @@ mod recovery_tests {
         vault
             .db
             .execute_batch(
-                "DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; DROP TABLE ai_question; DROP TABLE extraction_checkpoint; DROP TABLE document_evaluation; DROP TABLE app_settings; PRAGMA user_version=2;",
+                "DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; ALTER TABLE import_progress DROP COLUMN error_code; ALTER TABLE import_progress DROP COLUMN error_provider; DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; DROP TABLE ai_question; DROP TABLE extraction_checkpoint; DROP TABLE document_evaluation; DROP TABLE app_settings; PRAGMA user_version=2;",
             )
             .unwrap();
         drop(vault);
@@ -854,7 +901,7 @@ mod recovery_tests {
         let mut vault = Vault::create(&root, "synthetic-passphrase").unwrap();
         vault.set_automatic_evaluation(false).unwrap();
         vault.save_note(None, "Synthetic", "Preserved").unwrap();
-        vault.db.execute_batch("DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; DROP TABLE ai_question; DROP TABLE extraction_checkpoint; ALTER TABLE document_evaluation DROP COLUMN warning_message; PRAGMA user_version=3;").unwrap();
+        vault.db.execute_batch("DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; ALTER TABLE import_progress DROP COLUMN error_code; ALTER TABLE import_progress DROP COLUMN error_provider; DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; DROP TABLE ai_question; DROP TABLE extraction_checkpoint; ALTER TABLE document_evaluation DROP COLUMN warning_message; PRAGMA user_version=3;").unwrap();
         drop(vault);
         let vault = Vault::unlock(&root, "synthetic-passphrase").unwrap();
         assert!(!vault.settings().unwrap().automatic_evaluation);
@@ -864,7 +911,7 @@ mod recovery_tests {
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            9
+            11
         );
     }
 
@@ -882,7 +929,7 @@ mod recovery_tests {
         vault.db.execute("UPDATE document_evaluation SET state='done',warning_message='6 unbelegte Angaben ausgelassen.'", []).unwrap();
         vault
             .db
-            .execute_batch("DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; DROP TABLE ai_question; PRAGMA user_version=4;")
+            .execute_batch("DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; ALTER TABLE import_progress DROP COLUMN error_code; ALTER TABLE import_progress DROP COLUMN error_provider; DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; DROP TABLE ai_question; PRAGMA user_version=4;")
             .unwrap();
         drop(vault);
         let mut vault = Vault::unlock(&root, "synthetic-passphrase").unwrap();
@@ -897,6 +944,32 @@ mod recovery_tests {
                 .contains("Analyze again")
         );
         assert!(vault.begin_evaluation(item, false).unwrap());
+    }
+
+    #[test]
+    fn schema_nine_preserves_documents_and_progress_when_adding_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("vault");
+        let mut v = Vault::create(&root, "synthetic-passphrase").unwrap();
+        let file = temp.path().join("letter.txt");
+        fs::write(&file, "SYNTHETIC").unwrap();
+        let item = v
+            .import_document(&file, "letter", DocumentClass::Personal)
+            .unwrap();
+        v.begin_evaluation(item, false).unwrap();
+        v.begin_import_progress(item, "old-run").unwrap();
+        v.update_import_progress(item, "old-run", crate::ImportStage::Extracting, 1, 3)
+            .unwrap();
+        v.db.execute_batch("DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; ALTER TABLE import_progress DROP COLUMN error_code; ALTER TABLE import_progress DROP COLUMN error_provider; PRAGMA user_version=9;").unwrap();
+        drop(v);
+        let v = Vault::unlock(&root, "synthetic-passphrase").unwrap();
+        let jobs = v.import_jobs().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].state, "failed");
+        assert_eq!(jobs[0].stage, crate::ImportStage::Extracting);
+        assert_eq!((jobs[0].current, jobs[0].total), (1, 3));
+        assert_eq!(jobs[0].usage.openai_limit, 12);
+        assert!(v.import_pause_reason().unwrap().is_none());
     }
 
     #[test]

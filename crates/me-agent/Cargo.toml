@@ -11,6 +11,8 @@ name = "me-mcp"
 path = "src/main.rs"
 
 [dependencies]
+curl = "0.4"
+zeroize = "1"
 me-diagnostics = { path = "../me-diagnostics" }
 me-core.workspace = true
 serde = { version = "1", features = ["derive"] }

@@ -153,6 +153,7 @@ pub struct ExtractedFact {
     pub value: String,
     pub segment_id: String,
     pub quote: String,
+    /// Exact associated party from the source; empty routes the value to ownership review.
     pub subject_quote: String,
     /// Exact period/account/section wording from this source; empty if unavailable.
     #[serde(default)]

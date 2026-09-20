@@ -53,7 +53,7 @@ fn progress_survives_restart_and_stale_workers_cannot_overwrite_a_retry() {
     drop(vault);
     let mut vault = Vault::unlock(&root, PASSWORD).unwrap();
     let jobs = vault.import_jobs().unwrap();
-    assert_eq!(jobs[0].state, "queued");
+    assert_eq!(jobs[0].state, "failed");
     assert_eq!(jobs[0].stage, ImportStage::Verifying);
     assert_eq!((jobs[0].current, jobs[0].total), (2, 3));
     assert!(
@@ -61,7 +61,7 @@ fn progress_survives_restart_and_stale_workers_cannot_overwrite_a_retry() {
             .update_import_progress(item, "first", ImportStage::Complete, 0, 0)
             .unwrap()
     );
-    vault.begin_evaluation(item, true).unwrap();
+    vault.begin_evaluation(item, false).unwrap();
     vault.begin_import_progress(item, "retry").unwrap();
     assert!(
         !vault

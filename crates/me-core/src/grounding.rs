@@ -155,11 +155,7 @@ pub fn ground_extraction(input: &ExtractionInput, output: ExtractionOutput) -> G
     };
     for mut fact in output.facts {
         let checked = (|| {
-            if fact.quote.is_empty()
-                || fact.quote.len() > 4000
-                || fact.subject_quote.trim().is_empty()
-                || fact.subject_quote.len() > 1000
-            {
+            if fact.quote.is_empty() || fact.quote.len() > 4000 || fact.subject_quote.len() > 1000 {
                 return Err("invalid_quote_size");
             }
             let segment = input
@@ -171,11 +167,15 @@ pub fn ground_extraction(input: &ExtractionInput, output: ExtractionOutput) -> G
                 quote_span(&segment.text, &fact.quote, true).ok_or("quote_not_in_segment")?;
             let value =
                 raw_value(&fact.property, &fact.value, quote).ok_or("value_not_in_quote")?;
-            let subject = input
-                .segments
-                .iter()
-                .find_map(|s| quote_span(&s.text, &fact.subject_quote, false))
-                .ok_or("subject_not_in_source")?;
+            let subject = if fact.subject_quote.trim().is_empty() {
+                ""
+            } else {
+                input
+                    .segments
+                    .iter()
+                    .find_map(|s| quote_span(&s.text, &fact.subject_quote, false))
+                    .ok_or("subject_not_in_source")?
+            };
             let context = if fact.context_quote.is_empty() {
                 String::new()
             } else {
@@ -205,7 +205,20 @@ pub fn ground_extraction(input: &ExtractionInput, output: ExtractionOutput) -> G
                 fact.value = value;
                 fact.subject_quote = subject;
                 fact.context_quote = context;
-                if !result.output.facts.iter().any(|old| same_fact(old, &fact)) {
+                if fact.subject_quote.is_empty() {
+                    // The value, quotation and context passed source checks.
+                    // Ownership is a user decision, never a reason to drop it.
+                    if !result
+                        .rejected
+                        .iter()
+                        .any(|old| same_fact(&old.fact, &fact))
+                    {
+                        result.rejected.push(RejectedFact {
+                            fact,
+                            code: "subject_unknown",
+                        });
+                    }
+                } else if !result.output.facts.iter().any(|old| same_fact(old, &fact)) {
                     result.output.facts.push(fact);
                 }
             }
@@ -321,6 +334,30 @@ mod tests {
         );
         assert!(checked.rejected.is_empty());
         assert_eq!(checked.output.facts[0].value, "1.2.1990");
+    }
+    #[test]
+    fn missing_owner_retains_exact_source_values_for_confirmation_without_hiding_bad_evidence() {
+        let mut candidate = fact("person.tax_id", "01234567890", "Steuer-ID: 01234567890");
+        candidate.subject_quote.clear();
+        let mut fabricated = candidate.clone();
+        fabricated.quote = "Invented 01234567890".into();
+        let mut context = candidate.clone();
+        context.context_quote = "Not in the source".into();
+        let result = ground_extraction(
+            &input(),
+            ExtractionOutput {
+                facts: vec![candidate.clone(), candidate, fabricated, context],
+            },
+        );
+        assert!(result.output.facts.is_empty());
+        assert_eq!(result.rejected.len(), 3);
+        let question = &result.rejected[0];
+        assert_eq!(question.code, "subject_unknown");
+        assert_eq!(question.fact.value, "01234 567890");
+        assert_eq!(question.fact.quote, "Steuer-ID:\u{a0}01234 567890");
+        assert!(question.fact.subject_quote.is_empty());
+        assert_eq!(result.rejected[1].code, "quote_not_in_segment");
+        assert_eq!(result.rejected[2].code, "context_not_in_source");
     }
     #[test]
     fn fabricated_quotes_values_subjects_and_source_ids_are_rejected_individually() {

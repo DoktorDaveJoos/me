@@ -46,6 +46,62 @@ fn facts(vault: &Vault) -> serde_json::Value {
 }
 
 #[test]
+fn ownerless_tax_id_is_asked_once_and_only_becomes_personal_after_confirmation() {
+    let (_temp, mut vault, item, input) = setup();
+    let mut candidate = fact(&input);
+    candidate.subject_quote.clear();
+    let grounded = me_core::ground_extraction(
+        &input,
+        ExtractionOutput {
+            facts: vec![candidate],
+        },
+    );
+    assert!(grounded.output.facts.is_empty());
+    vault
+        .finish_extraction_with_questions(&input, grounded.output, grounded.rejected)
+        .unwrap();
+    vault.finish_evaluation(item, None).unwrap();
+    let question = vault.review_questions(item).unwrap().remove(0);
+    assert!(question.reason.starts_with("Is this your tax ID?"));
+    assert!(question.claimed_subject.is_empty());
+    assert!(
+        question
+            .source_excerpt
+            .as_ref()
+            .unwrap()
+            .contains("01234567890")
+    );
+    assert!(vault.proposals(item).unwrap().is_empty());
+    assert_eq!(facts(&vault)["status"], "missing");
+    vault.begin_evaluation(item, false).unwrap();
+    let retry = vault.prepare_extraction(item, "synthetic").unwrap();
+    let mut candidate = fact(&retry);
+    candidate.subject_quote.clear();
+    let grounded = me_core::ground_extraction(
+        &retry,
+        ExtractionOutput {
+            facts: vec![candidate],
+        },
+    );
+    vault
+        .finish_extraction_with_questions(&retry, grounded.output, grounded.rejected)
+        .unwrap();
+    vault.finish_evaluation(item, None).unwrap();
+    let questions = vault.review_questions(item).unwrap();
+    assert_eq!(questions.len(), 1);
+    assert_eq!(questions[0].id, question.id);
+    vault
+        .answer_review_question(item, &question.id, Some(&question.value))
+        .unwrap();
+    assert!(vault.review_questions(item).unwrap().is_empty());
+    assert_eq!(facts(&vault)["value"], "01234567890");
+    assert_eq!(
+        facts(&vault)["candidates"][0]["locator"]["kind"],
+        "manual_confirmation"
+    );
+}
+
+#[test]
 fn unanswered_suggestions_persist_encrypted_and_only_explicit_answers_become_manual_facts() {
     let (temp, mut vault, item, input) = setup();
     let mut unknown = bad(&input, "invalid-value");

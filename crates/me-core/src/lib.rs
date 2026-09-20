@@ -4,6 +4,8 @@
 //! Keep GPUI and platform APIs in `me-app`; keep file I/O and expensive work
 //! outside the UI thread. The desktop calls the vault on a background worker.
 
+mod import_recovery;
+pub use import_recovery::*;
 mod imports;
 pub use imports::*;
 mod data_filter;
@@ -20,7 +22,10 @@ pub use grounding::*;
 mod documents;
 mod extraction_fields;
 mod knowledge;
+mod knowledge_layout;
+mod knowledge_map;
 pub use extraction_fields::document_field_label;
+pub use knowledge_map::*;
 mod model;
 mod review_questions;
 mod settings;

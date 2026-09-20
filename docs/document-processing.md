@@ -1,11 +1,13 @@
 # Import pipeline update — September 2026
 
-The current English flow is documented in [Import pipeline](import-pipeline.md).
-Files now require confirmation before intake. Imports shows per-file stage/progress;
-at most two document workers run concurrently. EML messages and supported attachments
-are decoded locally. The model pipeline is `document-v4`; context uses local guidance,
-not web search. The historical serial-flow descriptions below are superseded by this
-update. Existing parser limits, evidence checks and review rules still apply.
+The current flow is documented in [Import pipeline](import-pipeline.md) and
+[TypeSafe, recovery and spending controls](import-reliability.md). Files require
+confirmation. Imports shows overall and per-stage bars, recoverable steps and
+provider errors. Two workers run concurrently. Pipeline `document-v5` uses local
+parsing, TypeSafe decisions and small OpenAI extraction sections; no recursive
+splitting or automatic inference retries. Intermediate results and call allowances
+survive restarts. Context is local guidance, not web research. The historical
+serial-flow and retry descriptions below are superseded by this update.
 
 # Lokale Dokumentverarbeitung
 
@@ -65,18 +67,19 @@ Makros, externe Verweise und XML-DTDs werden nicht ausgeführt bzw. aufgelöst.
   maximal 3200 Pixel Kantenlänge; Bilder über 100 Megapixel werden abgewiesen.
 - Office: höchstens 4096 ZIP-Einträge, 100 ausgewählte Textbestandteile,
   8 MiB pro XML-Datei und 16 MiB insgesamt. Keine entpackten Dateien auf dem Datenträger.
-- **KI:** bis zu 8 MiB erkannten Text vollständig in Aufrufen mit jeweils höchstens
-  12.000 Textbytes verarbeiten; Grenzen liegen zwischen unveränderten Quellsegmenten.
-  Ein überlappendes Segment erhält Kontext an der Grenze. Bei Kontext- oder
-  Ausgabegrenzen werden Abschnitte bis zu dreimal weiter halbiert.
-  Jeder Aufruf verwendet einen eigenen flüchtigen Thread. Ab 96 Vorschlägen wird
-  ein Abschnitt weiter geteilt; Abschneiden wird nicht als Erfolg behandelt.
+- **KI:** bis zu 8 MiB erkannten Text in geplanten Abschnitten mit üblicherweise
+  höchstens 3.200 Textbytes verarbeiten; Grenzen liegen zwischen unveränderten
+  Quellsegmenten. Ein überlappendes Segment erhält benachbarten Kontext.
+  Jeder OpenAI-Aufruf verwendet einen eigenen flüchtigen Thread. Ab 96 Vorschlägen
+  stoppt der Abschnitt mit sichtbarem Fehler; es gibt keine rekursiven Teilungen.
+  Pro Datei gelten persistente Aufruf- und Tokenbudgets. Große Dateien können vor
+  Abschluss eine ausdrückliche Erweiterung benötigen.
   Insgesamt höchstens 1024 unterschiedliche Vorschläge. Geprüfte Abschnitte werden
   verschlüsselt zwischengespeichert und bei Wiederholung wiederverwendet.
   Transportfehler oder Abbruch in einem späteren Abschnitt ergeben keinen als
   vollständig dargestellten Teilerfolg; fertige Abschnitte bleiben für Wiederaufnahme erhalten.
-  GPT-5.6 Sol mit mittlerem Reasoning erkennt Dokumentart und Aufbau, extrahiert
-  alle belegten Angaben und prüft anschließend unabhängig auf Auslassungen.
+  TypeSafe prüft Dokumentart, Lesbarkeit und Prüfbedarf. GPT-5.6 Sol mit mittlerem
+  Reasoning extrahiert belegte Angaben; bei Bedarf folgt genau ein Audit.
   Die Felder sind offen: unter anderem Personalnummer, Name, Anschrift, Arbeitgeber,
   Eintritt, Zeiträume, Brutto-/Nettowerte, Abzüge, Bank, IBAN und BIC.
 - Passwortgeschützte PDFs benötigen zunächst eine entsperrte Kopie. Beschädigte
@@ -85,9 +88,9 @@ Makros, externe Verweise und XML-DTDs werden nicht ausgeführt bzw. aufgelöst.
   fehlgeschlagene Auswertungen zeigen einen Fehler an der Datei und lassen sich
   manuell erneut starten. Die Warteschlange fährt mit der nächsten Datei fort;
   dieselbe fehlerhafte Datei wird nicht automatisch endlos wiederholt.
-- Bei einem Prozessabsturz werden laufende Aufträge beim nächsten Entsperren wieder
-  eingereiht, wenn Automatik aktiv ist. Bei deaktivierter Automatik warten sie
-  auf manuelle Freigabe. Fertige Dokumente und offene Vorschläge werden übersprungen.
+- Nach einem Prozessabsturz bleiben laufende Aufträge unterbrochen; die gespeicherten
+  Schritte lassen sich ausdrücklich fortsetzen. Kontingent-, Ratenlimit- und
+  Authentifizierungsfehler pausieren zusätzlich die Warteschlange.
 
 ## Aufbau
 

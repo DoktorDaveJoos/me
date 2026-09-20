@@ -82,7 +82,7 @@ fn queue_skips_credentials_unsupported_files_and_failed_or_finished_work() {
     assert!(v.begin_evaluation(first, false).unwrap());
 }
 #[test]
-fn interrupted_work_resumes_once_but_disabled_automation_stays_manual() {
+fn interrupted_work_waits_for_explicit_resume_even_when_automation_is_enabled() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("vault");
     let mut v = Vault::create(&root, PASSWORD).unwrap();
@@ -90,11 +90,12 @@ fn interrupted_work_resumes_once_but_disabled_automation_stays_manual() {
     assert!(v.begin_evaluation(item, true).unwrap());
     drop(v);
     let mut v = Vault::unlock(&root, PASSWORD).unwrap();
-    assert_eq!(v.next_automatic_document().unwrap(), Some(item));
-    assert!(v.begin_evaluation(item, true).unwrap());
+    assert_eq!(v.next_automatic_document().unwrap(), None);
+    assert_eq!(state(&v, item), "failed");
+    assert!(v.begin_evaluation(item, false).unwrap());
     v.set_automatic_evaluation(false).unwrap();
     drop(v);
     let v = Vault::unlock(&root, PASSWORD).unwrap();
     assert_eq!(v.next_automatic_document().unwrap(), None);
-    assert_eq!(state(&v, item), "manual");
+    assert_eq!(state(&v, item), "failed");
 }

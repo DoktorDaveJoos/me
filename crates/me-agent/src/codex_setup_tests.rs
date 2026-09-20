@@ -41,8 +41,7 @@ for line in sys.stdin:
  elif m=='account/rateLimits/read':
   if mode=='offline':
    send({'id':i,'error':{'code':-1,'message':'synthetic unavailable'}});continue
-  # Exhausted quota is a configured account, not a reason to hide stored data.
-  result={'rateLimits':{'primary':{'usedPercent':100}}}
+  result={'rateLimits':{'primary':{'usedPercent':100 if mode=='quota' else 20}}}
  else: raise AssertionError('Setup must not start model or tool work: '+m)
  send({'id':i,'result':result})
 "##.replace("MODE", mode);
@@ -60,6 +59,7 @@ fn setup_check_requires_chatgpt_model_and_a_live_authenticated_connection() {
         ("apikey", Some(SetupIssue::WrongAccount)),
         ("model", Some(SetupIssue::ModelUnavailable)),
         ("ready", None),
+        ("quota", Some(SetupIssue::UsageLimit)),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let bin = temp.path().join("codex");
@@ -325,4 +325,27 @@ fn codex_generated_plugin_cache_does_not_invalidate_the_connection() {
         &bin,
     )
     .unwrap();
+}
+
+#[test]
+fn usage_limits_only_pause_ai_for_a_known_exhausted_codex_window() {
+    assert!(!pipeline::quota_exhausted(&json!({})));
+    assert!(!pipeline::quota_exhausted(
+        &json!({"rateLimits":{"primary":null,"secondary":null}})
+    ));
+    assert!(!pipeline::quota_exhausted(
+        &json!({"rateLimits":{"primary":{"usedPercent":99.9}}})
+    ));
+    assert!(pipeline::quota_exhausted(
+        &json!({"rateLimits":{"secondary":{"usedPercent":100}}})
+    ));
+    assert!(pipeline::quota_exhausted(
+        &json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100}}}})
+    ));
+    assert!(!pipeline::quota_exhausted(
+        &json!({"rateLimitsByLimitId":{"another-model":{"primary":{"usedPercent":100}}}})
+    ));
+    assert!(!pipeline::quota_exhausted(
+        &json!({"rateLimits":{"primary":{"usedPercent":100}},"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":10}}}})
+    ));
 }

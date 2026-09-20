@@ -62,12 +62,12 @@ def icon_violations(path):
 
 def main():
     errors = []
-    src = ROOT / 'crates/me-app/src'
-    rust_files = sorted(src.rglob('*.rs')) + sorted((ROOT / 'crates/me-app/examples').rglob('*.rs'))
+    src = ROOT / 'apps/desktop/src'
+    rust_files = sorted(src.rglob('*.rs')) + sorted((ROOT / 'apps/desktop/examples').rglob('*.rs'))
     for path in rust_files:
         for line, message in rust_violations(path.read_text(), path == src / 'design_system.rs', path == src / 'assets.rs'):
             errors.append(f'{path.relative_to(ROOT)}:{line}: {message}')
-    icons = sorted((ROOT / 'crates/me-app/assets/icons').glob('*.svg'))
+    icons = sorted((ROOT / 'apps/desktop/assets/icons').glob('*.svg'))
     for path in icons:
         errors.extend(f'{path.relative_to(ROOT)}: {message}' for message in icon_violations(path))
     registry = (src / 'assets.rs').read_text()

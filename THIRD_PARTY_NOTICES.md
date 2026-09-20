@@ -9,12 +9,14 @@ ME.'s commercial licensing terms.
 
 | Component | License / notice in this repository |
 | --- | --- |
-| Geist and Geist Mono, copyright 2024 The Geist Project Authors | [SIL Open Font License 1.1](crates/me-app/assets/fonts/OFL.txt) |
-| GPUI | [Apache License 2.0](crates/me-app/assets/licenses/GPUI-APACHE-2.0.txt) |
-| SQLCipher | [SQLCipher copyright and license](crates/me-app/assets/licenses/SQLCipher.txt) |
-| OpenSSL | [OpenSSL license](crates/me-app/assets/licenses/OpenSSL.txt) |
-| `hashify` 0.2.9 | [MIT license](crates/me-app/assets/licenses/hashify-0.2.9-MIT.txt) |
-| `mail-parser` 0.11.3 | [MIT license](crates/me-app/assets/licenses/mail-parser-0.11.3-MIT.txt) |
+| Geist and Geist Mono, copyright 2024 The Geist Project Authors | [SIL Open Font License 1.1](apps/desktop/assets/fonts/OFL.txt) |
+| GPUI | [Apache License 2.0](apps/desktop/assets/licenses/GPUI-APACHE-2.0.txt) |
+| SQLCipher | [SQLCipher copyright and license](apps/desktop/assets/licenses/SQLCipher.txt) |
+| OpenSSL | [OpenSSL license](apps/desktop/assets/licenses/OpenSSL.txt) |
+| `hashify` 0.2.9 | [MIT license](apps/desktop/assets/licenses/hashify-0.2.9-MIT.txt) |
+| Rust `curl` / `curl-sys` bindings | [MIT license](apps/desktop/assets/licenses/curl-rust-MIT.txt) |
+| libcurl | [curl license](apps/desktop/assets/licenses/libcurl.txt) |
+| `mail-parser` 0.11.3 | [MIT license](apps/desktop/assets/licenses/mail-parser-0.11.3-MIT.txt) |
 
 The font files are distributed in the source tree under the OFL. The dependency
 source code is resolved by Cargo rather than vendored here. The macOS development

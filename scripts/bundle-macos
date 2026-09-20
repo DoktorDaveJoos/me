@@ -12,7 +12,7 @@ fi
 mode=${1:-release}
 case "$mode" in
     debug) ./scripts/cargo build --locked -p me-app -p me-agent ;;
-    release) ./scripts/cargo build --locked --release -p me-app -p me-agent ;;
+    release) ./scripts/cargo build --locked --release --features me-app/development-tools -p me-app -p me-agent ;;
     *) printf '%s\n' 'Usage: ./scripts/bundle-macos [debug|release]' >&2; exit 2 ;;
 esac
 
@@ -29,9 +29,9 @@ staged_mcp=$(mktemp "$bundle_dir/Contents/MacOS/.me-mcp.XXXXXX")
 cp "$build_dir/$mode/me-mcp" "$staged_mcp"
 chmod 755 "$staged_mcp"
 mv -f "$staged_mcp" "$bundle_dir/Contents/MacOS/me-mcp"
-cp packaging/macos/Info.plist "$bundle_dir/Contents/Info.plist"
+cp apps/desktop/packaging/macos/Info.plist "$bundle_dir/Contents/Info.plist"
 mkdir -p "$bundle_dir/Contents/Resources/Licenses"
-cp crates/me-app/assets/licenses/* "$bundle_dir/Contents/Resources/Licenses/"
-cp crates/me-app/assets/fonts/OFL.txt "$bundle_dir/Contents/Resources/Licenses/Geist-OFL.txt"
+cp apps/desktop/assets/licenses/* "$bundle_dir/Contents/Resources/Licenses/"
+cp apps/desktop/assets/fonts/OFL.txt "$bundle_dir/Contents/Resources/Licenses/Geist-OFL.txt"
 codesign --force --sign - "$bundle_dir"
 printf '%s\n' "$bundle_dir"

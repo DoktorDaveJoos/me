@@ -29,8 +29,10 @@ in the original data. Archived items remain visible and labeled as archived.
 
 The complete original archive is stored in SQLCipher, including document items,
 attachments, custom icons and fields that ME does not interpret. Document/attachment
-references resolve by the documented `documentId___filename` prefix or an explicit
-`files/` path. Missing or ambiguous attachments reject the import before any writes.
+references resolve by either `documentId__filename` (current exports) or the
+published `documentId___filename` prefix, or an explicit `files/` path. The original
+filename metadata is used for display, including filenames beginning with underscores.
+Missing or ambiguous attachments reject the import before any writes.
 Attachments can be exported individually. **Gesamten Originalexport speichern**
 exports the entire original import, including its other items. The UI explains
 that these exports create plaintext files. Existing destinations are never replaced.
@@ -41,7 +43,9 @@ Schema 6 extends collection items with a credential kind. Credential records and
 original archives live in the encrypted database and are included in the existing
 encrypted backup/restore flow. Their source sensitivity is always `credential`.
 They never create assertions, FTS segments, extraction jobs or AI evaluation tasks.
-Only titles and vault names are searched in the local collection. Contents are
+The main Search page finds imported entries by title and vault name alongside
+notes, documents and confirmed personal data. Opening a credential result uses
+the existing masked detail view. Only titles and vault names are searched locally. Contents are
 excluded from the Codex read scope and document extraction APIs.
 
 Deduplication uses account UUID + vault UUID + item UUID + a fingerprint of the
@@ -77,3 +81,18 @@ compilation passed. Native synthetic smoke checks covered preview, import,
 masked/revealed values, automatic re-hiding and locking. The full workspace run
 reported one unrelated failure in `payroll_columns_keep_labels_and_values_together`;
 it also fails on the live project without these importer changes.
+
+Fix validated on macOS (2026-09-19): an export using the two-underscore attachment
+separator previously failed as “missing or ambiguous”. Regression coverage now
+checks both delimiters, original filenames/bytes, round-trip recovery, duplicate
+imports, ambiguous attachments, and document ID prefix collisions. Import diagnostics
+record picker/read/preview/import stages, counts and static failure reasons only;
+filenames, vault names, identifiers and credential contents are never logged.
+
+Validation completed on 2026-09-20: all 71 core tests and 2 diagnostics tests pass,
+as do the design-system guard/tests, formatting, workspace Clippy with all targets
+and features, and the signed release bundle build. The originally failing export
+passes local parsing and preview. Native synthetic checks cover preview, commit,
+masked details, original attachment names, and a missing-attachment error; the
+preview and error screens were also checked at 800 × 600. Sanitized success and
+failure events were verified in the diagnostic log.

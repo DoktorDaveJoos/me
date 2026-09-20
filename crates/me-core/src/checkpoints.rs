@@ -11,7 +11,7 @@ pub fn extraction_fingerprint(input: &ExtractionInput) -> String {
     )
 }
 impl Vault {
-    fn checkpoint_active(&self, input: &ExtractionInput) -> Result<()> {
+    pub(crate) fn checkpoint_active(&self, input: &ExtractionInput) -> Result<()> {
         let active: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM extraction_run r JOIN source s ON s.id=r.source_id WHERE r.id=? AND r.source_id=? AND r.status='running' AND s.sensitivity='personal' AND s.retention='keep')", params![input.run_id,input.source_id], |r| r.get(0))?;
         if !active {
             return Err(Error::Validation("This analysis is no longer active."));

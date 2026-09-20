@@ -1,9 +1,26 @@
 use super::*;
-use me_core::{ExtractedFact, ground_extraction};
+use crate::typesafe::{self, Decisions};
+use me_core::{
+    ExtractedFact, ImportErrorKind as Kind, ImportFailure, ImportProvider as Provider,
+    ImportStage as Stage, ground_extraction,
+};
 
 pub trait Checkpoints {
     fn load(&mut self, input: &ExtractionInput) -> Result<Option<ExtractionOutput>>;
     fn save(&mut self, input: &ExtractionInput, output: &ExtractionOutput) -> Result<()>;
+    fn load_step(&mut self, _: &ExtractionInput, _: &str) -> Result<Option<Value>> {
+        Ok(None)
+    }
+    fn save_step(&mut self, _: &ExtractionInput, _: &str, _: &Value) -> Result<()> {
+        Ok(())
+    }
+    fn reserve(
+        &mut self,
+        _: &ExtractionInput,
+        _: Provider,
+    ) -> std::result::Result<String, ImportFailure> {
+        Ok(uuid::Uuid::new_v4().to_string())
+    }
 }
 pub struct NoCheckpoints;
 impl Checkpoints for NoCheckpoints {
@@ -14,7 +31,10 @@ impl Checkpoints for NoCheckpoints {
         Ok(())
     }
 }
-pub const PIPELINE: &str = "document-v4-gpt-5.6-sol-medium-context-audit-v1";
+// Candidate capture can become more inclusive without invalidating paid source
+// checkpoints. Existing results remain reusable; unfinished steps use the new guidance.
+pub const PIPELINE: &str = "document-v5-typesafe-jev-small-sections-sol-v1";
+pub const LEGACY_PIPELINE: &str = "document-v4-gpt-5.6-sol-medium-context-audit-v1";
 pub struct ExtractionReport {
     pub output: ExtractionOutput,
     pub rejected: Vec<me_core::RejectedFact>,
@@ -36,7 +56,60 @@ pub(super) fn run(
     binary: &Path,
     checkpoints: &mut impl Checkpoints,
 ) -> Result<ExtractionReport> {
-    let batches = extraction_batches(input)?;
+    #[cfg(test)]
+    let mut decisions = typesafe::FakeDecisions;
+    #[cfg(not(test))]
+    let mut decisions = typesafe::LazyDecisions::default();
+    run_with_decisions(
+        home,
+        input,
+        cancel,
+        progress,
+        binary,
+        checkpoints,
+        &mut decisions,
+    )
+}
+
+pub(super) fn run_with_decisions(
+    home: &Path,
+    input: &ExtractionInput,
+    cancel: Arc<AtomicBool>,
+    progress: &mut impl FnMut(Progress),
+    binary: &Path,
+    checkpoints: &mut impl Checkpoints,
+    decisions: &mut impl Decisions,
+) -> Result<ExtractionReport> {
+    // Reuse whole previously verified sections where possible. Otherwise plan
+    // small units up front: output failures never recursively multiply calls.
+    let mut batches = Vec::new();
+    for parent in extraction_batches(input)? {
+        if let Some(saved) = checkpoints.load(&parent)?
+            && ground_extraction(&parent, saved).rejected.is_empty()
+        {
+            batches.push(parent);
+            continue;
+        }
+        let mut part = parent.with_segments(Vec::new());
+        let mut bytes = 0;
+        for segment in &parent.segments {
+            if bytes + segment.text.len() > 3_200 && !part.segments.is_empty() {
+                let overlap = part
+                    .segments
+                    .last()
+                    .filter(|s| s.text.len() + segment.text.len() <= 3_200)
+                    .cloned();
+                batches.push(part);
+                part = parent.with_segments(overlap.into_iter().collect());
+                bytes = part.segments.iter().map(|s| s.text.len()).sum();
+            }
+            bytes += segment.text.len();
+            part.segments.push(segment.clone());
+        }
+        if !part.segments.is_empty() {
+            batches.push(part);
+        }
+    }
     let scratch = tempfile::Builder::new()
         .prefix("me-inbox-")
         .tempdir()
@@ -48,33 +121,38 @@ pub(super) fn run(
         cancel,
         progress,
         checkpoints,
+        decisions,
         session: None,
+        calls: 0,
     };
-    record(
-        "codex.document",
-        &[
-            F::Count("batches", batches.len() as u64),
-            F::Count(
-                "text_bytes",
-                input.segments.iter().map(|s| s.text.len() as u64).sum(),
-            ),
-        ],
-    );
+    let total = batches.len() as u32;
+    for stage in [
+        Stage::Interpreting,
+        Stage::Context,
+        Stage::Extracting,
+        Stage::Verifying,
+    ] {
+        (runner.progress)(Progress::Step {
+            stage,
+            current: 0,
+            total,
+        });
+    }
     let mut report = ExtractionReport {
         output: ExtractionOutput { facts: Vec::new() },
         rejected: Vec::new(),
         repaired: 0,
     };
     for (index, batch) in batches.iter().enumerate() {
-        (runner.progress)(Progress::Units {
-            current: (index + 1) as u32,
-            total: batches.len() as u32,
-        });
-        let label = format!("Section {} of {}", index + 1, batches.len());
-        (runner.progress)(Progress::Message(format!("Reading {label}…")));
+        let completed = index as u32;
+        (runner.progress)(Progress::Message(format!(
+            "Section {} of {}",
+            index + 1,
+            total
+        )));
         let result = runner
-            .section(batch, &label, 0)
-            .map_err(|e| format!("{label}: {e}"))?;
+            .section(batch, completed, total)
+            .map_err(|e| format!("Section {} of {total}: {e}", index + 1))?;
         merge(&mut report.output, result.output);
         merge_questions(&mut report.rejected, result.rejected, &report.output);
         report.repaired += result.repaired;
@@ -84,15 +162,16 @@ pub(super) fn run(
     }
     Ok(report)
 }
-
-struct Runner<'a, P, C> {
+struct Runner<'a, P, C, D> {
     home: &'a Path,
     binary: &'a Path,
     scratch: &'a Path,
     cancel: Arc<AtomicBool>,
     progress: &'a mut P,
     checkpoints: &'a mut C,
+    decisions: &'a mut D,
     session: Option<Session>,
+    calls: u32,
 }
 fn merge(target: &mut ExtractionOutput, output: ExtractionOutput) {
     for fact in output.facts {
@@ -138,24 +217,120 @@ fn same_value(a: &ExtractedFact, b: &ExtractedFact) -> bool {
             _ => a.value == b.value,
         }
 }
-impl<P: FnMut(Progress), C: Checkpoints> Runner<'_, P, C> {
+impl<P: FnMut(Progress), C: Checkpoints, D: Decisions> Runner<'_, P, C, D> {
+    fn fail<T>(&mut self, failure: ImportFailure) -> Result<T> {
+        let message = failure.message.clone();
+        (self.progress)(Progress::Failure(failure));
+        Err(message)
+    }
     fn cancelled(&self) -> Result<()> {
         if self.cancel.load(Ordering::SeqCst) {
-            Err("Analysis stopped. Completed sections are saved for the next attempt.".into())
+            Err("Analysis stopped. Saved steps are kept.".into())
         } else {
             Ok(())
+        }
+    }
+    fn start(&mut self, stage: Stage, current: u32, total: u32) {
+        (self.progress)(Progress::Stage(stage));
+        (self.progress)(Progress::Step {
+            stage,
+            current,
+            total,
+        });
+    }
+    fn done(&mut self, stage: Stage, current: u32, total: u32) {
+        (self.progress)(Progress::Step {
+            stage,
+            current: current + 1,
+            total,
+        });
+    }
+    fn reserve(&mut self, input: &ExtractionInput, provider: Provider) -> Result<String> {
+        self.cancelled()?;
+        // Also bound non-vault/library callers. The vault has stricter durable
+        // per-provider limits shared by every resume and reanalysis.
+        if self.calls >= 96 {
+            return self.fail(ImportFailure::new(
+                Provider::Local,
+                Kind::Budget,
+                "This attempt reached its 96-call safety limit. Resume to reuse saved steps.",
+            ));
+        }
+        match self.checkpoints.reserve(input, provider) {
+            Ok(id) => {
+                self.calls += 1;
+                (self.progress)(Progress::Request { provider });
+                Ok(id)
+            }
+            Err(failure) => self.fail(failure),
+        }
+    }
+    fn cached(
+        &mut self,
+        input: &ExtractionInput,
+        key: &str,
+        state: &Value,
+    ) -> Result<Option<Value>> {
+        Ok(self
+            .checkpoints
+            .load_step(input, key)?
+            .filter(|v| v["fingerprint"] == json!(fingerprint(state)))
+            .map(|v| v["value"].clone()))
+    }
+    fn save(
+        &mut self,
+        input: &ExtractionInput,
+        key: &str,
+        state: &Value,
+        value: &Value,
+    ) -> Result<()> {
+        self.checkpoints.save_step(
+            input,
+            key,
+            &json!({"fingerprint":fingerprint(state),"value":value}),
+        )
+    }
+    fn decision(
+        &mut self,
+        input: &ExtractionInput,
+        key: &str,
+        state: Value,
+        questions: Value,
+    ) -> Result<Value> {
+        if let Some(value) = self.cached(input, key, &state)? {
+            if let Err(failure) = typesafe::validate_answers(&questions, &value) {
+                return self.fail(failure);
+            }
+            return Ok(value);
+        }
+        let call = self.reserve(input, Provider::TypeSafe)?;
+        match self
+            .decisions
+            .evaluate(state.clone(), questions, &self.cancel)
+        {
+            Ok(response) => {
+                if let (Some(input_tokens), Some(output_tokens)) =
+                    (response.input_tokens, response.output_tokens)
+                {
+                    (self.progress)(Progress::Usage {
+                        call,
+                        input_tokens,
+                        output_tokens,
+                    });
+                }
+                self.save(input, key, &state, &response.answers)?;
+                self.cancelled()?;
+                Ok(response.answers)
+            }
+            Err(failure) => self.fail(failure),
         }
     }
     fn connect(&mut self) -> Result<()> {
         if self.session.is_some() {
             return Ok(());
         }
-        let mut session = Session::start(self.home, self.scratch, self.cancel.clone(), self.binary)
-            .inspect_err(|message| {
-                (self.progress)(Progress::SetupRequired(SetupIssue::Connection(
-                    message.clone(),
-                )));
-            })?;
+        let mut session =
+            Session::start(self.home, self.scratch, self.cancel.clone(), self.binary)?;
         session.deadline = Instant::now() + Duration::from_secs(30);
         if let Err(issue) =
             initialize(&mut session).and_then(|()| verify_configuration(&mut session))
@@ -164,26 +339,93 @@ impl<P: FnMut(Progress), C: Checkpoints> Runner<'_, P, C> {
             (self.progress)(Progress::SetupRequired(issue));
             return Err(message);
         }
+        // A quota read is not inference. Never consume credits or reset usage.
+        if let Ok(limits) = session.rpc("account/rateLimits/read", Value::Null)
+            && quota_exhausted(&limits)
+        {
+            return self.fail(ImportFailure::new(Provider::OpenAi,Kind::Quota,"OpenAI usage limit reached. Imports are paused until you resume after the limit resets."));
+        }
+        session.pending.clear();
         self.session = Some(session);
         Ok(())
+    }
+    fn model(
+        &mut self,
+        input: &ExtractionInput,
+        key: &str,
+        request: Value,
+        instructions: &str,
+    ) -> Result<ExtractionOutput> {
+        if let Some(value) = self.cached(input, key, &request)? {
+            return serde_json::from_value(value).map_err(|_| {
+                "A saved extraction step is damaged. Start this analysis over.".into()
+            });
+        }
+        self.connect()?;
+        let call = self.reserve(input, Provider::OpenAi)?;
+        let session = self.session.as_mut().ok_or(FAILURE)?;
+        session.call_id = Some(call);
+        session.failure = None;
+        let mut schema = output_schema();
+        schema["properties"]["facts"]["items"]["properties"]["segment_id"] = json!({"type":"string","enum":input.segments.iter().map(|s|&s.segment_id).collect::<Vec<_>>()});
+        let result = request_model(
+            session,
+            self.scratch,
+            self.progress,
+            instructions,
+            request.clone(),
+            schema,
+        );
+        let value = match result {
+            Ok(v) => v,
+            Err(message) => {
+                let failure = session.failure.clone().unwrap_or_else(|| {
+                    ImportFailure::new(Provider::OpenAi, Kind::Connection, message.clone())
+                });
+                (self.progress)(Progress::Failure(failure));
+                return Err(message);
+            }
+        };
+        let output: ExtractionOutput =
+            match serde_json::from_value(value.clone()) {
+                Ok(output) => output,
+                Err(_) => return self.fail(ImportFailure::new(
+                    Provider::OpenAi,
+                    Kind::InvalidOutput,
+                    "OpenAI returned an unexpected extraction format. No automatic retry was made.",
+                )),
+            };
+        if output.facts.len() >= MAX_BATCH_FACTS {
+            return self.fail(ImportFailure::new(
+                Provider::OpenAi,
+                Kind::InvalidOutput,
+                "This section returned too many details. Split the source before retrying.",
+            ));
+        }
+        self.save(input, key, &request, &value)?;
+        Ok(output)
     }
     fn section(
         &mut self,
         input: &ExtractionInput,
-        label: &str,
-        depth: u8,
+        current: u32,
+        total: u32,
     ) -> Result<ExtractionReport> {
         self.cancelled()?;
         if let Some(cached) = self.checkpoints.load(input)? {
             let checked = ground_extraction(input, cached);
             if checked.rejected.is_empty() {
-                record(
-                    "codex.batch.resumed",
-                    &[F::Count("segments", input.segments.len() as u64)],
-                );
-                (self.progress)(Progress::Message(format!(
-                    "{label}: restoring saved results…"
-                )));
+                (self.progress)(Progress::Message(
+                    "Restoring saved results; no model calls needed.".into(),
+                ));
+                for stage in [
+                    Stage::Interpreting,
+                    Stage::Context,
+                    Stage::Extracting,
+                    Stage::Verifying,
+                ] {
+                    self.done(stage, current, total);
+                }
                 return Ok(ExtractionReport {
                     output: checked.output,
                     rejected: Vec::new(),
@@ -191,161 +433,113 @@ impl<P: FnMut(Progress), C: Checkpoints> Runner<'_, P, C> {
                 });
             }
         }
-        let mut good = ExtractionOutput { facts: Vec::new() };
-        let mut rejected: Vec<me_core::RejectedFact> = Vec::new();
-        let mut repaired = 0;
-        let mut correction = false;
-        for attempt in 1..=2 {
-            self.cancelled()?;
-            self.connect()?;
-            let session = self.session.as_mut().ok_or(FAILURE)?;
-            session.retry = Retry::Never;
-            session.deadline = Instant::now() + Duration::from_secs(240);
-            record(
-                "codex.batch.started",
-                &[
-                    F::Count("attempt", attempt),
-                    F::Integer(
-                        "first_segment",
-                        input.segments.first().map(|s| s.ordinal).unwrap_or(0),
-                    ),
-                    F::Count("split_depth", depth as u64),
-                    F::Flag("correction", correction),
-                ],
-            );
-            let started = Instant::now();
-            let result = extract_batch(
-                session,
-                self.scratch,
-                input,
-                self.progress,
-                correction,
-                &rejected,
-            );
-            record(
-                "codex.batch.finished",
-                &[
-                    F::Count("attempt", attempt),
-                    F::Integer(
-                        "first_segment",
-                        input.segments.first().map(|s| s.ordinal).unwrap_or(0),
-                    ),
-                    F::Flag("ok", result.is_ok()),
-                    F::Count("duration_ms", started.elapsed().as_millis() as u64),
-                ],
-            );
-            let retry = session.retry;
-            self.cancelled()?;
-            match result {
-                Ok(output) if output.facts.len() < MAX_BATCH_FACTS * 2 => {
-                    let checked = ground_extraction(input, output);
-                    repaired += checked.repaired;
-                    merge(&mut good, checked.output);
-                    rejected.extend(checked.rejected);
-                    rejected
-                        .retain(|bad| !good.facts.iter().any(|fact| same_value(fact, &bad.fact)));
-                    let mut distinct = Vec::<me_core::RejectedFact>::new();
-                    for bad in rejected.drain(..) {
-                        if !distinct.iter().any(|old| same_value(&old.fact, &bad.fact)) {
-                            distinct.push(bad);
-                        }
-                    }
-                    rejected = distinct;
-                    for bad in &rejected {
-                        record("codex.evidence.rejected", &[F::Label("code", bad.code)]);
-                    }
-                    if rejected.is_empty() {
-                        break;
-                    }
-                    if attempt == 1 {
-                        correction = true;
-                        (self.progress)(Progress::Message(format!(
-                            "{label}: checking sources again…"
-                        )));
-                    }
-                }
-                result => {
-                    let retry = if result.is_ok() {
-                        Retry::Smaller
-                    } else {
-                        retry
-                    };
-                    if input.segments.len() > 1
-                        && depth < 3
-                        && (retry == Retry::Smaller
-                            || (retry == Retry::InvalidOutput && attempt == 2))
-                    {
-                        record(
-                            "codex.batch.split",
-                            &[
-                                F::Count("segments", input.segments.len() as u64),
-                                F::Count("depth", depth as u64 + 1),
-                            ],
-                        );
-                        (self.progress)(Progress::Message(format!(
-                            "{label}: splitting into smaller sections…"
-                        )));
-                        let middle = input.segments.len() / 2;
-                        let mut combined = ExtractionReport {
-                            output: good,
-                            rejected,
-                            repaired,
-                        };
-                        for (index, segments) in [
-                            input.segments[..middle].to_vec(),
-                            input.segments[middle..].to_vec(),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
-                            let child = input.with_segments(segments);
-                            let part =
-                                self.section(&child, &format!("{label}.{}", index + 1), depth + 1)?;
-                            merge(&mut combined.output, part.output);
-                            merge_questions(
-                                &mut combined.rejected,
-                                part.rejected,
-                                &combined.output,
-                            );
-                            combined.repaired += part.repaired;
-                        }
-                        if combined.rejected.is_empty() {
-                            self.checkpoints.save(input, &combined.output)?;
-                        }
-                        return Ok(combined);
-                    }
-                    if attempt == 1 && [Retry::Transient, Retry::InvalidOutput].contains(&retry) {
-                        self.session = None;
-                        record("codex.batch.retry", &[]);
-                        (self.progress)(Progress::Message(format!(
-                            "{label}: retrying after a temporary error…"
-                        )));
-                        for _ in 0..20 {
-                            self.cancelled()?;
-                            thread::sleep(Duration::from_millis(50));
-                        }
-                        continue;
-                    }
-                    return Err(result
-                        .err()
-                        .unwrap_or_else(|| "Too many suggestions for one section.".into()));
-                }
-            }
+        self.start(Stage::Interpreting, current, total);
+        let profile = self.decision(
+            input,
+            "interpret",
+            json!({"source":input}),
+            typesafe::profile_questions(),
+        )?;
+        if profile["readable"]["noul"]
+            .as_f64()
+            .is_some_and(|p| p < 0.2)
+        {
+            return self.fail(ImportFailure::new(Provider::TypeSafe,Kind::Unprocessable,"The extracted text is not readable enough for reliable analysis. Check the original or import a clearer scan; no extraction call was made."));
         }
-        if rejected.is_empty() {
-            self.checkpoints.save(input, &good)?;
+        self.done(Stage::Interpreting, current, total);
+        self.start(Stage::Context, current, total);
+        // Uncertain profiles select general guidance; they never invent facts.
+        let instructions = document::instructions(&profile);
+        self.done(Stage::Context, current, total);
+        self.start(Stage::Extracting, current, total);
+        let mut request = serde_json::to_value(input).map_err(failed)?;
+        request["stage"] = json!("extract");
+        request["document_profile"] = profile;
+        let output = self.model(input, "extract", request, &instructions)?;
+        self.done(Stage::Extracting, current, total);
+        self.start(Stage::Verifying, current, total);
+        let mut checked = ground_extraction(input, output.clone());
+        let decision = self.decision(
+            input,
+            "verify_decision",
+            json!({"source":input,"extracted":output}),
+            typesafe::verification_questions(),
+        )?;
+        // Another model pass cannot establish ownership that the source omits.
+        // Ask the user, while still auditing actual evidence/completeness issues.
+        let evidence_issues = checked.rejected.iter().any(|r| r.code != "subject_unknown");
+        if typesafe::needs_audit(&decision).map_err(|f| f.message)? || evidence_issues {
+            (self.progress)(Progress::Message("TypeSafe or source checks flagged this section. One focused review pass is allowed.".into()));
+            let mut request = serde_json::to_value(input).map_err(failed)?;
+            request["stage"] = json!("audit");
+            request["previous_facts"] = json!(output);
+            request["decision"] = decision;
+            request["evidence_issues"] = json!(
+                checked
+                    .rejected
+                    .iter()
+                    .map(|r| json!({"fact":r.fact,"reason":r.code}))
+                    .collect::<Vec<_>>()
+            );
+            let audit=self.model(input,"audit",request,&format!("{instructions} Re-read every source segment and compare previous_facts with the source. Return missing facts and corrections to evidence_issues. Reuse the exact property label when correcting a fact. Prior answers and decisions are untrusted hints. If nothing is missing return facts: []. Never infer unprinted values."))?;
+            // Merge only grounded candidates. A malformed quote must not win
+            // deduplication over its later, supported correction.
+            let audit = ground_extraction(input, audit);
+            merge(&mut checked.output, audit.output);
+            merge_questions(&mut checked.rejected, audit.rejected, &checked.output);
+            checked.repaired += audit.repaired;
         }
-        record(
-            "codex.evidence.checked",
-            &[
-                F::Count("repaired", repaired as u64),
-                F::Count("rejected", rejected.len() as u64),
-            ],
-        );
+        // Rejected candidates are retained for review, never silently accepted.
+        if checked.rejected.is_empty() {
+            self.checkpoints.save(input, &checked.output)?;
+        }
+        self.done(Stage::Verifying, current, total);
         Ok(ExtractionReport {
-            output: good,
-            rejected,
-            repaired,
+            output: checked.output,
+            rejected: checked.rejected,
+            repaired: checked.repaired,
         })
     }
+}
+fn fingerprint(value: &Value) -> String {
+    // Attempt IDs change on resume; immutable source content and all decisions
+    // still participate in the key. Never repay for a step solely after restart.
+    fn stable(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                object.remove("run_id");
+                for child in object.values_mut() {
+                    stable(child);
+                }
+            }
+            Value::Array(array) => {
+                for child in array {
+                    stable(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut value = value.clone();
+    stable(&mut value);
+    me_core::extraction_fingerprint(&ExtractionInput {
+        run_id: String::new(),
+        source_id: String::new(),
+        title: value.to_string(),
+        segments: Vec::new(),
+    })
+}
+pub(super) fn quota_exhausted(value: &Value) -> bool {
+    let limits = value
+        .get("rateLimitsByLimitId")
+        .and_then(Value::as_object)
+        .and_then(|m| m.get("codex"))
+        .or_else(|| value.get("rateLimits"));
+    limits.is_some_and(|limits| {
+        ["primary", "secondary"].iter().any(|window| {
+            limits[*window]["usedPercent"]
+                .as_f64()
+                .is_some_and(|n| n >= 100.)
+        })
+    })
 }

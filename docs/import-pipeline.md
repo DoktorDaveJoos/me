@@ -1,6 +1,9 @@
 # Importing documents that people can trust
 
-Research and implementation decision, 17 September 2026.
+Research and implementation decision, updated 18 September 2026.
+
+The current [TypeSafe, recovery and spending design](import-reliability.md)
+details the per-stage checkpoint implementation and provider boundaries.
 
 The product promise is to preserve the original, explain what was read, and show
 what remains uncertain. It is not a claim of perfect OCR or perfect AI interpretation.
@@ -37,8 +40,8 @@ PDFKit/Vision and Poppler/Tesseract implementations.
    retain their separate credential flow and cannot join a mixed document batch.
 4. Imports in the sidebar shows each saved file, its current stage, real page or
    section counts, elapsed time, failure and retry controls, or review outcome.
-   There is no estimated completion percentage. A section can legitimately move
-   through the same stages again during chunking or evidence repair.
+   The overall percentage measures completed work across five stage bars, never
+   estimated elapsed time. Each planned section moves through the stages in order.
 5. Suggestions remain subject to the existing Review flow. Confirming file import
    never confirms inferred facts. No suggestions is not proof of completeness.
 
@@ -56,10 +59,10 @@ family, semantic colors, spacing tokens and the standard 8 px radius.
 | --- | --- | --- |
 | Save original | Read a bounded regular file; encrypt and durably store it. | Per-file saving/queued state; success only after persistence. |
 | Normalization | Decode text/Office/MIME or locally recognize PDF/image text. Preserve source sections and attachment boundaries. | Real OCR page counts where the parser provides them. |
-| Interpretation | Classify document type, language, parties, periods, table relationships and field inventory for the supplied section. | Typed stage event and section number. |
+| Interpretation | TypeSafe evaluates document family, readability, table layout and mixed sources. | Completed section count and cached typed decisions. |
 | Context | Apply local document guidance. Today this includes payslip distinctions and correspondence/insurance/email reading rules. | Explicitly says local guidance; no web search is claimed. |
 | Extraction | Extract documented values with their labels, person, period and exact source references. | Section counts; the immutable original is retained. |
-| Verification | Independently check omissions, repair unsupported evidence, and run deterministic grounding before atomic proposal storage. | Typed verification stage; unresolved candidates remain questions. |
+| Verification | Local grounding and TypeSafe omission/attribution checks; at most one focused OpenAI audit when indicated. | Completed checks; unresolved candidates remain questions. |
 | Review | Persist supported suggestions and unresolved questions separately. | Counts and links to the existing document/review UI. |
 
 For an insurance letter, sender, recipient, insured person and policyholder must
@@ -117,12 +120,13 @@ SQLCipher connection. A future throughput optimization should split bounded file
 reads/encryption from the transaction using an explicit intake API, not share the
 connection unsafely. No performance claim is made without release measurements.
 
-Migration 9 stores typed stages and counters in SQLCipher. A run ID rejects late
+Migrations 9 and 10 store typed stages, individual step counters, intermediate
+results and durable request allowances in SQLCipher. A run ID rejects late
 progress writes from a previous attempt. Existing evaluation state remains the
 source of truth for queued/running/manual/done/failed. On restart, interrupted jobs
-return to queued/manual; the previous stage remains diagnostic context, not a
-claim that a worker is still running. Verified section checkpoints can be reused.
-Failures affect only their file. Stop, vault lock and connection failure signal
+remain failed and require explicit resume; the previous stage remains diagnostic
+context, not a claim that a worker is still running. Saved steps can be reused.
+Quota, rate-limit and authentication failures also pause the queue persistently. Stop, vault lock and connection failure signal
 cancellation; locking clears visible filenames, progress and pending selections.
 Disabling automatic analysis stops automatic workers and prevents new claims.
 
@@ -134,7 +138,7 @@ changes, avoiding reuse of older cached semantics for a new analysis.
 ## Quality gates and evaluation plan
 
 Existing guarantees: bounded parsing, exact source grounding, no silent text
-truncation, independent omission pass, checkpoint validation, separate uncertain
+truncation, typed omission check and conditional audit, checkpoint validation, separate uncertain
 questions, and no automatic fact confirmation. These are necessary, but an exact
 quote alone does not establish correct semantics or full recall.
 

@@ -24,6 +24,29 @@ fn english_and_german_intent_returns_values_without_answers() {
     assert!(filter_data(&facts, "", &["invented".into()]).is_empty());
 }
 #[test]
+fn semantic_fields_extend_local_results_without_duplicates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut vault = Vault::create(&tmp.path().join("vault"), "synthetic-password").unwrap();
+    vault
+        .save_note(None, "Instagram reminder", "Synthetic reference")
+        .unwrap();
+    vault.save_note(None, "Geburtsdatum", "01.02.1990").unwrap();
+    let facts = vault.data_facts().unwrap();
+    let matches = filter_data(&facts, "Instagram", &["person.birth_date".into()]);
+    assert_eq!(matches.len(), 2);
+    assert!(
+        matches
+            .iter()
+            .any(|fact| fact.label == "Instagram reminder")
+    );
+    let matches = filter_data(&facts, "Geburtsdatum", &["person.birth_date".into()]);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        filter_data(&facts, "Instagram", &["invented".into()]).len(),
+        1
+    );
+}
+#[test]
 fn recents_persist_but_retracted_values_and_unknown_ids_do_not() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("vault");

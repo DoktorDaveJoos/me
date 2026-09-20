@@ -102,10 +102,29 @@ impl Vault {
             .collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Only already released, locally indexed files may be sent for organization.
+    /// Reuse typed import decisions for local filing; no extra model request.
     pub fn organization_input(&self) -> Result<Value> {
-        let mut stmt = self.db.prepare("SELECT i.local_id,i.title,(SELECT substr(group_concat(g.text, char(10)),1,2400) FROM source_segment g WHERE g.source_id=i.source_id AND g.ordinal>0) FROM collection_item i JOIN source s ON s.id=i.source_id WHERE i.kind='document' AND i.deleted_at IS NULL AND s.sensitivity='personal' AND s.retention='keep' AND EXISTS(SELECT 1 FROM document_evaluation e WHERE e.source_id=i.source_id AND e.state='done') AND NOT EXISTS(SELECT 1 FROM document_folder f WHERE f.item_id=i.local_id) AND EXISTS(SELECT 1 FROM source_segment g WHERE g.source_id=i.source_id AND g.ordinal>0) ORDER BY i.local_id LIMIT 20")?;
-        let docs = stmt.query_map([], |r| Ok(json!({"item":r.get::<_, i64>(0)?,"title":r.get::<_, String>(1)?,"text":r.get::<_, Option<String>>(2)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        let mut stmt = self.db.prepare("SELECT i.local_id,i.title FROM collection_item i JOIN source s ON s.id=i.source_id WHERE i.kind='document' AND i.deleted_at IS NULL AND s.sensitivity='personal' AND s.retention='keep' AND EXISTS(SELECT 1 FROM document_evaluation e WHERE e.source_id=i.source_id AND e.state='done') AND NOT EXISTS(SELECT 1 FROM document_folder f WHERE f.item_id=i.local_id) AND EXISTS(SELECT 1 FROM source_segment g WHERE g.source_id=i.source_id AND g.ordinal>0) ORDER BY i.local_id LIMIT 20")?;
+        let mut docs = stmt
+            .query_map([], |r| {
+                Ok(json!({"item":r.get::<_, i64>(0)?,"title":r.get::<_, String>(1)?}))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for doc in &mut docs {
+            let mut decisions=self.db.prepare("SELECT c.output_json FROM import_step_cache c JOIN collection_item i ON i.source_id=c.source_id WHERE i.local_id=? AND c.step='interpret'")?;
+            let profiles = decisions
+                .query_map([doc["item"].as_i64().ok_or(Error::Format)?], |r| {
+                    r.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            doc["profiles"] = json!(
+                profiles
+                    .iter()
+                    .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+                    .map(|v| v["value"].clone())
+                    .collect::<Vec<_>>()
+            );
+        }
         let paths: BTreeSet<_> = self.document_folders()?.into_values().collect();
         Ok(json!({"documents":docs,"existing_folders":paths}))
     }

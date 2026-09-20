@@ -6,9 +6,9 @@ Geist typography, indigo accents, compact sidebar and quiet outline iconography.
 Product behavior and copy conventions remain in [design.md](design.md).
 
 The executable source of truth is
-[`design_system.rs`](../crates/me-app/src/design_system.rs).
-[`theme.rs`](../crates/me-app/src/theme.rs) provides shared components;
-[`assets.rs`](../crates/me-app/src/assets.rs) owns the typed icon registry.
+[`design_system.rs`](../apps/desktop/src/design_system.rs).
+[`theme.rs`](../apps/desktop/src/theme.rs) provides shared components;
+[`assets.rs`](../apps/desktop/src/assets.rs) owns the typed icon registry.
 All measurements below are logical pixels, scaled by GPUI for the display.
 
 ## Shape, spacing and layout
@@ -88,7 +88,8 @@ in `design_system::color`, re-exported by `theme`.
 | `ACCENT` | `#4D66DE` | Links, selection and active controls |
 | `FOCUS` | `#B2C3DD` | Focused input border |
 | `PRIMARY_HOVER` | `#3C485C` | Hovered primary action |
-| `DECORATIVE` | `#CFD6E0` | Large decorative fingerprint |
+| `DECORATIVE` | `#CFD6E0` | Decorative fingerprint and occupied map borders |
+| `KNOWLEDGE_SOURCE` | `#3C485C` | Source cells in the Knowledge map; shares the established graphite |
 | `SUCCESS` | `#5A947C` | Positive status indicator |
 | `WARNING` | `#765B2E` | Warnings and conflicting values |
 | `WARNING_SURFACE` | `#FFF4DD` | Warning notice fill |
@@ -102,12 +103,15 @@ it is not a contrast/accessibility certification.
 
 ## Components and states
 
+- `progress_bar(fraction, color, activity)`: shared 8 px track (`layout::PROGRESS_HEIGHT`), standard rectangle radius and semantic status color. Fill uses completed work units only; unknown totals use a moving marker and a visible Working label. Elapsed time never sets a percentage.
 - `heading(text)`: all page/dialog headings use the same title style.
 - `eyebrow(text)`: mono caption style with the shared secondary color.
 - `primary_action()`: 36 px height, 16 px horizontal inset, 8 px radius, 12/20
   type, graphite background and white text. Assign an ID before adding a hover
   state; use `PRIMARY_HOVER`. Setup/unlock use the 44 px height. Keep busy/disabled
   behavior and click handlers explicit in the feature.
+- `secondary_action()`: the primary action’s geometry and type, with `SURFACE`,
+  `INK`, and a `LINE` border. Use `HOVER` for its hover fill.
 - `modal_panel(width)`: shared white surface, 1 px border, 8 px radius, 24 px inset
   and 24 px content gap, constrained to the available width. The feature owns
   scrolling and maximum height. The common overlay owns the scrim.
@@ -135,6 +139,31 @@ modal_panel(486.)
     )
 ```
 
+## Knowledge map
+
+The native honeycomb uses the shared palette and type roles. `knowledge::`
+centralizes its geometry: 52 px outer radius, a 76×68 px text/hit region, 1 px
+borders, 2 px connection strokes and a 5 px halo at 12% opacity. Hexagonal corners
+use `radius::STANDARD`; rectangular controls retain exactly the same 8 px radius.
+The grid uses `LINE` at 72% opacity and nonmatching search results dim to 45%.
+Document and credential cells use `KNOWLEDGE_SOURCE` with inverse text. Data
+labels use Caption, values Small/Geist Mono, and the selected full value uses Value.
+At less than 80% zoom the text becomes a typed outline symbol; selection still
+reveals the full data below the map. Zoom changes in 20% steps, from 40% to 200%.
+Confirmed connections follow cell borders in `ACCENT`; unconfirmed/context
+connections are dashed `WARNING` paths. The detail panel spells out status and
+relationship, including conflicts and unverified sources, without relying on color.
+Only selected connections are emphasized. Background grid, data fill, inset
+selection and faint halos keep the reference’s layered appearance restrained.
+
+## Identity motion
+
+`fingerprint_intro()` uses the bundled Hero fingerprint, `DECORATIVE` tint and
+`space::SECTION` travel. It slides in and makes a foreshortened turn once over
+`motion::IDENTITY_ENTER_MS` (1100 ms), then rests. The password form stays still
+and interactive throughout; this motion never delays unlocking or repeats while
+typing. No new icon, color or typography role is introduced.
+
 ## Icons
 
 **ME Outline** is the app's existing bundled icon family. Use it everywhere via
@@ -142,7 +171,7 @@ modal_panel(486.)
 emoji, a second icon package or runtime icon downloads. Keyboard shortcut symbols
 and punctuation are text, not icons.
 
-All 29 SVG assets use a 24×24 viewBox, no fill, 1.5 px strokes, round caps and round
+All 30 SVG assets use a 24×24 viewBox, no fill, 1.5 px strokes, round caps and round
 joins. Black is the SVG mask source; GPUI applies the semantic tint at runtime.
 Sizes are `Small` 12, `Medium` 16, `Large` 20, `Brand` 24 and `Hero` 72. The last two
 are for the fingerprint identity, not ordinary action icons. Icon-only controls

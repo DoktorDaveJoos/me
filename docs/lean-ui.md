@@ -11,11 +11,15 @@ one large search field and copyable data rows. Empty search shows recently found
 or copied details, stored in the encrypted vault. A new vault shows available
 confirmed details until the first search.
 
-Typing immediately replaces recent rows with local matches. After a short pause,
+Typing replaces recent rows with local matches across notes, documents (filenames
+and enabled content), and imported credentials (titles and vault names). Item rows
+open the existing note, document, or masked credential view. Confirmed details keep
+their copy action and source; a matching note appears only once. Local search works
+without AI and refreshes after imports and edits. After a short pause,
 AI interprets the intent and chooses keys from the existing field catalog. It does
 not generate answers or values. English and German aliases work locally; semantic
-matching handles broader intent. Results always resolve to current confirmed
-vault values. Conflicting values remain visible and labeled. Copy buttons copy
+matching adds broader intent matches without removing local results. Copyable
+details always resolve to current confirmed vault values. Conflicting values remain visible and labeled. Copy buttons copy
 only the stored value, with the existing clipboard expiry behavior. Source links
 open the underlying detail. Enter retries the semantic filter; Cmd/Ctrl+K focuses
 search. Lock clears in-memory data and cancels outstanding work.
@@ -66,3 +70,25 @@ establish live model quality, computer-use availability, or Linux UI behavior.
 References: [Codex workspace launch](https://learn.chatgpt.com/docs/developer-commands?surface=cli),
 [PDFKit field names](https://developer.apple.com/documentation/pdfkit/pdfannotation/fieldname),
 [PDFKit widget values](https://developer.apple.com/documentation/pdfkit/pdfannotation/widgetstringvalue).
+
+### All-entity search validation — 2026-09-20
+
+The main Search view queries the local collection on a background worker, with
+a short debounce and request/session guards to discard stale results. This finds
+existing imports without migration or re-import. Filename matching also covers
+documents classified as credentials; their contents remain excluded. Credential
+payloads remain outside FTS, AI field catalogs, and document processing.
+
+All 73 core tests pass, including mixed collection kinds, five imported credential
+categories, archived entries, prefix/case matching, persistence after unlocking,
+deleted-item exclusion, secret-content exclusion, and additive semantic matching.
+Formatting, workspace compilation and Clippy (all targets/features), the design
+guard and its five tests pass. The macOS release bundle was rebuilt and signed.
+
+The synthetic search gallery was inspected at 1120×820 and 800×600 with AI
+disconnected. Instagram returns a login, document and one copyable note; their
+open actions reach the masked credential panel, document panel and note editor.
+Long filenames truncate, all rows remain reachable by scrolling, clearing restores
+personal details, and an unmatched query shows the empty state. Loading/error
+and rapid-query cancellation paths were inspected in code; Linux and live AI
+filtering were not visually exercised. No personal vault was opened.

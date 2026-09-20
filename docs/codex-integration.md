@@ -1,5 +1,14 @@
 # Codex-Anbindung: erster nutzbarer Ausbau
 
+**Update 18. September 2026:** Für Dokumentimporte gilt jetzt die
+[TypeSafe-Pipeline mit Wiederaufnahme und Ausgabenbegrenzung](import-reliability.md).
+TypeSafe trifft typisierte Routing-/Prüfentscheidungen mit einem privaten API-Key;
+Sol extrahiert die freien Werte über das ChatGPT-Abo. Einzelne Schritte sind
+verschlüsselt zwischengespeichert. Automatische Wiederholungen und rekursives
+Aufteilen sind entfernt. Die fünf Fortschrittsbalken zeigen erledigte Arbeit.
+Die folgenden historischen Angaben zu Klassifikation, Abschnittsgröße und
+serieller Verarbeitung werden dadurch ersetzt.
+
 Stand: 15. September 2026. ME. stellt Daten bereit; interaktive Aufgaben und
 Computer Use bleiben in der Codex-App. Die Inbox hat einen separaten lokalen
 Codex-App-Server-Prozess und nutzt das eigene ChatGPT-Abo.
@@ -65,37 +74,37 @@ liefern `conflicting`, keinen willkürlich ausgewählten Wert. Vorschläge haben
 unbestätigte Personenzuordnung. Nur ein eindeutiger akzeptierter Wert wird als
 `resolved` zurückgegeben. Gleichlautende akzeptierte Angaben behalten Belege.
 
-## Verbindliche Codex-Einrichtung
+## Asynchrone Codex-Verbindung
 
-ME. prüft beim App-Start die eigene Codex-Konfiguration. Solange die Prüfung
-läuft oder fehlschlägt, zeigt die App ausschließlich die Einrichtung. Erst nach
-erfolgreicher Prüfung werden Tresor-Erstellung, Entsperren und normale Nutzung
-zugänglich. Nach jedem Entsperren und vor jedem KI-Aufruf wird erneut geprüft.
+ME. prüft die eigene Codex-Konfiguration im Hintergrund parallel zum App-Start.
+Tresor-Erstellung, Wiederherstellung und Entsperren warten ausschließlich auf den
+lokalen Tresor. Nach korrektem Passwort erscheint sofort der Arbeitsbereich;
+Entsperren startet keine zweite Verbindungsprüfung. Auf dem Passwortbildschirm
+erscheinen weder Verbindungsstatus noch Anmeldeaufforderungen.
+
 Die Prüfung umfasst App-Server-Handshake, ChatGPT-Anmeldung mit Token-Refresh,
 Sol-Verfügbarkeit und einen authentifizierten Abruf der Kontingentinformationen.
 Sie startet keinen Modellturn und liest keinen Dokumentinhalt.
 
-- **Mit ChatGPT verbinden** startet die Anmeldung im Browser. ME. wartet auf den
-  Abschluss genau dieses Login-Versuchs und prüft danach den Zugang erneut.
-- Eine gültige gespeicherte Anmeldung führt automatisch weiter. Es gibt keinen
-  separaten dauerhaften „eingerichtet“-Schalter, der die Prüfung umgehen könnte.
-- Fehlende CLI, eigene Codex-Anpassungen, falsche Anmeldeart, fehlendes Modell oder
-  Verbindungsfehler halten die Einrichtung offen. Sie bietet erneute Anmeldung,
-  erneute Prüfung und die offizielle Codex-Installationshilfe.
-- Ein abgebrochener oder fehlgeschlagener Login schaltet die App nicht frei.
-  Laufende Einrichtung ist abbrechbar und wird beim Beenden der App beendet.
-  Codex läuft in einer eigenen Prozessgruppe; auch native Unterprozesse eines
-  npm-Launchers werden beendet und schließen ihre Pipes und Login-Callbacks.
-- Tastenkürzel, Import, Drag-and-drop und normale Datenaktionen sind gesperrt,
-  solange Codex nicht bereit ist. Ein zuvor geöffneter Tresor kann auch während
-  erneuter Einrichtung gesperrt werden.
-- Wird bei einer späteren KI-Prüfung eine ungültige Verbindung erkannt, führt
-  ME. zurück zur Einrichtung. Der Eingang bleibt erhalten und lässt sich danach
-  erneut starten. Es wird kein Login mehr aus dem Dokumentdialog heraus gestartet.
-- Die App benötigt für diese Prüfung eine erreichbare Codex-Verbindung. Ein
-  ausgeschöpftes Abo-Kontingent allein ist kein Konfigurationsfehler und sperrt
-  nicht den Zugriff auf gespeicherte Daten. Es gibt keinen laufenden Hintergrund-
-  Verbindungsmonitor; Änderungen werden bei den genannten Prüfungen erkannt.
+- Fehler oder ausgeschöpfte Kontingente erscheinen erst im geöffneten Arbeitsbereich
+  als ausblendbarer Hinweis. Details, erneute Prüfung und explizite Anmeldung sind
+  im Verbindungsdialog und über Einstellungen erreichbar. Escape oder „Back to
+  workspace“ schließt den Dialog, ohne den Tresor zu sperren.
+- Lokale Suche, Lesen, Bearbeiten, Importieren und Sicherungen bleiben verfügbar.
+  KI-Suche, automatische Analyse und KI-Organisation warten auf die Verbindung.
+  Ein erfolgreiches Prüfergebnis startet die aktivierte automatische Warteschlange.
+- Kontingente werden aus dem Codex-Bucket (oder dem älteren Einzel-Bucket) gelesen.
+  Ein bekanntes Fenster mit 100 Prozent Nutzung pausiert KI-Funktionen. Fehlende
+  Angaben gelten nicht als ausgeschöpft. Die Prüfung verbraucht keine Credits und
+  löst keinen Reset aus.
+- Browser-Anmeldung startet nur nach einem ausdrücklichen Klick. Ein fehlerhafter
+  oder abgebrochener Versuch beeinflusst den lokalen Tresorzugriff nicht.
+- Ergebnisse, die vor dem Entsperren eintreffen, werden bis zum Arbeitsbereich
+  zurückgehalten. Sperren verbirgt den Dialog; ein offener Browser-Login wird
+  abgebrochen. Beenden stoppt die Prüfung und die eigene Codex-Prozessgruppe.
+- Spätere KI-Aufrufe prüfen ihren Zugang erneut. Ein Verbindungsfehler zeigt den
+  Hinweis im Arbeitsbereich; ME. kehrt nicht zu einer Einrichtungssperre zurück.
+  Es gibt keinen laufenden Hintergrund-Verbindungsmonitor.
 
 Die Codex-Lesefreigabe für ME.-Werkzeuge bleibt eine eigene bewusste Freigabe im
 Tresor. Erfolgreiche Anmeldung aktiviert keinen MCP-Lesezugriff automatisch.

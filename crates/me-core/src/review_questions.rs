@@ -110,8 +110,22 @@ pub(crate) fn refresh_review_state(tx: &Transaction<'_>, source: &str) -> Result
     Ok(())
 }
 
-fn reason(code: &str) -> &'static str {
+fn reason(code: &str, property: &str) -> &'static str {
     match code {
+        "subject_unknown" => match property {
+            "person.tax_id" => {
+                "Is this your tax ID? The number is printed in this file, but its owner isn't clear."
+            }
+            "person.social_insurance_number" => {
+                "Is this your social insurance number? The number is printed in this file, but its owner isn't clear."
+            }
+            "person.birth_date" => {
+                "Is this your date of birth? The date is printed in this file, but it isn't clearly linked to a person."
+            }
+            _ => {
+                "Does this detail belong to you? Its value is printed in this file, but its owner isn't clear."
+            }
+        },
         "unknown_segment" => "The suggested source couldn't be found.",
         "quote_not_in_segment" => "The suggested quotation wasn't found in the source.",
         "value_not_in_quote" => "The source doesn't clearly confirm this value.",
@@ -137,7 +151,7 @@ impl Vault {
                         value: r.get(2)?,
                         claimed_quote: r.get(3)?,
                         claimed_subject: r.get(4)?,
-                        reason: reason(&r.get::<_, String>(5)?).into(),
+                        reason: reason(&r.get::<_, String>(5)?, &r.get::<_, String>(8)?).into(),
                         source_excerpt: r.get(6)?,
                         location_label: locator["page"]
                             .as_u64()

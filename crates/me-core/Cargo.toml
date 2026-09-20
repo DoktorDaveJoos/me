@@ -7,6 +7,9 @@ publish.workspace = true
 license-file.workspace = true
 description = "Platform-independent foundation for ME"
 
+[features]
+development-tools = []
+
 [dependencies]
 argon2 = { version = "=0.5.3", features = ["zeroize"] }
 chacha20poly1305 = "=0.10.1"

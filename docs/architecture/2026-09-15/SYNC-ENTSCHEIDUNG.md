@@ -2,6 +2,13 @@
 
 Recherche: 15. September 2026. Entscheidungsgrundlage, keine beschlossene Migration und keine implementierte Sync- oder Sicherheitsfunktion.
 
+> Produktentscheidung vom 20. September: ME.-Konten sind verpflichtend, und Chrome
+> sowie iPhone greifen eigenständig auf den verschlüsselten Cloud-Sync zu. Die
+> Chrome-Erweiterung verwendet keinen lokalen Desktop-Bridge für Tresorzugriff.
+> Siehe [Konten, Sync und Logins](../2026-09-20/ACCOUNTS-SYNC-AND-LOGINS.md).
+> Die unten offengehaltene Browser-Anbindung ist damit historisch; die konkreten
+> Protokolle und das Backend-Framework sind weiterhin nicht implementiert.
+
 ## Empfehlung und offene Entscheidung
 
 ME. sollte geräteunabhängige, Ende-zu-Ende-verschlüsselte Datenänderungen und Dateiobjekte synchronisieren. Jedes berechtigte Gerät hält einen eigenständig nutzbaren lokalen Bestand und lokale Suchindizes. PostgreSQL passt gut auf die Serverseite für Konten, Geräte, Zustellmetadaten und verschlüsselte Nutzdaten. Es erhält keine Schlüssel zum persönlichen Inhalt.

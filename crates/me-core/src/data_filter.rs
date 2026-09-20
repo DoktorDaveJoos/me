@@ -74,8 +74,9 @@ pub fn filter_data(facts: &[DataFact], query: &str, keys: &[String]) -> Vec<Data
     facts
         .iter()
         .filter(|f| {
-            if !keys.is_empty() {
-                return keys.contains(&f.property);
+            // AI-selected fields extend local matches instead of hiding them.
+            if keys.contains(&f.property) {
+                return true;
             }
             if aliases.contains(&f.property.as_str()) {
                 return true;
