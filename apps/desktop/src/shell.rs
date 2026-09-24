@@ -12,6 +12,11 @@ mod knowledge_canvas;
 #[path = "knowledge_ui.rs"]
 mod knowledge_ui;
 use knowledge_ui::KnowledgeState;
+#[path = "interface_preferences.rs"]
+mod interface_preferences;
+#[path = "motion_ui.rs"]
+mod motion_ui;
+use motion_ui::MotionPreferences;
 #[path = "ai_ui.rs"]
 mod ai_ui;
 #[path = "import_ui.rs"]
@@ -22,17 +27,41 @@ mod file_import_ui;
 #[path = "filter_ui.rs"]
 mod filter_ui;
 use filter_ui::FilterState;
+#[path = "account_client.rs"]
+mod account_client;
+#[path = "account_ui.rs"]
+mod account_ui;
 #[path = "codex_setup_ui.rs"]
 mod codex_setup_ui;
+#[path = "context_source.rs"]
+mod context_source;
+#[path = "credential_capture.rs"]
+mod credential_capture;
+#[path = "credential_create_ui.rs"]
+mod credential_create_ui;
 #[path = "credentials_ui.rs"]
 mod credentials_ui;
+#[path = "logins_ui.rs"]
+mod logins_ui;
+#[path = "site_icons.rs"]
+mod site_icons;
+use logins_ui::LoginsState;
 #[cfg(any(debug_assertions, feature = "development-tools"))]
 #[path = "development_ui.rs"]
 mod development_ui;
+#[path = "device_account_ui.rs"]
+mod device_account_ui;
+#[path = "device_accounts.rs"]
+mod device_accounts;
+#[path = "onboarding_ui.rs"]
+mod onboarding_ui;
+#[path = "permissions_ui.rs"]
+mod permissions_ui;
 #[path = "question_ui.rs"]
 mod question_ui;
 #[path = "settings_ui.rs"]
 mod settings_ui;
+use account_ui::{AccountMode, AccountState};
 #[path = "vault_ui.rs"]
 mod vault_ui;
 
@@ -48,12 +77,18 @@ actions!(
     [
         LockVault,
         OpenSettings,
+        OpenPermissions,
         FocusSearch,
         AddFact,
         Confirm,
         Dismiss,
         NextField,
-        PreviousField
+        PreviousField,
+        NewCredential,
+        EditLogin,
+        SaveLogin,
+        NextLogin,
+        PreviousLogin
     ]
 );
 
@@ -63,6 +98,7 @@ pub struct MeApp {
     filter_input: Entity<TextInput>,
     page: Page,
     knowledge: KnowledgeState,
+    motion: MotionPreferences,
     knowledge_input: Entity<TextInput>,
     knowledge_focus: FocusHandle,
     focus_filter_on_ready: bool,
@@ -82,6 +118,7 @@ pub struct MeApp {
     show_add: bool,
     show_info: bool,
     show_settings: bool,
+    permissions: permissions_ui::PermissionsState,
     #[cfg(any(debug_assertions, feature = "development-tools"))]
     development: development_ui::DevelopmentState,
     show_onepassword: bool,
@@ -90,6 +127,9 @@ pub struct MeApp {
     credential: Option<me_core::CredentialDetails>,
     credential_revealed: std::collections::BTreeSet<usize>,
     credential_generation: u64,
+    logins: LoginsState,
+    login_search: Entity<TextInput>,
+    login_focus: FocusHandle,
     settings: me_core::AppSettings,
     settings_saving: bool,
     auto_queue_check: bool,
@@ -120,6 +160,9 @@ pub struct MeApp {
     root: Option<PathBuf>,
     password: Entity<TextInput>,
     password_repeat: Entity<TextInput>,
+    account_email: Entity<TextInput>,
+    recovery_input: Entity<TextInput>,
+    account: AccountState,
     initialized: bool,
     unlocked: bool,
     busy: bool,
@@ -154,6 +197,9 @@ impl MeApp {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| TextInput::new("Find a file…", cx));
         let filter_input = cx.new(TextInput::filter);
+        let login_search = cx.new(|cx| TextInput::new("Search logins…", cx));
+        cx.observe(&login_search, |this, _, cx| this.filter_logins(cx))
+            .detach();
         let knowledge_input = cx.new(|cx| TextInput::new("Find anything in your knowledge…", cx));
         cx.observe(&knowledge_input, |this, _, cx| {
             this.knowledge_query_changed(cx)
@@ -163,18 +209,21 @@ impl MeApp {
             cx.new(|cx| TextInput::new("e.g. Passport number, shoe size, or an idea", cx));
         let value_input = cx.new(|cx| TextInput::new("A value or a short note", cx));
         let password = cx.new(TextInput::password);
-        let password_repeat = cx.new(TextInput::password);
+        let password_repeat = cx.new(|cx| TextInput::secret("Repeat master password", cx));
+        let account_email = cx.new(|cx| TextInput::new("you@example.com", cx));
+        let recovery_input = cx.new(|cx| TextInput::secret("Your saved recovery code", cx));
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
         cx.observe(&filter_input, |this, _, cx| this.filter_changed(cx))
             .detach();
+        Self::load_motion_preferences(cx);
         Self::inspect_vault(cx);
-        Self::schedule_codex_check(cx);
         Self {
             focus: cx.focus_handle(),
             search,
             filter_input,
             page: Page::Search,
             knowledge: KnowledgeState::default(),
+            motion: MotionPreferences::default(),
             knowledge_input,
             knowledge_focus: cx.focus_handle(),
             focus_filter_on_ready: true,
@@ -194,6 +243,7 @@ impl MeApp {
             show_add: false,
             show_info: false,
             show_settings: false,
+            permissions: Default::default(),
             #[cfg(any(debug_assertions, feature = "development-tools"))]
             development: Default::default(),
             show_onepassword: false,
@@ -202,6 +252,9 @@ impl MeApp {
             credential: None,
             credential_revealed: Default::default(),
             credential_generation: 0,
+            logins: LoginsState::default(),
+            login_search,
+            login_focus: cx.focus_handle(),
             settings: me_core::AppSettings::default(),
             settings_saving: false,
             auto_queue_check: false,
@@ -232,6 +285,9 @@ impl MeApp {
             root: Self::vault_path(),
             password,
             password_repeat,
+            account_email,
+            recovery_input,
+            account: AccountState::default(),
             initialized: false,
             unlocked: false,
             busy: true,
@@ -264,6 +320,9 @@ impl MeApp {
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        if self.login_edit_guard(cx) {
+            return;
+        }
         if self.app_ready()
             && !self.busy
             && self.credential.is_none()
@@ -275,6 +334,8 @@ impl MeApp {
             self.show_add = false;
             window.focus(&if self.page == Page::Knowledge {
                 self.knowledge_input.focus_handle(cx)
+            } else if self.page == Page::Logins {
+                self.login_search.focus_handle(cx)
             } else if self.page == Page::Browser {
                 self.search.focus_handle(cx)
             } else {
@@ -285,6 +346,9 @@ impl MeApp {
     }
 
     fn add_fact(&mut self, _: &AddFact, window: &mut Window, cx: &mut Context<Self>) {
+        if self.login_edit_guard(cx) {
+            return;
+        }
         if self.app_ready()
             && !self.busy
             && self.credential.is_none()
@@ -331,6 +395,13 @@ impl MeApp {
     }
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        if self.permissions.open {
+            return;
+        }
+        if self.provider_setup_visible() {
+            self.finish_onboarding(cx);
+            return;
+        }
         if !self.unlocked {
             window.focus(&self.focus);
             self.unlock_vault(cx);
@@ -376,7 +447,15 @@ impl MeApp {
     }
 
     fn next_field(&mut self, _: &NextField, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.unlocked {
+        if self.permissions.open {
+            return;
+        }
+        if !self.app_ready() && self.busy {
+            return;
+        }
+        if !self.unlocked && self.account_setup_visible() {
+            self.account_focus(window, cx, false);
+        } else if !self.unlocked {
             let next = if !self.initialized
                 && self.restore_from.is_none()
                 && self.password.focus_handle(cx).is_focused(window)
@@ -386,6 +465,8 @@ impl MeApp {
                 self.password.focus_handle(cx)
             };
             window.focus(&next);
+        } else if self.logins.draft.is_some() {
+            self.login_tab(false, window, cx);
         } else if self.editing.is_some() {
             let next = if self.title_input.focus_handle(cx).is_focused(window) {
                 self.value_input.focus_handle(cx)
@@ -399,10 +480,26 @@ impl MeApp {
     }
 
     fn previous_field(&mut self, _: &PreviousField, window: &mut Window, cx: &mut Context<Self>) {
-        self.next_field(&NextField, window, cx);
+        if self.permissions.open {
+            return;
+        }
+        if !self.app_ready() && self.busy {
+            return;
+        }
+        if !self.unlocked && self.account_setup_visible() {
+            self.account_focus(window, cx, true);
+        } else if self.logins.draft.is_some() {
+            self.login_tab(true, window, cx);
+        } else {
+            self.next_field(&NextField, window, cx);
+        }
     }
 
     fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
+        if self.permissions.open {
+            self.close_permissions(cx);
+            return;
+        }
         #[cfg(any(debug_assertions, feature = "development-tools"))]
         if self.show_settings && self.development.confirming {
             self.development.confirming = false;
@@ -421,6 +518,22 @@ impl MeApp {
         }
         if self.busy {
             return;
+        }
+        if self.page == Page::Logins && !self.show_settings {
+            if self.logins.intake.open {
+                self.close_credential_intake(cx);
+                return;
+            }
+            if self.logins.draft.is_some() {
+                self.cancel_login_edit(window, cx);
+                return;
+            }
+            if self.show_onepassword {
+                self.show_onepassword = false;
+                self.clear_credentials(cx);
+                cx.notify();
+                return;
+            }
         }
         if self.filter.handoff_review {
             self.filter.handoff_review = false;
@@ -508,7 +621,7 @@ impl MeApp {
 
     fn edit_modal(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.overlay(cx).child(
-            modal_panel(486.)
+            modal_panel(486., self.motion_enabled())
                 .child(
                     div()
                         .flex()
@@ -607,7 +720,8 @@ impl MeApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let focused = input.focus_handle(cx).is_focused(window);
+        let frozen = !self.app_ready() && self.busy;
+        let focused = !frozen && input.focus_handle(cx).is_focused(window);
         let focus_input = input.clone();
         div()
             .flex()
@@ -622,6 +736,10 @@ impl MeApp {
             .child(
                 div()
                     .id(label)
+                    .relative()
+                    .when(focused, |s| {
+                        s.child(motion::frame(motion::Frame::Focus, self.motion_enabled()))
+                    })
                     .w_full()
                     .h(px(layout::CONTROL_LARGE))
                     .px(px(space::MD))
@@ -630,14 +748,22 @@ impl MeApp {
                     .border_color(rgb(if focused { FOCUS } else { LINE }))
                     .flex()
                     .items_center()
-                    .on_click(move |_, window, cx| window.focus(&focus_input.focus_handle(cx)))
-                    .child(input),
+                    .on_click(move |_, window, cx| {
+                        if !frozen {
+                            window.focus(&focus_input.focus_handle(cx));
+                        }
+                    })
+                    .child(if frozen {
+                        input.read(cx).frozen().into_any_element()
+                    } else {
+                        input.into_any_element()
+                    }),
             )
     }
 
     fn add_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
         self.overlay(cx).child(
-            modal_panel(410.)
+            modal_panel(410., self.motion_enabled())
                 .child(
                     div()
                         .flex()
@@ -729,7 +855,7 @@ impl MeApp {
     }
 
     fn info_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        self.overlay(cx).child(modal_panel(430.)
+        self.overlay(cx).child(modal_panel(430., self.motion_enabled())
             .child(div().type_style(Type::Body).text_color(rgb(MUTED)).child("Share your current, released sources with Codex until you lock ME. Shared content may remain in Codex history."))
             .child(div().id("toggle-codex-access").type_style(Type::Body).text_color(rgb(ACCENT)).cursor_pointer().on_click(cx.listener(|this,_,_,cx|this.toggle_codex(cx))).child(if self.bridge.is_some(){"Stop access"}else{"Allow access this session"}))
             .child(div().type_style(Type::Caption).text_color(rgb(MUTED)).child("Connect the bundled me-mcp server in Codex. Credentials and unreleased files are excluded."))
@@ -752,21 +878,80 @@ impl Render for MeApp {
         if self.development.wiping {
             return self.wipe_progress().into_any_element();
         }
-        if !self.unlocked {
-            if !self.busy && self.focus_password_on_ready {
-                window.focus(&self.password.focus_handle(cx));
+        if !self.app_ready() {
+            if self.busy {
+                window.focus(&self.focus);
+            }
+            if !self.unlocked && !self.busy && self.focus_password_on_ready {
+                if self.account_setup_visible()
+                    && self.account.pending.is_none()
+                    && self.account.complete.is_none()
+                {
+                    window.focus(&self.account_email.focus_handle(cx));
+                } else if !self.account_setup_visible() {
+                    window.focus(&self.password.focus_handle(cx));
+                }
                 self.focus_password_on_ready = false;
             }
-            let content = self.locked_view(window, cx).into_any_element();
+            let content = if self.provider_setup_visible() {
+                window.focus(&self.focus);
+                self.account_view(window, cx).into_any_element()
+            } else {
+                self.locked_view(window, cx).into_any_element()
+            };
             return div()
                 .id("import-locked-shell")
+                .bg(rgb(BG))
+                .font_family(font::SANS)
+                .type_style(Type::Body)
+                .text_color(rgb(INK))
                 .size_full()
                 .relative()
+                .when(self.motion.loaded, |s| {
+                    s.child(motion::field(
+                        motion::Field::Identity,
+                        self.motion_enabled(),
+                    ))
+                })
+                .when(self.busy && self.motion.loaded, |s| {
+                    s.child(motion::activity(
+                        motion::Field::Identity,
+                        self.motion_enabled(),
+                    ))
+                })
                 .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                     this.accept_documents(paths.paths(), cx)
                 }))
                 .drag_over::<ExternalPaths>(|s, _, _, _| s.border_2().border_color(rgb(ACCENT)))
                 .child(content)
+                .on_action(cx.listener(Self::open_permissions))
+                .when(self.permissions.open, |s| {
+                    s.child(self.permissions_modal(window, cx))
+                })
+                .when(self.unlocked, |s| {
+                    s.on_action(cx.listener(Self::lock_vault))
+                })
+                .when(cfg!(debug_assertions), |s| {
+                    s.child(
+                        div()
+                            .absolute()
+                            .right(px(space::LG))
+                            .bottom(px(space::LG))
+                            .child(
+                                secondary_action()
+                                    .id("locked-motion-toggle")
+                                    .hover(|s| s.bg(rgb(HOVER)))
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_motion(cx)))
+                                    .child(if self.motion.saving {
+                                        "Saving…"
+                                    } else if self.motion.reduced {
+                                        "Enable animations"
+                                    } else {
+                                        "Reduce motion"
+                                    }),
+                            ),
+                    )
+                })
                 .when(
                     !self.pending_imports.is_empty() || self.import_scans > 0,
                     |s| {
@@ -807,12 +992,16 @@ impl Render for MeApp {
             .key_context("Me")
             .on_action(cx.listener(Self::lock_vault))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::open_permissions))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::add_fact))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::next_field))
             .on_action(cx.listener(Self::previous_field))
+            .on_action(cx.listener(Self::new_credential))
+            .on_action(cx.listener(Self::edit_login))
+            .on_action(cx.listener(Self::save_login))
             .on_action(cx.listener(Self::paste_files))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.accept_documents(paths.paths(), cx)
@@ -821,46 +1010,134 @@ impl Render for MeApp {
             .child(self.sidebar(cx))
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .h_full()
                     .flex()
                     .flex_col()
+                    // GPUI paints siblings in order: decoration stays below every page.
+                    .child(
+                        div()
+                            .id((
+                                "workspace-decoration",
+                                if self.show_settings {
+                                    6
+                                } else {
+                                    self.page as usize
+                                },
+                            ))
+                            .absolute()
+                            .inset_0()
+                            .child(motion::field(
+                                motion::Field::Workspace,
+                                self.motion_enabled(),
+                            ))
+                            .when(self.workspace_activity(), |s| {
+                                s.child(motion::activity(
+                                    motion::Field::Workspace,
+                                    self.motion_enabled(),
+                                ))
+                            }),
+                    )
                     .when(self.codex_notice && self.codex_issue.is_some(), |s| {
                         s.child(self.codex_notice_view(cx))
                     })
-                    .child(if self.show_settings {
-                        self.settings_view(cx).into_any_element()
-                    } else {
-                        match self.page {
-                            Page::Search => self.filter_view(window, cx).into_any_element(),
-                            Page::Review => self.review_view(cx).into_any_element(),
-                            Page::Browser => self.browser_view(cx).into_any_element(),
-                            Page::Knowledge => self.knowledge_view(window, cx).into_any_element(),
-                            Page::Imports => self.import_view(cx).into_any_element(),
-                        }
-                    }),
+                    .child(motion::page(
+                        if self.show_settings {
+                            self.settings_view(cx).into_any_element()
+                        } else {
+                            match self.page {
+                                Page::Search => self.filter_view(window, cx).into_any_element(),
+                                Page::Review => self.review_view(cx).into_any_element(),
+                                Page::Browser => self.browser_view(cx).into_any_element(),
+                                Page::Knowledge => {
+                                    self.knowledge_view(window, cx).into_any_element()
+                                }
+                                Page::Imports => self.import_view(cx).into_any_element(),
+                                Page::Logins => self.logins_view(window, cx).into_any_element(),
+                            }
+                        },
+                        if self.show_settings {
+                            6
+                        } else {
+                            self.page as usize
+                        },
+                        self.motion_enabled(),
+                    )),
             )
             .when(self.filter.handoff_review, |s| {
-                s.child(self.handoff_modal(cx))
+                s.child(motion::overlay(
+                    self.handoff_modal(cx).into_any_element(),
+                    "overlay-handoff",
+                    self.motion_enabled(),
+                ))
+            })
+            .when(
+                self.page == Page::Logins && self.show_onepassword && !self.show_settings,
+                |s| s.child(self.login_import_modal(cx)),
+            )
+            .when(self.logins.intake.open && !self.show_settings, |s| {
+                s.child(motion::overlay(
+                    self.credential_intake_modal(window, cx),
+                    "overlay-new-credential",
+                    self.motion_enabled(),
+                ))
             })
             .when(self.credential.is_some(), |s| {
-                s.child(self.credential_modal(cx))
+                s.child(motion::overlay(
+                    self.credential_modal(cx).into_any_element(),
+                    "overlay-credential",
+                    self.motion_enabled(),
+                ))
             })
             .when(self.document_open.is_some(), |s| {
-                s.child(self.document_modal(cx))
+                s.child(motion::overlay(
+                    self.document_modal(cx).into_any_element(),
+                    "overlay-document",
+                    self.motion_enabled(),
+                ))
             })
-            .when(self.show_add, |s| s.child(self.add_modal(cx)))
-            .when(self.show_info, |s| s.child(self.info_modal(cx)))
+            .when(self.show_add, |s| {
+                s.child(motion::overlay(
+                    self.add_modal(cx).into_any_element(),
+                    "overlay-add",
+                    self.motion_enabled(),
+                ))
+            })
+            .when(self.show_info, |s| {
+                s.child(motion::overlay(
+                    self.info_modal(cx).into_any_element(),
+                    "overlay-info",
+                    self.motion_enabled(),
+                ))
+            })
             .when(self.editing.is_some(), |s| {
-                s.child(self.edit_modal(window, cx))
+                s.child(motion::overlay(
+                    self.edit_modal(window, cx).into_any_element(),
+                    "overlay-edit",
+                    self.motion_enabled(),
+                ))
             })
             .when(
                 !self.pending_imports.is_empty() || self.import_scans > 0,
-                |s| s.child(self.import_confirmation(cx)),
+                |s| {
+                    s.child(motion::overlay(
+                        self.import_confirmation(cx).into_any_element(),
+                        "overlay-import-confirmation",
+                        self.motion_enabled(),
+                    ))
+                },
             )
             .when(self.show_codex_setup, |s| {
-                s.child(self.codex_setup_view(cx))
+                s.child(motion::overlay(
+                    self.codex_setup_view(cx).into_any_element(),
+                    "overlay-codex-setup",
+                    self.motion_enabled(),
+                ))
+            })
+            .when(self.permissions.open, |s| {
+                s.child(self.permissions_modal(window, cx))
             })
             .into_any_element()
     }

@@ -135,14 +135,16 @@ Suggested sequence:
 4. iPhone client, AutoFill, and compatible offline storage.
 5. TypeSafe-assisted unresolved matching and expanded desktop app filling.
 
-No backend, account requirement, sync service, browser extension, or iPhone client
-is implemented by this document. This note is the source of direction for that work.
+This note records direction. The subsequent [account setup implementation](../../accounts.md)
+adds registration, sign-in and recovery with one master password and one vault.
+Sync, browser and iPhone clients remain unimplemented.
 
 ## Open product and engineering decisions
 
 - Whether credential sync is free or paid; document-storage and AI allowances.
   Independent browser + desktop access requires sync even on the same computer.
-- Sign-in methods, identity provider, account deletion, and recovery UX.
+- V1 uses email plus one master password and a recovery code; no separate app-unlock
+  password. Email verification, account deletion and production identity review remain open.
 - Exact key hierarchy, enrollment/recovery protocol, threat model, and review.
 - Supporting backend components and hosting region/provider; see [backend selection](BACKEND-OPTIONS.md).
 - Retention, conflict resolution UX, backups, quotas, and support boundaries.

@@ -24,6 +24,7 @@ mod shell {
                     executor.timer(std::time::Duration::from_millis(10)).await;
                 }
                 this.update(cx, |this, cx| {
+                    this.account.mode = AccountMode::Unlock;
                     this.password.update(cx, |field, cx| {
                         field.set_text(
                             if mode == "wrong" {
@@ -52,6 +53,7 @@ mod shell {
                 }
                 this.update(cx, |this, cx| {
                     assert!(this.initialized && !this.busy && !this.codex_ready);
+                    this.account.mode = AccountMode::Unlock;
                     this.password.update(cx, |field, cx| field.set_text("wrong-password", cx));
                     this.unlock_vault(cx);
                 }).unwrap();

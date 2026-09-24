@@ -31,12 +31,18 @@ actions!(
         Paste,
         Cut,
         Copy,
+        Newline,
+        UpLine,
+        DownLine,
     ]
 );
 
 pub struct TextInput {
     focus_handle: FocusHandle,
     secret: bool,
+    multiline: bool,
+    last_lines: Vec<(usize, ShapedLine)>,
+    last_line_height: Pixels,
     file_paste: bool,
     pub content: SharedString,
     placeholder: SharedString,
@@ -50,15 +56,102 @@ pub struct TextInput {
 }
 
 impl TextInput {
+    pub fn bounds(&self) -> Option<Bounds<Pixels>> {
+        self.last_bounds
+    }
+    pub fn multiline(placeholder: &str, cx: &mut Context<Self>) -> Self {
+        let mut input = Self::new(placeholder, cx);
+        input.multiline = true;
+        input
+    }
+    pub fn set_concealed(&mut self, concealed: bool, cx: &mut Context<Self>) {
+        self.secret = concealed;
+        self.last_lines.clear();
+        self.last_layout = None;
+        self.scroll_offset = px(0.);
+        cx.notify();
+    }
+    fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.multiline {
+            self.replace_text_in_range(None, "\n", window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+    fn up_line(&mut self, _: &UpLine, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_line(-1, cx);
+    }
+    fn down_line(&mut self, _: &DownLine, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_line(1, cx);
+    }
+    fn move_line(&mut self, direction: isize, cx: &mut Context<Self>) {
+        if !self.multiline || self.secret || self.last_lines.is_empty() {
+            cx.propagate();
+            return;
+        }
+        let cursor = self.cursor_offset();
+        let index = self
+            .last_lines
+            .iter()
+            .rposition(|(start, _)| *start <= cursor)
+            .unwrap_or(0);
+        let x = self.last_lines[index]
+            .1
+            .x_for_index(cursor - self.last_lines[index].0);
+        let next = index
+            .saturating_add_signed(direction)
+            .min(self.last_lines.len() - 1);
+        self.move_to(
+            self.last_lines[next].0 + self.last_lines[next].1.closest_index_for_x(x),
+            cx,
+        );
+    }
+    fn multiline_index(&self, position: Point<Pixels>) -> usize {
+        let Some(bounds) = self.last_bounds else {
+            return 0;
+        };
+        if self.last_lines.is_empty() {
+            return 0;
+        }
+        let height = self.last_line_height;
+        let index = (((position.y - bounds.top()) / height).max(0.) as usize)
+            .min(self.last_lines.len() - 1);
+        let (start, line) = &self.last_lines[index];
+        start + line.closest_index_for_x(position.x - bounds.left() + self.scroll_offset)
+    }
+
     pub fn filter(cx: &mut Context<Self>) -> Self {
         let mut input = Self::new("Find anything, or drop a form…", cx);
         input.file_paste = true;
         input
     }
     pub fn password(cx: &mut Context<Self>) -> Self {
-        let mut input = Self::new("Vault password", cx);
+        Self::secret("Master password", cx)
+    }
+    pub fn secret(placeholder: &str, cx: &mut Context<Self>) -> Self {
+        let mut input = Self::new(placeholder, cx);
         input.secret = true;
         input
+    }
+    /// An inert field snapshot while its submitted value is being processed.
+    /// Secret values use exactly the same mask as the interactive editor.
+    pub fn frozen(&self) -> impl IntoElement {
+        let content: SharedString = if self.secret {
+            masked_text(&self.content).into()
+        } else {
+            self.content.clone()
+        };
+        div()
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
+            .type_style(Type::Body)
+            .text_color(rgb(if content.is_empty() { FAINT } else { INK }))
+            .child(if content.is_empty() {
+                self.placeholder.clone()
+            } else {
+                content
+            })
     }
     fn display_offset(&self, offset: usize) -> usize {
         if self.secret {
@@ -174,7 +267,12 @@ impl TextInput {
     }
 
     pub fn paste_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
+        self.replace_text_in_range(
+            None,
+            &pasted_text(text, self.multiline, self.secret),
+            window,
+            cx,
+        );
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -214,6 +312,9 @@ impl TextInput {
     }
 
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
+        if self.multiline && !self.secret {
+            return self.multiline_index(position);
+        }
         if self.content.is_empty() {
             return 0;
         }
@@ -303,6 +404,9 @@ impl TextInput {
         Self {
             focus_handle: cx.focus_handle(),
             secret: false,
+            multiline: false,
+            last_lines: Vec::new(),
+            last_line_height: px(1.),
             file_paste: false,
             content: "".into(),
             placeholder: placeholder.to_owned().into(),
@@ -322,6 +426,7 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.last_layout = None;
+        self.last_lines.clear();
         self.last_bounds = None;
         self.is_selecting = false;
         self.scroll_offset = px(0.);
@@ -447,6 +552,20 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if self.multiline && !self.secret {
+            let range = self.range_from_utf16(&range_utf16);
+            let index = self
+                .last_lines
+                .iter()
+                .rposition(|(start, _)| *start <= range.start)?;
+            let (start, line) = &self.last_lines[index];
+            let height = self.last_line_height;
+            let x = line.x_for_index(range.start - start) - self.scroll_offset;
+            return Some(Bounds::new(
+                point(bounds.left() + x, bounds.top() + height * index as f32),
+                size(px(1.), height),
+            ));
+        }
         let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
@@ -469,6 +588,9 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
+        if self.multiline && !self.secret {
+            return Some(self.offset_to_utf16(self.multiline_index(point)));
+        }
         if self.content.is_empty() {
             return Some(0);
         }
@@ -535,7 +657,7 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content: SharedString = if input.secret {
-            "*".repeat(input.content.chars().count()).into()
+            masked_text(&input.content).into()
         } else {
             input.content.clone()
         };
@@ -688,7 +810,11 @@ impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
-            .key_context("TextInput")
+            .key_context(if self.multiline {
+                "TextInput MultilineInput"
+            } else {
+                "TextInput"
+            })
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
@@ -704,6 +830,9 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::newline))
+            .on_action(cx.listener(Self::up_line))
+            .on_action(cx.listener(Self::down_line))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -714,7 +843,12 @@ impl Render for TextInput {
             .font_family(font::SANS)
             .text_color(rgb(crate::theme::INK))
             .type_style(Type::Body)
-            .child(TextElement { input: cx.entity() })
+            .when(self.multiline && !self.secret, |s| {
+                s.child(MultilineElement { input: cx.entity() })
+            })
+            .when(!self.multiline || self.secret, |s| {
+                s.child(TextElement { input: cx.entity() })
+            })
     }
 }
 
@@ -726,6 +860,9 @@ impl Focusable for TextInput {
 
 pub fn register_bindings(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("enter", Newline, Some("MultilineInput")),
+        KeyBinding::new("up", UpLine, Some("MultilineInput")),
+        KeyBinding::new("down", DownLine, Some("MultilineInput")),
         KeyBinding::new("backspace", Backspace, Some("TextInput")),
         KeyBinding::new("delete", Delete, Some("TextInput")),
         KeyBinding::new("left", Left, Some("TextInput")),
@@ -748,4 +885,224 @@ pub fn register_bindings(cx: &mut App) {
         KeyBinding::new(&format!("{modifier}-c"), Copy, None),
         KeyBinding::new(&format!("{modifier}-x"), Cut, None),
     ]);
+}
+
+// Multiline editing uses the same selection, clipboard, grapheme and IME model
+// as single-line inputs. Hard line breaks are retained verbatim.
+struct MultilineElement {
+    input: Entity<TextInput>,
+}
+struct MultilinePaint {
+    lines: Vec<(usize, ShapedLine)>,
+    selection: Vec<PaintQuad>,
+    cursor: Option<PaintQuad>,
+    scroll: Pixels,
+}
+impl IntoElement for MultilineElement {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+impl Element for MultilineElement {
+    type RequestLayoutState = ();
+    type PrepaintState = MultilinePaint;
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let rows = self.input.read(cx).content.split('\n').count().max(3);
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = (window.line_height() * rows as f32).into();
+        (window.request_layout(style, [], cx), ())
+    }
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> MultilinePaint {
+        let input = self.input.read(cx);
+        let style = window.text_style();
+        let height = window.line_height();
+        let mut lines = Vec::new();
+        let mut offset = 0;
+        for text in input.content.split('\n') {
+            let display: SharedString = if input.content.is_empty() {
+                input.placeholder.clone()
+            } else {
+                if input.secret {
+                    masked_text(text).into()
+                } else {
+                    text.to_owned().into()
+                }
+            };
+            let run = TextRun {
+                len: display.len(),
+                font: style.font(),
+                color: if input.content.is_empty() {
+                    rgb(FAINT).into()
+                } else {
+                    style.color
+                },
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            lines.push((
+                offset,
+                window.text_system().shape_line(
+                    display,
+                    style.font_size.to_pixels(window.rem_size()),
+                    &[run],
+                    None,
+                ),
+            ));
+            offset += text.len() + 1;
+        }
+        let cursor = input.cursor_offset();
+        let row = lines
+            .iter()
+            .rposition(|(start, _)| *start <= cursor)
+            .unwrap_or(0);
+        let cursor_x = lines[row].1.x_for_index(cursor - lines[row].0);
+        let available = (bounds.size.width - px(3.)).max(px(0.));
+        let mut scroll = input.scroll_offset;
+        if cursor_x - scroll > available {
+            scroll = cursor_x - available;
+        }
+        if cursor_x < scroll {
+            scroll = cursor_x;
+        }
+        let mut selection = Vec::new();
+        for (i, (start, line)) in lines.iter().enumerate() {
+            let end = lines.get(i + 1).map_or(input.content.len(), |(s, _)| s - 1);
+            let left = input.selected_range.start.max(*start);
+            let right = input.selected_range.end.min(end);
+            if left <= right
+                && input.selected_range.start <= end
+                && input.selected_range.end > *start
+                && !input.selected_range.is_empty()
+            {
+                let x1 = line.x_for_index(left - start) - scroll;
+                let x2 = if input.selected_range.end > end {
+                    line.width + px(space::SM)
+                } else {
+                    line.x_for_index(right - start)
+                } - scroll;
+                selection.push(fill(
+                    Bounds::new(
+                        point(bounds.left() + x1, bounds.top() + height * i as f32),
+                        size((x2 - x1).max(px(1.)), height),
+                    ),
+                    rgba(SELECTION),
+                ));
+            }
+        }
+        let cursor = input.selected_range.is_empty().then(|| {
+            fill(
+                Bounds::new(
+                    point(
+                        bounds.left() + cursor_x - scroll,
+                        bounds.top() + height * row as f32,
+                    ),
+                    size(px(1.), height),
+                ),
+                rgb(INK),
+            )
+        });
+        MultilinePaint {
+            lines,
+            selection,
+            cursor,
+            scroll,
+        }
+    }
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        paint: &mut MultilinePaint,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let focus = self.input.read(cx).focus_handle.clone();
+        window.handle_input(
+            &focus,
+            ElementInputHandler::new(bounds, self.input.clone()),
+            cx,
+        );
+        for quad in paint.selection.drain(..) {
+            window.paint_quad(quad);
+        }
+        let height = window.line_height();
+        for (i, (_, line)) in paint.lines.iter().enumerate() {
+            let _ = line.paint(
+                point(
+                    bounds.left() - paint.scroll,
+                    bounds.top() + height * i as f32,
+                ),
+                height,
+                window,
+                cx,
+            );
+        }
+        if focus.is_focused(window)
+            && let Some(cursor) = paint.cursor.take()
+        {
+            window.paint_quad(cursor);
+        }
+        self.input.update(cx, |input, _| {
+            input.last_lines = std::mem::take(&mut paint.lines);
+            input.last_bounds = Some(bounds);
+            input.last_line_height = height;
+            input.scroll_offset = paint.scroll;
+        });
+    }
+}
+
+fn masked_text(text: &str) -> String {
+    "*".repeat(text.chars().count())
+}
+
+fn pasted_text(text: &str, multiline: bool, secret: bool) -> std::borrow::Cow<'_, str> {
+    if multiline || secret {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(text.replace('\n', " "))
+    }
+}
+#[cfg(test)]
+mod paste_tests {
+    use super::pasted_text;
+    #[test]
+    fn masks_multiline_secrets_and_unicode_without_exposing_contents() {
+        let secret = "SYNTHETIC-API-KEY\nprivate 🗝";
+        let masked = super::masked_text(secret);
+        assert_eq!(masked.len(), secret.chars().count());
+        assert!(masked.bytes().all(|b| b == b'*'));
+        assert!(!masked.contains("SYNTHETIC"));
+    }
+    #[test]
+    fn preserves_multiline_notes_and_exact_secret_bytes() {
+        let text = "  café 日本語\nsecond line\t  ";
+        assert_eq!(pasted_text(text, true, false), text);
+        assert_eq!(pasted_text(text, false, true), text);
+        assert_eq!(pasted_text("first\nsecond", false, false), "first second");
+    }
 }

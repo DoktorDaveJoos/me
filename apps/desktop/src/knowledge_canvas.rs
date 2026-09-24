@@ -123,12 +123,14 @@ pub(super) fn routes(
         .enumerate()
         .filter(|(_, e)| Some(e.from.as_str()) == selected || Some(e.to.as_str()) == selected)
         .filter_map(|(i, e)| {
+            let (from, to) = if Some(e.from.as_str()) == selected {
+                (&e.from, &e.to)
+            } else {
+                (&e.to, &e.from)
+            };
             Some((
                 i,
-                route(
-                    *positions.get(e.from.as_str())?,
-                    *positions.get(e.to.as_str())?,
-                ),
+                route(*positions.get(from.as_str())?, *positions.get(to.as_str())?),
             ))
         })
         .collect()
@@ -188,15 +190,42 @@ fn hex(center: Point<f32>, radius: f32) -> Vec<Point<f32>> {
         })
         .collect()
 }
+pub(super) struct Motion {
+    pub routes: f32,
+    pub selection: f32,
+    pub arrival: f32,
+    pub arriving: std::sync::Arc<BTreeSet<String>>,
+}
+impl Motion {
+    pub fn active(&self) -> bool {
+        self.routes < 1. || self.selection < 1. || self.arrival < 1.
+    }
+    pub fn node_opacity(&self, id: &str) -> f32 {
+        if self.arrival >= 1. || !self.arriving.contains(id) {
+            return 1.;
+        }
+        let start = crate::design_system::motion::NODE_START_OPACITY;
+        start + (1. - start) * motion::ease(self.arrival)
+    }
+}
+pub(super) struct Presentation<'a> {
+    pub view: &'a KnowledgeViewport,
+    pub matching: Option<&'a BTreeSet<String>>,
+    pub motion: &'a Motion,
+}
 pub(super) fn paint(
     bounds: Bounds<Pixels>,
     graph: &KnowledgeMap,
-    view: &KnowledgeViewport,
     visible: &[usize],
     paths: &[(usize, Vec<Point<f32>>)],
-    matching: Option<&BTreeSet<String>>,
+    presentation: Presentation<'_>,
     window: &mut Window,
 ) {
+    let Presentation {
+        view,
+        matching,
+        motion: animation,
+    } = presentation;
     let zoom = view.zoom as f32;
     let center = world_fraction(view.center_q, view.center_r);
     let origin = point(
@@ -238,6 +267,7 @@ pub(super) fn paint(
         } else {
             1.
         };
+        let opacity = opacity * animation.node_opacity(&n.id);
         let mut fill = PathBuilder::fill();
         rounded(&mut fill, &hex(p, radius), true, radius::STANDARD * zoom);
         paint_path(
@@ -266,12 +296,20 @@ pub(super) fn paint(
         );
         if selected {
             let mut inner = PathBuilder::stroke(px(map_style::BORDER));
-            rounded(
-                &mut inner,
-                &hex(p, radius - space::XS * zoom),
-                true,
-                radius::STANDARD * zoom,
-            );
+            if animation.selection < 1. {
+                let points = motion::trace(
+                    &motion::hex_outline(p, radius - space::XS * zoom, radius::STANDARD * zoom),
+                    motion::ease(animation.selection),
+                );
+                rounded(&mut inner, &points, false, 0.);
+            } else {
+                rounded(
+                    &mut inner,
+                    &hex(p, radius - space::XS * zoom),
+                    true,
+                    radius::STANDARD * zoom,
+                );
+            }
             paint_path(window, inner, ACCENT, 1.);
         }
     }
@@ -289,6 +327,7 @@ pub(super) fn paint(
             .iter()
             .map(|p| point(origin.x + p.x * zoom, origin.y + p.y * zoom))
             .collect::<Vec<_>>();
+        let points = motion::trace(&points, motion::ease(animation.routes));
         let mut halo = PathBuilder::stroke(px(map_style::HALO_WIDTH));
         rounded(&mut halo, &points, false, radius::STANDARD * zoom);
         paint_path(window, halo, color, map_style::HALO_OPACITY);

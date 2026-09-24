@@ -7,6 +7,14 @@ impl MeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.app_ready()
+            && self.page == Page::Logins
+            && self.logins.intake.open
+            && !self.show_settings
+        {
+            self.paste_credential_context(cx);
+            return;
+        }
         if !self.app_ready() {
             return;
         }

@@ -11,3 +11,8 @@ jobs:
         run: python3 scripts/check-design-system
       - name: Verify drift detection
         run: python3 scripts/test-design-system.py
+      - name: Verify development packaging and identity policies
+        run: |
+          python3 scripts/test-macos-bundle-plist.py
+          python3 scripts/test-macos-sign-bundle.py
+          python3 scripts/test-macos-build.py

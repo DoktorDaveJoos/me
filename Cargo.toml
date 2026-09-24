@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "apps/desktop",
+    "services/api",
+    "crates/me-protocol",
     "crates/me-core",
     "crates/me-agent",
     "crates/me-documents",

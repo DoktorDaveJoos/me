@@ -1,8 +1,9 @@
 # Backend options for ME
 
 Date: 2026-09-20. Status: Rust + Axum + Tokio selected by the user. The comparison
-below records the reasoning; the backend is not yet implemented. SQLx, hosting,
-identity, and other supporting components remain recommendations to finalize.
+below records the reasoning. The subsequent [account service](../../accounts.md)
+implements the first endpoints with PostgreSQL/SQLx; hosting and production
+identity review remain open.
 Read [the account and sync decision](ACCOUNTS-SYNC-AND-LOGINS.md) for requirements
 and [the proposed repository/release model](REPOSITORY-AND-RELEASES.md) for organization.
 

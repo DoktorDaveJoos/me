@@ -2,7 +2,8 @@
 
 Date: 2026-09-20.
 Status: accepted layout and release model. The desktop directory migration is
-implemented. Future clients, the API, and product release workflows remain planned.
+implemented. The first [account API](../../accounts.md) and shared protocol crate
+are implemented. Future clients and product release workflows remain planned.
 Rust + Axum + Tokio is the confirmed backend choice. One canonical checkout and
 one GitHub repository hold the product family.
 
@@ -31,7 +32,7 @@ crates. Root tooling and documentation serve the entire repository.
         me-agent/            Existing provider and agent integration
         me-documents/        Existing document processing
         me-diagnostics/      Existing diagnostic implementation
-        me-protocol/         Future portable sync/API message definitions
+        me-protocol/         Portable account API message definitions
       infra/                 Deployment definitions and local service setup
       docs/                  Product, architecture, design, and release notes
       scripts/               Repository-wide build and verification commands

@@ -88,6 +88,9 @@ impl PendingFile {
 
 impl MeApp {
     pub(super) fn accept_documents(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if self.login_edit_guard(cx) {
+            return;
+        }
         // Metadata only. Nothing is imported or released to AI until confirmation.
         let paths = paths.to_vec();
         let generation = self.generation;
@@ -268,7 +271,7 @@ impl MeApp {
         cx.notify();
     }
     pub(super) fn refresh_imports(&mut self, cx: &mut Context<Self>) {
-        if !self.unlocked {
+        if !self.app_ready() {
             return;
         }
         if self.import_refresh {
@@ -315,7 +318,7 @@ impl MeApp {
             .count();
         let can_import =
             selected > 0 && self.import_scans == 0 && !self.intake_active && !self.busy;
-        self.overlay(cx).child(modal_panel(620.).max_h_full()
+        self.overlay(cx).child(modal_panel(620., self.motion_enabled()).max_h_full()
             .child(heading("Import these files?"))
             .child(div().type_style(Type::Body).text_color(rgb(MUTED)).child("Check the files below. Only selected files will be added to ME."))
             .child(div().id("import-confirm-files").min_h_0().flex_shrink().max_h(px(250.)).overflow_y_scroll().flex().flex_col().gap(px(space::SM))

@@ -1,37 +1,11 @@
 #!/bin/sh
 set -eu
-
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-cd "$project_dir"
-
-if [ "$(uname -s)" != Darwin ]; then
-    printf '%s\n' 'This development bundle helper requires macOS.' >&2
-    exit 1
-fi
-
-mode=${1:-release}
-case "$mode" in
-    debug) ./scripts/cargo build --locked -p me-app -p me-agent ;;
-    release) ./scripts/cargo build --locked --release --features me-app/development-tools -p me-app -p me-agent ;;
-    *) printf '%s\n' 'Usage: ./scripts/bundle-macos [debug|release]' >&2; exit 2 ;;
+channel=${1:-dev}
+if [ "$#" -gt 0 ]; then shift; fi
+case "$channel" in
+    debug) channel=dev ;;
+    dev|preview|release) ;;
+    *) printf '%s\n' 'Usage: ./scripts/bundle-macos [dev|preview|release]' >&2; exit 2 ;;
 esac
-
-build_dir=${CARGO_TARGET_DIR:-"$project_dir/target"}
-bundle_dir="$build_dir/$mode/ME.app"
-mkdir -p "$bundle_dir/Contents/MacOS"
-# Replace the executable inode so rebuilding cannot truncate a running binary.
-staged_binary=$(mktemp "$bundle_dir/Contents/MacOS/.me.XXXXXX")
-trap 'rm -f "$staged_binary"' EXIT HUP INT TERM
-cp "$build_dir/$mode/me" "$staged_binary"
-chmod 755 "$staged_binary"
-mv -f "$staged_binary" "$bundle_dir/Contents/MacOS/me"
-staged_mcp=$(mktemp "$bundle_dir/Contents/MacOS/.me-mcp.XXXXXX")
-cp "$build_dir/$mode/me-mcp" "$staged_mcp"
-chmod 755 "$staged_mcp"
-mv -f "$staged_mcp" "$bundle_dir/Contents/MacOS/me-mcp"
-cp apps/desktop/packaging/macos/Info.plist "$bundle_dir/Contents/Info.plist"
-mkdir -p "$bundle_dir/Contents/Resources/Licenses"
-cp apps/desktop/assets/licenses/* "$bundle_dir/Contents/Resources/Licenses/"
-cp apps/desktop/assets/fonts/OFL.txt "$bundle_dir/Contents/Resources/Licenses/Geist-OFL.txt"
-codesign --force --sign - "$bundle_dir"
-printf '%s\n' "$bundle_dir"
+exec python3 "$project_dir/scripts/macos-build.py" "$channel" "$@"

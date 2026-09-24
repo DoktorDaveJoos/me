@@ -71,8 +71,9 @@ in [document processing](docs/document-processing.md) and [email import](docs/im
 
 ME. stores vault data in SQLCipher and separately encrypts original files.
 Background work keeps storage, cryptography, OCR, and model calls off the UI
-thread. Backups require the original password; there is no password-recovery
-service. Exporting a document writes an unencrypted copy at your chosen location.
+thread. Account-linked vaults support recovery with the saved recovery code through
+the [account service](docs/accounts.md). Older backups still require the password
+used to create them. Exporting a document writes an unencrypted copy at your chosen location.
 
 The current app requires Codex installation and ChatGPT sign-in during setup.
 **Automatic AI analysis is enabled by default:** supported imports are read
@@ -132,26 +133,29 @@ Run the optimized app:
 ./scripts/cargo run --release --locked
 ```
 
-Or build a development app bundle:
+Use the single development app for everyday testing:
 
 ```sh
-./scripts/bundle-macos
-open target/release/ME.app
+./scripts/dev-macos
+open "$HOME/Applications/ME Dev.app"
 ```
 
-Development bundles include **Settings → Development → Wipe data**. Confirming
-clears this vault's files, notes, credentials, extracted data, search index and
-import history so the same files can be uploaded again. It keeps your password,
-preferences and ChatGPT connection; original files and external backups are
-untouched. Active work is canceled and disconnected before the reset. This is a
-local reset, not secure erasure of disk sectors or provider history.
+**ME Dev** is a debug build with development tools, a fixed bundle identity,
+certificate and installation path. Its vault and local provider state live under
+`~/Library/Application Support/ME Dev/`. Updates preserve the app's macOS privacy
+identity and refuse incompatible signing changes. First setup needs a signing
+certificate and the account API origin; subsequent builds retain both.
+See [Development builds](docs/development.md) for setup, migration and checks.
 
-The control is included in debug builds and release builds explicitly compiled
-with `--features me-app/development-tools` (enabled by the development bundle
-helper). Ordinary `cargo build --release` builds omit both the UI and reset API.
+Development builds include **Settings → Development → Wipe data**. Confirming
+clears the selected vault's content while retaining its password and preferences;
+original files and external backups are untouched. This is a local reset, not
+secure disk erasure. Release candidates omit this control.
 
-Pass `debug` to the bundle script for `target/debug/ME.app`. Bundles are signed
-locally for development; they are not Developer ID signed or notarized.
+Use `./scripts/bundle-macos preview` for an isolated optimized preview with its own
+identity and test data. `./scripts/bundle-macos release` produces a separately
+identified release candidate; it is locally certificate-signed, not notarized or
+published. Always hand the user **ME Dev**, rather than a per-feature test bundle.
 
 ### Linux
 
@@ -212,7 +216,8 @@ Cargo.lock            Shared locked Rust dependencies
 Run the commands above from the repository root. The desktop Cargo package
 remains `me-app`, and build output stays under `target/`. Future clients belong
 in `apps/ios` and `apps/browser-extension`; the Axum backend belongs in
-`services/api`. Create those directories when their implementations begin.
+`services/api`, which now implements the first account endpoints. Create the remaining
+client directories when their implementations begin.
 
 All UI changes follow the [shared design system](docs/design-system.md).
 [AGENTS.md](AGENTS.md) describes development constraints.
@@ -220,11 +225,12 @@ All UI changes follow the [shared design system](docs/design-system.md).
 ## Product direction
 
 The [account, sync, and login decisions](docs/architecture/2026-09-20/ACCOUNTS-SYNC-AND-LOGINS.md)
-record the planned mandatory ME account, independent desktop/Chrome/iPhone clients,
-end-to-end encrypted sync, and login matching. These are future capabilities;
-the current application remains a local vault. The
+record the mandatory ME account, planned independent desktop/Chrome/iPhone clients,
+end-to-end encrypted sync, and login matching. [Account setup](docs/accounts.md) is
+implemented; vault contents still remain local while sync and the other clients
+are future work. The
 [backend decision](docs/architecture/2026-09-20/BACKEND-OPTIONS.md) selects Rust,
-Axum, and Tokio; the backend is not yet implemented. The
+Axum, and Tokio, now used by the account service. The
 [accepted repository and release plan](docs/architecture/2026-09-20/REPOSITORY-AND-RELEASES.md)
 keeps one repository with independent desktop, browser, iPhone, and API releases.
 The desktop layout migration is complete; product release pipelines remain future work.
@@ -241,3 +247,10 @@ measurements. Device sync, embeddings, and tray integration are future work.
 Earlier research in `docs/architecture/` provides design context; the dated
 product decisions above supersede conflicting historical assumptions. The current
 README and root license define the published project's status and licensing.
+
+## Account setup preview
+
+Email + one master password, first-run recovery code, and the Rust account service
+are documented in [accounts.md](docs/accounts.md). This creates and authenticates
+accounts; device sync, email ownership verification and cloud deployment are not
+implemented yet. Existing vault keys/data are preserved when linking an account.

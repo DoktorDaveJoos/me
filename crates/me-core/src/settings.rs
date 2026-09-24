@@ -5,11 +5,14 @@ use rusqlite::{OptionalExtension, params};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppSettings {
     pub automatic_evaluation: bool,
+    /// First-run setup only; never a substitute for live provider readiness.
+    pub onboarding_complete: bool,
 }
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             automatic_evaluation: true,
+            onboarding_complete: false,
         }
     }
 }
@@ -17,12 +20,24 @@ impl Default for AppSettings {
 impl Vault {
     pub fn settings(&self) -> Result<AppSettings> {
         Ok(AppSettings {
+            onboarding_complete: self.db.query_row(
+                "SELECT completed FROM onboarding WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )?,
             automatic_evaluation: self.db.query_row(
                 "SELECT automatic_evaluation FROM app_settings WHERE singleton=1",
                 [],
                 |r| r.get(0),
             )?,
         })
+    }
+
+    /// Call after an authenticated ChatGPT connection has been verified.
+    pub fn complete_onboarding(&mut self) -> Result<()> {
+        self.db
+            .execute("UPDATE onboarding SET completed=1 WHERE singleton=1", [])?;
+        Ok(())
     }
 
     pub fn set_automatic_evaluation(&mut self, enabled: bool) -> Result<()> {
@@ -123,5 +138,54 @@ impl Vault {
 
     pub fn evaluation_error(&self, item: u64) -> Result<Option<String>> {
         Ok(self.db.query_row("SELECT e.error_message FROM document_evaluation e JOIN collection_item i ON i.source_id=e.source_id WHERE i.local_id=?",[sql_id(item)?],|r|r.get(0)).optional()?.flatten())
+    }
+}
+
+#[cfg(test)]
+mod onboarding_tests {
+    use crate::Vault;
+
+    #[test]
+    fn interrupted_onboarding_resumes_and_completion_survives_unlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("vault");
+        let mut vault = Vault::create(&root, "synthetic-onboarding-password").unwrap();
+        vault.save_note(None, "Synthetic", "Preserved").unwrap();
+        vault.set_automatic_evaluation(false).unwrap();
+        assert!(!vault.settings().unwrap().onboarding_complete);
+        drop(vault);
+        let mut vault = Vault::unlock(&root, "synthetic-onboarding-password").unwrap();
+        assert!(!vault.settings().unwrap().onboarding_complete);
+        vault.complete_onboarding().unwrap();
+        vault.complete_onboarding().unwrap();
+        drop(vault);
+        let vault = Vault::unlock(&root, "synthetic-onboarding-password").unwrap();
+        let settings = vault.settings().unwrap();
+        assert!(settings.onboarding_complete);
+        assert!(!settings.automatic_evaluation);
+        assert_eq!(vault.collection("Preserved", false).unwrap().total, 1);
+    }
+
+    #[test]
+    fn version_eleven_migration_preserves_data_and_requires_initial_provider_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("vault");
+        let mut vault = Vault::create(&root, "synthetic-migration-password").unwrap();
+        vault.save_note(None, "Synthetic", "Preserved").unwrap();
+        vault
+            .db
+            .execute_batch("DROP TABLE onboarding; PRAGMA user_version=11;")
+            .unwrap();
+        drop(vault);
+        let vault = Vault::unlock(&root, "synthetic-migration-password").unwrap();
+        assert!(!vault.settings().unwrap().onboarding_complete);
+        assert_eq!(vault.collection("Preserved", false).unwrap().total, 1);
+        assert_eq!(
+            vault
+                .db
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            13
+        );
     }
 }

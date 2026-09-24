@@ -16,7 +16,7 @@ Codex-App-Server-Prozess und nutzt das eigene ChatGPT-Abo.
 ## Codex liest ME.
 
 1. App und Bridge bauen: `./scripts/cargo build -p me-app -p me-agent`.
-   `./scripts/bundle-macos debug` enthält beide Programme.
+   `./scripts/dev-macos` enthält beide Programme.
 2. Den lokalen STDIO-Server in Codex registrieren, beispielsweise:
 
    ```sh
@@ -218,3 +218,5 @@ Primärquellen: [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp),
 [Berechtigungsprofile](https://learn.chatgpt.com/docs/permissions),
 [MCP-STDIO](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports),
 [MCP-Werkzeuge](https://modelcontextprotocol.io/specification/2025-06-18/server/tools).
+
+See [Development builds](development.md) for the single ME Dev installation and isolated preview workflow.

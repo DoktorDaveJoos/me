@@ -311,9 +311,59 @@ impl Decisions for FakeDecisions {
         })
     }
 }
+/// Credential classification receives only fixed local vocabulary, never captured text or values.
+pub fn credential_intent(signals: &[&str], cancel: &AtomicBool) -> Result<Option<String>> {
+    const ALLOWED: &[&str] = &[
+        "login",
+        "sign up",
+        "sign in",
+        "new password",
+        "update password",
+        "password",
+        "change password",
+        "recovery codes",
+        "backup codes",
+        "api",
+        "token",
+        "ssh",
+        "private key",
+        "public key",
+        "wifi",
+        "network",
+        "database",
+        "server",
+    ];
+    if signals.iter().any(|s| !ALLOWED.contains(s)) {
+        return Err(invalid());
+    }
+    let questions = json!({"intent":{"type":"choice","instructions":"Select the likely credential-saving intent from these locally detected label concepts. Do not infer an account or secret. Choose unknown for mixed or insufficient evidence.","criteria":{"login":"Create a website or app login","password":"Save a standalone password","api":"Save an API token","ssh":"Save an SSH key","wifi":"Save a Wi-Fi password","server":"Save server or database credentials","update_password":"Update an existing login password","recovery_codes":"Add recovery codes to a login","unknown":"Unknown or conflicting intent"}}});
+    let response =
+        TypeSafe::configured()?.evaluate(json!({"label_concepts":signals}), questions, cancel)?;
+    let a = &response.answers["intent"];
+    if a["confidence"].as_f64().unwrap_or(0.) < 0.8 || a["choice"] == "unknown" {
+        return Ok(None);
+    }
+    Ok(a["choice"].as_str().map(str::to_owned))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn credential_decisions_reject_free_text_before_configuration_or_network() {
+        assert!(credential_intent(&["private@example.test"], &AtomicBool::new(false)).is_err());
+        assert!(credential_intent(&["SYNTHETIC-PRIVATE-KEY"], &AtomicBool::new(false)).is_err());
+    }
+    #[test]
+    #[ignore = "One synthetic credential decision; requires private TypeSafe configuration"]
+    fn live_credential_intent() {
+        assert_eq!(
+            credential_intent(&["api", "token"], &AtomicBool::new(false))
+                .unwrap()
+                .as_deref(),
+            Some("api")
+        );
+    }
     #[test]
     fn rejects_missing_malformed_and_out_of_range_decisions() {
         let q = verification_questions();

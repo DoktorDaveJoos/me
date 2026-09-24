@@ -69,7 +69,7 @@ Linux: `$XDG_DATA_HOME/ME/vault`, sonst `~/.local/share/ME/vault`.
 
 ```sh
 ./scripts/cargo run
-./scripts/bundle-macos debug
+./scripts/dev-macos
 ```
 
 Die neue Oberfläche beginnt mit einem leeren Tresor. Die frühere Sitzungsvorschau
@@ -139,3 +139,5 @@ spezifiziert und mit mehreren Offlineclients geprüft.
 Schema 6 adds credential items and complete 1PUX imports inside SQLCipher.
 They use the existing encrypted backup and remain outside document processing
 and Codex access. See [the importer and its limits](1password-import.md).
+
+See [Development builds](development.md) for the single ME Dev installation and isolated preview workflow.

@@ -169,6 +169,9 @@ impl MeApp {
                 match result {
                     Ok(result) => {
                         this.onepassword_result = Some(result);
+                        if this.page == Page::Logins {
+                            this.refresh_logins(cx);
+                        }
                         this.refresh_search(cx);
                     }
                     Err(error) => {
@@ -196,7 +199,7 @@ impl MeApp {
                 .child(div().type_style(Type::Label).font_weight(font::EMPHASIS).child("Import complete"))
                 .child(div().max_w(px(560.)).whitespace_normal().type_style(Type::Body).child(format!("{} imported · {} unchanged · {} changed versions kept",result.to_import(),result.duplicates,result.changed)))
                 .child(div().max_w(px(560.)).whitespace_normal().type_style(Type::Small).text_color(rgb(MUTED)).child("Check your imported entries, then delete the unencrypted export."))
-                .child(div().id("show-imported-credentials").type_style(Type::Body).text_color(rgb(ACCENT)).cursor_pointer().on_click(cx.listener(|this,_,window,cx|this.navigate(Page::Browser,window,cx))).child("View imported entries"))))
+                .child(div().id("show-imported-credentials").type_style(Type::Body).text_color(rgb(ACCENT)).cursor_pointer().on_click(cx.listener(|this,_,window,cx|this.navigate(Page::Logins,window,cx))).child("View logins"))))
             .when_some(self.error.clone(),|s,error|s.child(div().max_w(px(560.)).whitespace_normal().type_style(Type::Small).text_color(rgb(DANGER)).child(error)))
             .when_some(self.onepassword_preview.as_ref(),|s,(_,summary)|s
                 .child(div().p(px(space::LG)).rounded(px(radius::STANDARD)).bg(rgb(BG)).flex().flex_col().gap(px(space::SM))
@@ -213,6 +216,12 @@ impl MeApp {
 
     pub(super) fn open_credential(&mut self, item: u64, cx: &mut Context<Self>) {
         if !self.app_ready() || self.busy {
+            return;
+        }
+        if self.collection.get(item).is_some_and(
+            |i| matches!(&i.content, Content::Credential{category,..} if category=="001"),
+        ) {
+            self.show_login(item, cx);
             return;
         }
         self.clear_credentials(cx);
@@ -236,7 +245,13 @@ impl MeApp {
                 }
                 this.busy = false;
                 match result {
-                    Ok(details) => this.credential = Some(details),
+                    Ok(details) => {
+                        if details.native {
+                            this.show_login(item, cx);
+                        } else {
+                            this.credential = Some(details);
+                        }
+                    }
                     Err(e) => this.notice = Some(e.to_string()),
                 }
                 cx.notify();
@@ -307,7 +322,7 @@ impl MeApp {
         let Some(details) = self.credential.as_ref() else {
             return self.overlay(cx);
         };
-        self.overlay(cx).child(modal_panel(580.).id("credential-detail").max_h(px(480.)).overflow_y_scroll()
+        self.overlay(cx).child(modal_panel(580., self.motion_enabled()).id("credential-detail").max_h(px(480.)).overflow_y_scroll()
             .child(eyebrow("PRIVATE DETAILS"))
             .child(div().type_style(Type::Title).text_ellipsis().child(details.title.clone()))
             .child(div().type_style(Type::Small).text_color(rgb(MUTED)).child(format!("{} · {}{}",me_core::credential_category(&details.category),details.vault,if details.archived {" · Archived"}else{""})))

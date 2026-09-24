@@ -21,6 +21,7 @@ pub enum Icon {
     Hash,
     Honeycomb,
     Info,
+    Key,
     Location,
     Mail,
     Menu,
@@ -54,6 +55,7 @@ impl Icon {
         Self::Hash,
         Self::Honeycomb,
         Self::Info,
+        Self::Key,
         Self::Location,
         Self::Mail,
         Self::Menu,
@@ -87,6 +89,7 @@ impl Icon {
             Self::Hash => "icons/hash.svg",
             Self::Honeycomb => "icons/honeycomb.svg",
             Self::Info => "icons/info.svg",
+            Self::Key => "icons/key.svg",
             Self::Location => "icons/location.svg",
             Self::Mail => "icons/mail.svg",
             Self::Menu => "icons/menu.svg",
@@ -121,6 +124,7 @@ impl Icon {
             Self::Hash => include_bytes!("../assets/icons/hash.svg"),
             Self::Honeycomb => include_bytes!("../assets/icons/honeycomb.svg"),
             Self::Info => include_bytes!("../assets/icons/info.svg"),
+            Self::Key => include_bytes!("../assets/icons/key.svg"),
             Self::Location => include_bytes!("../assets/icons/location.svg"),
             Self::Mail => include_bytes!("../assets/icons/mail.svg"),
             Self::Menu => include_bytes!("../assets/icons/menu.svg"),
@@ -145,6 +149,7 @@ pub enum IconSize {
     Large,
     Brand,
     Hero,
+    Identity,
 }
 impl IconSize {
     fn pixels(self) -> f32 {
@@ -154,6 +159,7 @@ impl IconSize {
             Self::Large => 20.,
             Self::Brand => 24.,
             Self::Hero => 72.,
+            Self::Identity => crate::design_system::layout::FINGERPRINT_ART_SIZE,
         }
     }
 }
@@ -190,5 +196,6 @@ pub fn load_fonts(cx: &App) -> gpui::Result<()> {
         Cow::Borrowed(include_bytes!("../assets/fonts/Geist-Medium.ttf")),
         Cow::Borrowed(include_bytes!("../assets/fonts/Geist-SemiBold.ttf")),
         Cow::Borrowed(include_bytes!("../assets/fonts/GeistMono-Regular.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/SpaceGrotesk-Bold.ttf")),
     ])
 }

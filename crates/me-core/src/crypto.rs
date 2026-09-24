@@ -19,18 +19,20 @@ const MAGIC: &[u8] = b"MEOBJ001";
 const MEMORY_KIB: u32 = 65536;
 const ITERATIONS: u32 = 3;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Header {
     pub version: u32,
     pub vault_id: String,
     pub salt: [u8; 16],
     pub wrapped_keys: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<crate::account::AccountBinding>,
 }
 
 pub(crate) type Keys = Zeroizing<[u8; 64]>;
 
-fn wrapping_key(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+pub(crate) fn wrapping_key(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     if password.len() > 4096 {
         return Err(Error::Validation("This password is too long."));
     }
@@ -69,14 +71,17 @@ impl Header {
                 vault_id,
                 salt,
                 wrapped_keys,
+                account: None,
             },
             keys,
         ))
     }
     pub fn read(path: &Path) -> Result<Self> {
-        let bytes = read_bounded(path, 4096)?;
+        let bytes = read_bounded(path, 8192)?;
         let header: Self = serde_json::from_slice(&bytes).map_err(|_| Error::Format)?;
-        if header.version != 1
+        if !matches!(header.version, 1 | 2)
+            || (header.version == 2 && header.account.is_none())
+            || (header.version == 1 && header.account.is_some())
             || uuid::Uuid::parse_str(&header.vault_id).is_err()
             || header.wrapped_keys.len() != 112
         {

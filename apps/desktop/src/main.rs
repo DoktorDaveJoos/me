@@ -44,6 +44,15 @@ fn main() {
                 KeyBinding::new(&format!("{modifier}-shift-l"), LockVault, Some("Me")),
                 KeyBinding::new("escape", Dismiss, Some("Me")),
                 KeyBinding::new("enter", Confirm, Some("Me")),
+                KeyBinding::new(
+                    &format!("{modifier}-shift-n"),
+                    shell::NewCredential,
+                    Some("Me"),
+                ),
+                KeyBinding::new(&format!("{modifier}-e"), shell::EditLogin, Some("Me")),
+                KeyBinding::new(&format!("{modifier}-s"), shell::SaveLogin, Some("Me")),
+                KeyBinding::new("down", shell::NextLogin, Some("LoginsList")),
+                KeyBinding::new("up", shell::PreviousLogin, Some("LoginsList")),
                 KeyBinding::new("tab", NextField, Some("Me")),
                 KeyBinding::new("shift-tab", PreviousField, Some("Me")),
             ]);
@@ -52,6 +61,7 @@ fn main() {
                     name: APP_NAME.into(),
                     items: vec![
                         MenuItem::action("Settings…", OpenSettings),
+                        MenuItem::action("Privacy permissions…", shell::OpenPermissions),
                         MenuItem::Separator,
                         MenuItem::action("Quit ME.", Quit),
                     ],
@@ -79,7 +89,14 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(800.), px(600.))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some(APP_NAME.into()),
+                        title: Some(
+                            match std::env::var("ME_BUILD_CHANNEL").as_deref() {
+                                Ok("dev") => "ME Dev",
+                                Ok("preview") => "ME Preview",
+                                _ => APP_NAME,
+                            }
+                            .into(),
+                        ),
                         appears_transparent: true,
                         traffic_light_position: Some(point(px(20.), px(20.))),
                     }),

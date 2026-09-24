@@ -21,19 +21,43 @@ impl MeApp {
     }
 
     pub(super) fn inspect_vault(cx: &mut Context<Self>) {
-        let root = Self::vault_path();
+        let base = Self::vault_path();
         let task = cx.background_executor().spawn(async move {
-            root.as_deref()
-                .ok_or(me_core::Error::Validation("Couldn't locate the vault."))
-                .and_then(Vault::exists)
+            let base = base.ok_or("Couldn't locate the vault.")?;
+            let selected = device_accounts::load(&base)?;
+            let exists = Vault::exists(&selected.root).map_err(|e| e.to_string())?;
+            let binding = if selected.signed_out {
+                None
+            } else {
+                me_core::account::binding(&selected.root).map_err(|e| e.to_string())?
+            };
+            Ok::<_, String>((selected, exists, binding))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
-                    Ok(exists) => this.initialized = exists,
-                    Err(err) => this.error = Some(err.to_string()),
+                    Ok((selected, exists, binding)) => {
+                        this.root = Some(selected.root);
+                        this.initialized = exists;
+                        this.account.signed_out = selected.signed_out;
+                        if selected.signed_out {
+                            this.account.mode = AccountMode::SignIn;
+                        } else {
+                            if let Some(binding) = binding {
+                                this.account_email
+                                    .update(cx, |i, cx| i.set_text(&binding.account.email, cx));
+                                this.account.binding = Some(binding);
+                                this.account.mode = AccountMode::Unlock;
+                            }
+                            this.start_codex_setup(false, cx);
+                        }
+                    }
+                    Err(err) => {
+                        this.root = None;
+                        this.error = Some(err);
+                    }
                 }
                 cx.notify();
             });
@@ -63,10 +87,14 @@ impl MeApp {
     }
 
     pub(super) fn unlock_vault(&mut self, cx: &mut Context<Self>) {
+        if self.account_setup_visible() {
+            self.submit_account(cx);
+            return;
+        }
         if self.unlocked || self.busy {
             return;
         }
-        let Some(root) = self.root.clone() else {
+        let (Some(base), Some(root)) = (Self::vault_path(), self.root.clone()) else {
             return;
         };
         let password = Zeroizing::new(self.password.read(cx).content.to_string());
@@ -78,8 +106,6 @@ impl MeApp {
             cx.notify();
             return;
         }
-        self.password.update(cx, |i, cx| i.set_text("", cx));
-        self.password_repeat.update(cx, |i, cx| i.set_text("", cx));
         self.busy = true;
         self.error = None;
         let initialized = self.initialized;
@@ -96,8 +122,12 @@ impl MeApp {
             }?;
             let collection = vault.collection("", false)?;
             let settings = vault.settings()?;
+            let binding = me_core::account::binding(&root)?;
+            device_accounts::select(&base, &root).map_err(|_| {
+                me_core::Error::Validation("Couldn't remember this account. Please try again.")
+            })?;
             *session.lock().map_err(|_| me_core::Error::Format)? = Some(vault);
-            Ok::<_, me_core::Error>((collection, settings))
+            Ok::<_, me_core::Error>((collection, settings, binding))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -107,7 +137,16 @@ impl MeApp {
                 }
                 this.busy = false;
                 match result {
-                    Ok((collection, settings)) => {
+                    Ok((collection, settings, binding)) => {
+                        this.password.update(cx, |i, cx| i.set_text("", cx));
+                        this.password_repeat.update(cx, |i, cx| i.set_text("", cx));
+                        this.account.signed_out = false;
+                        if let Some(binding) = binding {
+                            this.account_email
+                                .update(cx, |i, cx| i.set_text(&binding.account.email, cx));
+                            this.account.binding = Some(binding);
+                            this.account.mode = AccountMode::Unlock;
+                        }
                         this.settings = settings;
                         this.collection = collection;
                         this.unlocked = true;
@@ -173,6 +212,9 @@ impl MeApp {
         {
             self.development.confirming = false;
         }
+        self.account.pending = None;
+        self.account.saved = false;
+        self.account.complete = None;
         self.stop_filter();
         self.filter = FilterState::default();
         self.knowledge = KnowledgeState::default();
@@ -187,6 +229,7 @@ impl MeApp {
         self.organization_error = None;
         self.generation += 1;
         self.clear_credentials(cx);
+        self.clear_logins(cx);
         self.stop_ai();
         self.stop_bridge(cx);
         self.proposals.clear();
@@ -247,6 +290,7 @@ impl MeApp {
             &self.value_input,
             &self.password,
             &self.password_repeat,
+            &self.recovery_input,
         ] {
             field.update(cx, |i, cx| i.set_text("", cx));
         }
@@ -284,6 +328,9 @@ impl MeApp {
                 match result {
                     Ok((message, collection)) => {
                         this.collection = collection;
+                        if this.page == Page::Logins {
+                            this.logins.notice = Some(message.clone());
+                        }
                         this.notice = Some(message);
                         this.editing = None;
                         this.document_open = None;
@@ -295,6 +342,9 @@ impl MeApp {
                         this.search.update(cx, |i, cx| i.set_text("", cx));
                     }
                     Err(err) => {
+                        if this.page == Page::Logins {
+                            this.logins.error = Some(err.to_string());
+                        }
                         this.error = Some(err.to_string());
                         this.notice = Some(err.to_string());
                     }
@@ -379,7 +429,7 @@ impl MeApp {
         .detach();
     }
 
-    fn clear_owned_clipboard(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn clear_owned_clipboard(&mut self, cx: &mut Context<Self>) {
         self.clipboard_generation += 1;
         if let Some(value) = self.copied_value.take()
             && cx.read_from_clipboard().and_then(|v| v.text()).as_deref() == Some(value.as_str())
@@ -434,7 +484,7 @@ impl MeApp {
         })
         .detach();
     }
-    fn pick_restore(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn pick_restore(&mut self, cx: &mut Context<Self>) {
         if self.busy || self.initialized {
             return;
         }
@@ -490,9 +540,15 @@ impl MeApp {
 
     pub(super) fn locked_view(
         &self,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        if self.account_setup_visible() {
+            return self.account_view(window, cx).into_any_element();
+        }
+        if self.initialized && self.restore_from.is_none() {
+            return self.account_unlock_view(window, cx);
+        }
         let restoring = self.restore_from.is_some();
         let title = if self.initialized {
             "It's about you."
@@ -504,7 +560,6 @@ impl MeApp {
         div()
             .id("locked-shell")
             .size_full()
-            .bg(rgb(BG))
             .font_family(font::SANS)
             .type_style(Type::Body)
             .text_color(rgb(INK))
@@ -534,8 +589,16 @@ impl MeApp {
                             .flex_col()
                             .items_center()
                             .gap(px(space::LG))
-                            .child(fingerprint_intro())
-                            .child(div().type_style(Type::Brand).child("ME."))
+                            .child(div().size(px(layout::IDENTITY_ICON)).when(
+                                self.motion.loaded,
+                                |s| {
+                                    s.child(fingerprint_intro(self.window_entrance_phase(
+                                        window,
+                                        crate::design_system::motion::IDENTITY_ENTER_MS,
+                                    )))
+                                },
+                            ))
+                            .child(wordmark(false))
                             .child(
                                 div()
                                     .text_center()
@@ -560,7 +623,16 @@ impl MeApp {
                             },
                         ))
                     })
-                    .child(self.editor_field("Vault password", self.password.clone(), window, cx))
+                    .when_some(self.account.binding.as_ref(), |s, binding| {
+                        s.child(
+                            div()
+                                .type_style(Type::Small)
+                                .text_color(rgb(MUTED))
+                                .text_center()
+                                .child(binding.account.email.clone()),
+                        )
+                    })
+                    .child(self.editor_field("Master password", self.password.clone(), window, cx))
                     .when(!self.initialized && !restoring, |s| {
                         s.child(self.editor_field(
                             "Repeat password",
@@ -568,6 +640,14 @@ impl MeApp {
                             window,
                             cx,
                         ))
+                    })
+                    .when_some(self.motion.error.clone(), |s, error| {
+                        s.child(
+                            div()
+                                .type_style(Type::Small)
+                                .text_color(rgb(DANGER))
+                                .child(error),
+                        )
                     })
                     .when_some(self.error.clone(), |s, error| {
                         s.child(
@@ -594,9 +674,57 @@ impl MeApp {
                                 "Restore"
                             } else {
                                 "Create vault"
-                            }),
+                            })
+                            .child(action_indicator(self.busy, self.motion_enabled())),
                     )
-                    .when(!self.initialized && !self.busy, |s| {
+                    .when(self.account.binding.is_some(), |s| {
+                        s.child(
+                            secondary_action()
+                                .id("unlock-recovery")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_account_mode(AccountMode::Recover, cx)
+                                }))
+                                .child("Forgot your master password?"),
+                        )
+                        .child(
+                            secondary_action()
+                                .id("unlock-online")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_account_mode(AccountMode::SignIn, cx)
+                                }))
+                                .child("Sign in after a password change"),
+                        )
+                    })
+                    .when(!restoring, |s| {
+                        s.child(
+                            div()
+                                .flex()
+                                .gap(px(space::SM))
+                                .child(
+                                    secondary_action()
+                                        .id("unlock-register")
+                                        .flex_1()
+                                        .hover(|s| s.bg(rgb(HOVER)))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.set_account_mode(AccountMode::Register, cx)
+                                        }))
+                                        .child("Register"),
+                                )
+                                .when(self.account.binding.is_some(), |s| {
+                                    s.child(
+                                        secondary_action()
+                                            .id("unlock-logout")
+                                            .flex_1()
+                                            .hover(|s| s.bg(rgb(HOVER)))
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.log_out(cx)),
+                                            )
+                                            .child("Log out"),
+                                    )
+                                }),
+                        )
+                    })
+                    .when(!self.initialized, |s| {
                         s.child(
                             div()
                                 .id("restore-vault")
@@ -604,6 +732,9 @@ impl MeApp {
                                 .text_color(rgb(ACCENT))
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _, _, cx| {
+                                    if this.busy {
+                                        return;
+                                    }
                                     if this.restore_from.is_some() {
                                         this.restore_from = None;
                                         cx.notify();
@@ -627,6 +758,7 @@ impl MeApp {
                         )
                     }),
             )
+            .into_any_element()
     }
 
     pub(super) fn document_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -646,7 +778,7 @@ impl MeApp {
         let finished = matches!(state, "done" | "needs_review") && self.document_warning.is_none();
         let supports_text=entry.is_some_and(|i|matches!(&i.content,Content::Document{extension,..} if me_core::processable_document(extension)));
         self.overlay(cx).child(
-            modal_panel(550.)
+            modal_panel(550., self.motion_enabled())
                 .id("document-detail")
                 .max_h(gpui::relative(0.88))
                 .overflow_y_scroll()

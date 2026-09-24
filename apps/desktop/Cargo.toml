@@ -15,6 +15,12 @@ path = "src/main.rs"
 development-tools = ["me-core/development-tools"]
 
 [dependencies]
+base64 = "0.22"
+curl = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "ico", "jpeg", "webp"] }
+regex = "1"
+me-protocol = { path = "../../crates/me-protocol" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 me-diagnostics = { path = "../../crates/me-diagnostics" }

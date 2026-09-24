@@ -3,7 +3,11 @@ use super::*;
 use crate::design_system::knowledge as map_style;
 use gpui::{Bounds, MouseButton, Pixels, Point, SharedString, canvas, point, relative};
 use me_core::{KnowledgeKind, KnowledgeMap, KnowledgeStatus, KnowledgeViewport};
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 #[derive(Default)]
 pub(super) struct KnowledgeState {
@@ -21,6 +25,10 @@ pub(super) struct KnowledgeState {
     pub match_index: usize,
     pub index: BTreeMap<(i32, i32), usize>,
     pub routes: Arc<Vec<(usize, Vec<Point<f32>>)>>,
+    pub route_started: Option<Instant>,
+    pub selection_started: Option<Instant>,
+    pub arrival_started: Option<Instant>,
+    pub arriving: Arc<BTreeSet<String>>,
     pub bounds: Rc<Cell<Bounds<Pixels>>>,
     pub drag: Option<Point<Pixels>>,
     pub expanded: bool,
@@ -28,6 +36,22 @@ pub(super) struct KnowledgeState {
 }
 impl KnowledgeState {
     pub fn install(&mut self, graph: KnowledgeMap) {
+        let previous = self
+            .graph
+            .nodes
+            .iter()
+            .map(|n| n.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let added = graph
+            .nodes
+            .iter()
+            .filter(|n| !previous.contains(n.id.as_str()))
+            .map(|n| n.id.clone())
+            .collect::<BTreeSet<_>>();
+        if !added.is_empty() {
+            self.arriving = Arc::new(added);
+            self.arrival_started = Some(Instant::now());
+        }
         if !self.loaded {
             self.view = graph.viewport.clone();
         }
@@ -131,6 +155,7 @@ impl MeApp {
                 if Arc::ptr_eq(&graph, &this.knowledge.graph)
                     && this.knowledge.view.selected_node == selected
                 {
+                    this.knowledge.route_started = (!paths.is_empty()).then(Instant::now);
                     this.knowledge.routes = Arc::new(paths);
                     cx.notify();
                 }
@@ -200,10 +225,16 @@ impl MeApp {
             self.knowledge.view.center_q = f64::from(node.position.q);
             self.knowledge.view.center_r = f64::from(node.position.r);
         }
+        let changed = self.knowledge.view.selected_node.as_deref() != Some(id.as_str());
         self.knowledge.view.selected_node = Some(id);
+        if changed {
+            self.knowledge.selection_started = Some(Instant::now());
+        }
         self.knowledge.copied = None;
         self.knowledge.expanded = false;
-        self.refresh_knowledge_routes(cx);
+        if changed {
+            self.refresh_knowledge_routes(cx);
+        }
         self.save_knowledge_view(cx);
         cx.notify();
     }
@@ -348,6 +379,27 @@ impl MeApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let animation = geometry::Motion {
+            routes: motion::phase(
+                self.knowledge.route_started,
+                crate::design_system::motion::CONNECTION_TRACE_MS,
+                self.motion_enabled(),
+            ),
+            selection: motion::phase(
+                self.knowledge.selection_started,
+                crate::design_system::motion::SELECTION_TRACE_MS,
+                self.motion_enabled(),
+            ),
+            arrival: motion::phase(
+                self.knowledge.arrival_started,
+                crate::design_system::motion::NODE_ENTER_MS,
+                self.motion_enabled(),
+            ),
+            arriving: self.knowledge.arriving.clone(),
+        };
+        if animation.active() {
+            window.request_animation_frame();
+        }
         let selected = self.knowledge.view.selected_node.as_deref();
         let visible = self.knowledge.visible(window);
         let graph = self.knowledge.graph.clone();
@@ -391,6 +443,12 @@ impl MeApp {
                     n.value.clone()
                 };
                 let text_scale = zoom.min(1.);
+                let opacity = animation.node_opacity(&n.id)
+                    * if query && !self.knowledge.matching.contains(&n.id) && !selected {
+                        map_style::DIM_OPACITY
+                    } else {
+                        1.
+                    };
                 div()
                     .absolute()
                     .left(px(
@@ -409,10 +467,7 @@ impl MeApp {
                     .justify_center()
                     .cursor_pointer()
                     .text_color(rgb(if source { SURFACE } else { INK }))
-                    .when(
-                        query && !self.knowledge.matching.contains(&n.id) && !selected,
-                        |s| s.opacity(map_style::DIM_OPACITY),
-                    )
+                    .opacity(opacity)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
@@ -573,10 +628,13 @@ impl MeApp {
                         geometry::paint(
                             bounds,
                             &graph,
-                            &view,
                             &painted,
                             &paths,
-                            query.then_some(&matching),
+                            geometry::Presentation {
+                                view: &view,
+                                matching: query.then_some(&matching),
+                                motion: &animation,
+                            },
                             window,
                         )
                     },
@@ -954,5 +1012,37 @@ impl MeApp {
                             ),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::*;
+    #[test]
+    fn refresh_keeps_arrival_time_and_new_data_only_animates_new_cells() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            Vault::create(&dir.path().join("vault"), "synthetic-test-passphrase").unwrap();
+        vault.save_note(None, "Home city", "Berlin").unwrap();
+        let graph = vault.knowledge_map().unwrap();
+        let positions = graph
+            .nodes
+            .iter()
+            .map(|n| (n.id.clone(), n.position))
+            .collect::<BTreeMap<_, _>>();
+        let mut state = KnowledgeState::default();
+        state.install(graph.clone());
+        let first = state.arrival_started;
+        assert!(first.is_some());
+        assert_eq!(state.arriving.len(), graph.nodes.len());
+        state.install(graph);
+        assert_eq!(state.arrival_started, first);
+        vault.save_note(None, "Language", "German").unwrap();
+        state.install(vault.knowledge_map().unwrap());
+        assert!(!state.arriving.is_empty());
+        assert!(state.arriving.iter().all(|id| !positions.contains_key(id)));
+        for (id, position) in positions {
+            assert_eq!(state.graph.node(&id).unwrap().position, position);
+        }
     }
 }

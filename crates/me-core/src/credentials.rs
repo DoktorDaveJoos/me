@@ -67,6 +67,7 @@ pub struct CredentialAttachment {
     pub(crate) path: String,
 }
 pub struct CredentialDetails {
+    pub native: bool,
     pub item_id: u64,
     pub title: String,
     pub vault: String,
@@ -79,7 +80,7 @@ pub struct CredentialDetails {
 
 // serde_json does not wipe strings when Values are dropped. Wipe parsed values,
 // including unknown fields; allocator/parser internals still have no such guarantee.
-struct SecretJson(Value);
+pub(crate) struct SecretJson(pub(crate) Value);
 impl Drop for SecretJson {
     fn drop(&mut self) {
         wipe_json(&mut self.0);
@@ -101,7 +102,7 @@ fn wipe_json(value: &mut Value) {
 fn invalid() -> Error {
     Error::Validation(INVALID)
 }
-fn json(bytes: &[u8]) -> Result<SecretJson> {
+pub(crate) fn json(bytes: &[u8]) -> Result<SecretJson> {
     serde_json::from_slice(bytes)
         .map(SecretJson)
         .map_err(|_| invalid())
@@ -124,14 +125,14 @@ fn identifier<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     }
     Ok(s)
 }
-fn optional_array<'a>(v: &'a Value, key: &str) -> Result<&'a [Value]> {
+pub(crate) fn optional_array<'a>(v: &'a Value, key: &str) -> Result<&'a [Value]> {
     match v.get(key) {
         None | Some(Value::Null) => Ok(&[]),
         Some(Value::Array(a)) => Ok(a),
         _ => Err(invalid()),
     }
 }
-fn optional_text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
+pub(crate) fn optional_text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     match v.get(key) {
         None | Some(Value::Null) => Ok(""),
         Some(Value::String(s)) => Ok(s),
@@ -441,11 +442,12 @@ fn fields(item: &Value) -> Result<Vec<CredentialField>> {
         }
     }
     for entry in optional_array(details, "passwordHistory")? {
-        let timestamp = entry["time"].as_i64().ok_or_else(invalid)?;
-        push(
-            format!("Previous password · {timestamp}"),
-            required(entry, "value")?,
-        );
+        // A missing history date must not discard an otherwise recoverable login.
+        let label = entry["time"]
+            .as_i64()
+            .map(|time| format!("Previous password · {time}"))
+            .unwrap_or_else(|| "Previous password · date unavailable".into());
+        push(label, required(entry, "value")?);
     }
     let tags = optional_array(overview, "tags")?;
     let tags = Zeroizing::new(
@@ -479,6 +481,7 @@ pub fn credential_category(category: &str) -> &str {
         "110" => "Server",
         "111" => "Email account",
         "114" => "SSH key",
+        "me-api" => "API credential",
         _ => "1Password entry",
     }
 }
@@ -512,7 +515,7 @@ impl Vault {
             tx.execute("INSERT INTO collection_item(stable_id,title,kind,source_id,pinned) VALUES(?,?,'credential',?,?)", params![stable,item.title,source,item.favorite])?;
             let local_id = tx.last_insert_rowid();
             tx.execute(
-                "INSERT INTO credential_record VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO credential_record(item_id,import_id,account_uuid,vault_uuid,item_uuid,fingerprint,vault_name,category,archived,raw_json,attachment_paths_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 params![
                     local_id,
                     import_id,
@@ -533,6 +536,9 @@ impl Vault {
         Ok(summary)
     }
     pub fn credential_details(&self, item: u64) -> Result<CredentialDetails> {
+        if let Some(kind) = self.native_kind(item)? {
+            return Ok(self.native_details(item, kind)?.credential);
+        }
         let (title, vault, category, archived, raw, paths, imported_at): (String,String,String,bool,String,String,String) = self.db.query_row(
             "SELECT i.title,c.vault_name,c.category,c.archived,c.raw_json,c.attachment_paths_json,a.imported_at FROM credential_record c JOIN collection_item i ON i.local_id=c.item_id JOIN credential_import a ON a.id=c.import_id WHERE c.item_id=? AND i.deleted_at IS NULL AND i.kind='credential'",
             [sql_id(item)?], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
@@ -556,6 +562,7 @@ impl Vault {
             })
             .collect();
         Ok(CredentialDetails {
+            native: false,
             item_id: item,
             title,
             vault,
@@ -631,6 +638,406 @@ mod tests {
     use zip::{ZipWriter, write::SimpleFileOptions};
     const PASSWORD: &str = "synthetic-vault-password";
     const SECRET: &str = "  SYNTHETIC-PASSWORD-unique-86402 🗝  ";
+    #[test]
+    fn custom_password_labels_do_not_change_primary_password_or_its_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        let mut entry = login();
+        entry["details"]["password"] = json!("Another password");
+        entry["details"]["sections"] =
+            json!([{"title":"Login","fields":[{"title":"Password","value":{"concealed":SECRET}}]}]);
+        v.import_onepassword(&batch(vec![entry])).unwrap();
+        let id = v.logins().unwrap()[0].id;
+        let d = v.login_details(id).unwrap();
+        assert!(
+            d.fields
+                .iter()
+                .any(|f| f.value.as_str() == "Another password")
+        );
+        let mut update = login_update(&d);
+        update.fields = vec![(
+            "/details/sections/0/fields/0/value/concealed".into(),
+            Zeroizing::new("Custom only".into()),
+        )];
+        v.update_login(id, update).unwrap();
+        let d = v.login_details(id).unwrap();
+        assert_eq!(d.fields[1].value.as_str(), SECRET);
+        assert_eq!(d.fields.iter().filter(|f| !f.editable).count(), 1);
+        assert!(
+            d.fields
+                .iter()
+                .any(|f| f.value.as_str() == "Another password")
+        );
+        assert!(
+            v.documents_search(&v.shareable_scope().unwrap(), "Custom only", 10)
+                .unwrap()["hits"]
+                .as_array()
+                .is_some_and(|a| a.is_empty())
+        );
+    }
+    #[test]
+    fn login_metadata_is_typed_and_history_keeps_retirement_dates() {
+        use crate::LoginPresentation;
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        let mut entry = login();
+        entry["details"]["sections"][0]["fields"]
+            .as_array_mut()
+            .unwrap()
+            .extend([
+                json!({"title":"Seat count","value":{"number":3}}),
+                json!({"title":"Account label","value":{"string":"Work"}}),
+                json!({"title":"Secret number","guarded":true,"value":{"number":123}}),
+            ]);
+        entry["details"]["passwordHistory"] = json!([
+            {"value":"older","time":0},
+            {"value":"unknown"},
+            {"value":"newer","time":1709251200},
+            {"value":"invalid","time":999999999999999i64},
+        ]);
+        v.import_onepassword(&batch(vec![entry])).unwrap();
+        let summary = &v.logins().unwrap()[0];
+        assert_eq!(summary.website, "https://example.test/");
+        let details = v.login_details(summary.id).unwrap();
+        let count = details
+            .fields
+            .iter()
+            .find(|f| f.label == "Seat count")
+            .unwrap();
+        assert!(!count.concealed);
+        assert!(count.presentation == LoginPresentation::Number);
+        assert_eq!(count.value.as_str(), "3");
+        let label = details
+            .fields
+            .iter()
+            .find(|f| f.label == "Account label")
+            .unwrap();
+        assert!(label.presentation == LoginPresentation::Label);
+        let secret = details
+            .fields
+            .iter()
+            .find(|f| f.label == "Secret number")
+            .unwrap();
+        assert!(secret.concealed);
+        assert!(secret.presentation == LoginPresentation::Value);
+        let history: Vec<_> = details.fields.iter().filter(|f| !f.editable).collect();
+        assert_eq!(history[0].value.as_str(), "newer");
+        assert_eq!(
+            history[0].used_until_date.as_deref(),
+            Some("2024-03-01 00:00 UTC")
+        );
+        assert_eq!(
+            history[1].used_until_date.as_deref(),
+            Some("1970-01-01 00:00 UTC")
+        );
+        assert!(history[2].used_until_date.is_none());
+        assert!(history[3].used_until.is_none());
+        assert!(
+            history
+                .iter()
+                .all(|f| f.concealed && f.presentation == LoginPresentation::History)
+        );
+    }
+
+    fn login_update(details: &crate::LoginDetails) -> crate::LoginUpdate {
+        crate::LoginUpdate {
+            revision: details.revision,
+            title: details.credential.title.clone(),
+            favorite: details.favorite,
+            fields: Vec::new(),
+        }
+    }
+    #[test]
+    fn login_edits_preserve_original_types_attachments_and_password_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        let mut item = login();
+        item["details"]["password"] = json!(SECRET);
+        item["details"]["documentAttributes"] = json!({"documentId":"doc1","fileName":"key.txt"});
+        let original = archive(
+            &data(vec![item]),
+            &[("files/doc1__key.txt", b"SYNTHETIC-ATTACHMENT")],
+        );
+        let import = OnePasswordImport::from_bytes(original.clone()).unwrap();
+        v.import_onepassword(&import).unwrap();
+        let id = v.logins().unwrap()[0].id;
+        let d = v.login_details(id).unwrap();
+        let mut update = login_update(&d);
+        update.title = "Edited login".into();
+        update.favorite = false;
+        update.fields = vec![
+            (
+                "/details/loginFields/0/value".into(),
+                Zeroizing::new("new@example.test".into()),
+            ),
+            (
+                "/details/loginFields/1/value".into(),
+                Zeroizing::new("  UPDATED-secret 🗝\t  ".into()),
+            ),
+            (
+                "/overview/url".into(),
+                Zeroizing::new("https://new.example.test".into()),
+            ),
+            (
+                "/details/notesPlain".into(),
+                Zeroizing::new("  note\nsecond line\n".into()),
+            ),
+            (
+                "/details/sections/0/fields/0/value/concealed".into(),
+                Zeroizing::new("00001".into()),
+            ),
+            (
+                "/details/sections/0/fields/2/value/address".into(),
+                Zeroizing::new(r#"{"city":"München","zip":"00456"}"#.into()),
+            ),
+            (
+                "/overview/tags".into(),
+                Zeroizing::new("tag, with comma\nwork".into()),
+            ),
+        ];
+        v.update_login(id, update).unwrap();
+        let d = v.login_details(id).unwrap();
+        assert_eq!(d.revision, 2);
+        assert_eq!(d.credential.title, "Edited login");
+        assert!(!d.favorite);
+        assert_eq!(
+            d.fields
+                .iter()
+                .find(|f| f.label == "Password")
+                .unwrap()
+                .value
+                .as_str(),
+            "  UPDATED-secret 🗝\t  "
+        );
+        assert_eq!(
+            d.fields
+                .iter()
+                .find(|f| f.label == "Notes")
+                .unwrap()
+                .value
+                .as_str(),
+            "  note\nsecond line\n"
+        );
+        let raw: String =
+            v.db.query_row(
+                "SELECT raw_json FROM credential_record WHERE item_id=?",
+                [id as i64],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let raw: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(raw["details"]["futureField"]["secret"], "SYNTHETIC-UNKNOWN");
+        assert_eq!(
+            raw["details"]["sections"][0]["fields"][0]["value"]["concealed"],
+            "00001"
+        );
+        assert_eq!(
+            raw["details"]["sections"][0]["fields"][2]["value"]["address"]["zip"],
+            "00456"
+        );
+        assert_eq!(
+            raw["overview"]["urls"][0]["url"],
+            "https://new.example.test"
+        );
+        assert_eq!(raw["overview"]["urls"][1]["url"], "https://other.test/");
+        assert_eq!(raw["overview"]["tags"], json!(["tag, with comma", "work"]));
+        assert_eq!(raw["details"]["password"], "  UPDATED-secret 🗝\t  ");
+        assert_eq!(raw["details"]["passwordHistory"][1]["value"], SECRET);
+        let previous = d
+            .fields
+            .iter()
+            .find(|f| !f.editable && f.value.as_str() == SECRET)
+            .unwrap();
+        assert!(previous.used_until.is_some());
+        assert!(
+            previous
+                .used_until_date
+                .as_deref()
+                .is_some_and(|date| date.ends_with(" UTC"))
+        );
+        assert_eq!(
+            v.credential_archive(id).unwrap().as_slice(),
+            original.as_slice()
+        );
+        let output = dir.path().join("attachment.txt");
+        v.export_credential_attachment(id, 0, &output).unwrap();
+        assert_eq!(fs::read(output).unwrap(), b"SYNTHETIC-ATTACHMENT");
+        assert!(
+            v.collection("UPDATED-secret", false)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(
+            v.collection("new@example.test", false)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(v.collection("Edited login", false).unwrap().items[0].id, id);
+        assert_eq!(
+            v.db.query_row("SELECT count(*) FROM source_segment", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            v.db.query_row(
+                "SELECT payload_json FROM local_change WHERE kind='credential_edit'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "{}"
+        );
+        let backup = dir.path().join("edited.mebackup");
+        v.backup(&backup).unwrap();
+        drop(v);
+        let v = Vault::unlock(&dir.path().join("vault"), PASSWORD).unwrap();
+        assert_eq!(v.login_details(id).unwrap().revision, 2);
+        no_plaintext(&dir.path().join("vault"));
+        drop(v);
+        let v = Vault::restore(&backup, &dir.path().join("restored"), PASSWORD).unwrap();
+        assert_eq!(
+            v.login_details(id).unwrap().credential.title,
+            "Edited login"
+        );
+    }
+    #[test]
+    fn login_edits_reject_stale_invalid_and_unauthorized_fields_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        v.import_onepassword(&batch(vec![login()])).unwrap();
+        let id = v.logins().unwrap()[0].id;
+        let details = v.login_details(id).unwrap();
+        let mut update = login_update(&details);
+        update.title = "Saved title".into();
+        v.update_login(id, update).unwrap();
+        assert!(v.update_login(id, login_update(&details)).is_err());
+        let current = v.login_details(id).unwrap();
+        for key in [
+            "/details/passwordHistory/0/value",
+            "/details/futureField/secret",
+            "/categoryUuid",
+        ] {
+            let mut update = login_update(&current);
+            update.title = "Must roll back".into();
+            update.fields = vec![(key.into(), Zeroizing::new("overwrite".into()))];
+            assert!(v.update_login(id, update).is_err());
+        }
+        for text in ["bad json", "42", "\"string\""] {
+            let mut update = login_update(&current);
+            update.fields = vec![
+                (
+                    "/details/loginFields/0/value".into(),
+                    Zeroizing::new("must roll back".into()),
+                ),
+                (
+                    "/details/sections/0/fields/2/value/address".into(),
+                    Zeroizing::new(text.into()),
+                ),
+            ];
+            assert!(v.update_login(id, update).is_err());
+        }
+        let saved = v.login_details(id).unwrap();
+        assert_eq!(saved.revision, 2);
+        assert_eq!(saved.credential.title, "Saved title");
+        assert_eq!(saved.fields[0].value.as_str(), "tester@example.test");
+    }
+    #[test]
+    fn importing_again_preserves_local_edits_and_marks_changed_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        let import = batch(vec![login()]);
+        v.import_onepassword(&import).unwrap();
+        let id = v.logins().unwrap()[0].id;
+        let details = v.login_details(id).unwrap();
+        let mut update = login_update(&details);
+        update.title = "Local title".into();
+        update.fields = vec![(
+            details.fields[1].key.clone(),
+            Zeroizing::new("Local secret".into()),
+        )];
+        v.update_login(id, update).unwrap();
+        assert_eq!(v.import_onepassword(&import).unwrap().duplicates, 1);
+        let mut changed = login();
+        changed["details"]["loginFields"][1]["value"] = json!("Upstream secret");
+        assert_eq!(
+            v.import_onepassword(&batch(vec![changed])).unwrap().changed,
+            1
+        );
+        let rows = v.logins().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.versions == 2));
+        assert_eq!(
+            v.login_details(id).unwrap().fields[1].value.as_str(),
+            "Local secret"
+        );
+        assert_eq!(v.login_details(id).unwrap().credential.title, "Local title");
+    }
+    #[test]
+    fn missing_login_fields_can_be_added_and_values_can_be_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        let mut item = login();
+        item["details"] = json!({});
+        item["overview"] = json!({"title":"Empty login"});
+        v.import_onepassword(&batch(vec![item])).unwrap();
+        let id = v.logins().unwrap()[0].id;
+        let d = v.login_details(id).unwrap();
+        let mut update = login_update(&d);
+        update.fields = vec![
+            ("$username".into(), Zeroizing::new("a@example.test".into())),
+            ("$password".into(), Zeroizing::new("secret".into())),
+            (
+                "/overview/url".into(),
+                Zeroizing::new("https://example.test".into()),
+            ),
+            (
+                "/details/notesPlain".into(),
+                Zeroizing::new("line one\nline two".into()),
+            ),
+        ];
+        v.update_login(id, update).unwrap();
+        let d = v.login_details(id).unwrap();
+        assert_eq!(d.fields[0].value.as_str(), "a@example.test");
+        assert_eq!(d.fields[1].value.as_str(), "secret");
+        let mut update = login_update(&d);
+        update.fields = vec![(d.fields[0].key.clone(), Zeroizing::new(String::new()))];
+        v.update_login(id, update).unwrap();
+        assert!(v.login_details(id).unwrap().fields[0].value.is_empty());
+    }
+    #[test]
+    fn login_list_is_complete_scoped_sorted_and_supports_synthetic_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        let fixture = OnePasswordImport::from_bytes(Zeroizing::new(
+            include_bytes!("../tests/fixtures/synthetic-logins.1pux").to_vec(),
+        ))
+        .unwrap();
+        let summary = v.import_onepassword(&fixture).unwrap();
+        assert_eq!(summary.total, 12);
+        let rows = v.logins().unwrap();
+        assert_eq!(rows.len(), 10);
+        assert!(rows.iter().any(|r| r.archived));
+        assert!(rows.iter().any(|r| r.favorite));
+        for row in &rows {
+            assert_eq!(v.login_details(row.id).unwrap().credential.category, "001");
+        }
+        assert_eq!(v.collection("", false).unwrap().items.len(), 12);
+        let mut entries = Vec::new();
+        for i in 0..225 {
+            let mut item = login();
+            item["uuid"] = json!(format!("many-{i}"));
+            item["overview"]["title"] = json!(format!("Login {i:03}"));
+            entries.push(item);
+        }
+        v.import_onepassword(&batch(entries)).unwrap();
+        assert_eq!(v.logins().unwrap().len(), 235);
+        let nonlogin = v.collection("Synthetic card", false).unwrap().items[0].id;
+        assert!(v.login_details(nonlogin).is_err());
+    }
+
     fn login() -> Value {
         json!({"uuid":"item1","favIndex":1,"state":"active","categoryUuid":"001","createdAt":10,"updatedAt":20,
             "overview":{"title":"Synthetic Mail","url":"https://example.test/","urls":[{"url":"https://example.test/"},{"url":"https://other.test/"}],"tags":["synthetic","work"]},
@@ -1159,7 +1566,7 @@ mod tests {
         let mut v = vault(&dir);
         v.save_note(None, "Existing", "original content").unwrap();
         v.db.execute_batch(
-            "DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; PRAGMA user_version=5;",
+            "DROP TABLE onboarding; DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; PRAGMA user_version=5;",
         )
         .unwrap();
         drop(v);

@@ -22,7 +22,7 @@ impl Vault {
         // Enumerating ordinary tables also clears future content/cache tables.
         // FTS shadow tables must only be changed through their owning FTS index.
         let tables = tx
-            .prepare("SELECT name FROM pragma_table_list WHERE schema='main' AND type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('vault_meta','app_settings','entity','property_definition')")?
+            .prepare("SELECT name FROM pragma_table_list WHERE schema='main' AND type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('vault_meta','app_settings','onboarding','entity','property_definition')")?
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         for table in tables {
@@ -62,6 +62,7 @@ mod tests {
         fs::write(&file, "synthetic unique-search-token").unwrap();
         let mut vault = Vault::create(&root, PASSWORD).unwrap();
         vault.set_automatic_evaluation(false).unwrap();
+        vault.complete_onboarding().unwrap();
         let header = fs::read(root.join("header.json")).unwrap();
         for _ in 0..2 {
             vault
@@ -105,13 +106,14 @@ mod tests {
             assert!(vault.import_jobs().unwrap().is_empty());
             assert!(vault.import_pause_reason().unwrap().is_none());
             assert!(!vault.settings().unwrap().automatic_evaluation);
+            assert!(vault.settings().unwrap().onboarding_complete);
             assert!(fs::read_dir(root.join("objects")).unwrap().next().is_none());
             assert_eq!(fs::read(&file).unwrap(), b"synthetic unique-search-token");
             assert_eq!(fs::read(root.join("header.json")).unwrap(), header);
             let tables = vault.db.prepare("SELECT name FROM pragma_table_list WHERE schema='main' AND type='table' AND name NOT LIKE 'sqlite_%'").unwrap().query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<std::result::Result<Vec<_>, _>>().unwrap();
             for table in tables {
                 let expected = match table.as_str() {
-                    "vault_meta" | "app_settings" | "entity" | "import_control" => 1,
+                    "vault_meta" | "app_settings" | "onboarding" | "entity" | "import_control" => 1,
                     "property_definition" => 3,
                     _ => 0,
                 };

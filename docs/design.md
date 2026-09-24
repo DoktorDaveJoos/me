@@ -6,7 +6,7 @@ The required visual contract is [the design system](design-system.md), backed by
 **ME.** is a personal data filter. The interface is English; source data keeps its
 original language.
 
-- Left sidebar, 192 px: identity, Search, Review, Browser, Knowledge, Imports, Settings.
+- Left sidebar, 192 px: identity, Search, Logins, Review, Browser, Knowledge, Imports, Settings.
 - Light cool surfaces, fine borders, graphite type, restrained indigo accents.
 - Geist for navigation and labels; Geist Mono for stored values and small metadata.
 - Start-page slogan: “It's about you. Your data. Your fingerprints.”
@@ -24,3 +24,10 @@ original language.
 - Keep secondary workflows out of the home screen until requested.
 
 See [current behavior and validation](lean-ui.md).
+
+
+Logins provides a dedicated, alphabetically sorted list and inline detail pane.
+All includes active and archived Login entries; Favorites and Archive narrow it.
+Other imported 1Password categories remain available through Search and Browser.
+Selecting a login from global Search opens this same Logins page. See
+[login import and editing](1password-import.md) for the data-preservation contract.

@@ -40,3 +40,15 @@
   formatting, compilation and Clippy before finishing. Visually inspect changed
   screens at the normal and minimum window sizes; report any unverified states.
   Do not weaken the guard to make a new screen pass.
+
+## Development distribution contract
+
+- The user's single test app is `~/Applications/ME Dev.app`, installed only with
+  `./scripts/dev-macos` (actual debug profile, development tools enabled).
+- Preserve its pinned bundle/certificate/helper identity and Application Support
+  data. Do not re-sign it ad hoc, change its identifier, manually replace bundled
+  binaries, or hand out renamed per-feature apps. Quit it before installation.
+- Use `./scripts/bundle-macos preview` or isolated synthetic gallery apps for agent
+  testing. Keep preview identity and data separate from the user's development app.
+- Follow `docs/development.md`; include packaging regression tests before shipping
+  a build. Never infer granted macOS permission from a helper launched by a tool.

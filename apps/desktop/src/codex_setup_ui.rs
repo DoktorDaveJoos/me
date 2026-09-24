@@ -4,18 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 impl MeApp {
     pub(super) fn app_ready(&self) -> bool {
-        self.unlocked
+        self.unlocked && !self.provider_setup_visible()
     }
 
     pub(super) fn ai_ready(&self) -> bool {
-        self.unlocked && self.codex_ready
-    }
-
-    pub(super) fn schedule_codex_check(cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            let _ = this.update(cx, |this, cx| this.start_codex_setup(false, cx));
-        })
-        .detach();
+        self.app_ready() && self.codex_ready
     }
 
     pub(super) fn stop_codex_setup(&mut self) {
@@ -150,8 +143,7 @@ impl MeApp {
                 this.codex_login_requested = false;
                 if cancelled {
                     this.codex_ready = false;
-                    this.codex_message =
-                        "Connection check stopped. You can try again in Settings.".into();
+                    this.codex_message = "Connection check stopped. You can try again.".into();
                     this.codex_issue = Some(SetupIssue::Connection(this.codex_message.clone()));
                     this.codex_notice = true;
                 } else {
@@ -210,7 +202,7 @@ impl MeApp {
             Some(SetupIssue::SignInRequired | SetupIssue::WrongAccount)
         );
         self.overlay(cx).child(
-            modal_panel(486.)
+            modal_panel(486., self.motion_enabled())
                 .child(heading(if working {
                     "Connecting to ChatGPT"
                 } else {

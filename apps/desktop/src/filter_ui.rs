@@ -444,7 +444,11 @@ impl MeApp {
                     .child(icon(Icon::Chevron, IconSize::Medium, MUTED)),
             )
     }
-    pub(super) fn filter_view(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn filter_view(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let searching = !self.filter.query.is_empty();
         let form = !searching && !self.attachments.is_empty();
         let recent = self.filter.facts.iter().any(|f| f.recent > 0);
@@ -523,10 +527,12 @@ impl MeApp {
                                             .child("Your data. Your fingerprints."),
                                     ),
                             )
-                            .child(icon(Icon::Fingerprint, IconSize::Hero, DECORATIVE)),
+                            .child(fingerprint_intro(self.window_entrance_phase(window, crate::design_system::motion::IDENTITY_ENTER_MS))),
                     )
                     .child(
                         div()
+                            .relative()
+                            .when(self.filter_input.focus_handle(cx).is_focused(window),|s|s.child(motion::frame(motion::Frame::Focus,self.motion_enabled())))
                             .rounded(px(radius::STANDARD))
                             .border_1()
                             .border_color(rgb(
@@ -998,7 +1004,7 @@ impl MeApp {
                 !n.keys.is_empty() && rows.len() == 1 && !rows[0].conflict
             })
             .count();
-        self.overlay(cx).child(modal_panel(500.).max_h(gpui::relative(0.85))
+        self.overlay(cx).child(modal_panel(500., self.motion_enabled()).max_h(gpui::relative(0.85))
             .child(heading("Continue in Codex"))
             .child(div().type_style(Type::Body).child(format!("Share {} form(s) and {} matched details. Missing or conflicting values stay blank.",self.attachments.len(),available)))
             .child(div().id("handoff-fields").max_h(px(210.)).overflow_y_scroll().flex().flex_col().gap(px(space::SM)).children(self.filter.form_needs.iter().map(|need| {

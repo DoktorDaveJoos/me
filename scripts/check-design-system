@@ -22,7 +22,7 @@ def rust_violations(source, tokens=False, assets=False):
             (r'\b0x[\da-fA-F_]{6,}\b', 'Use a semantic color from design_system.rs'),
             (r'\.(?:text_size|line_height)\s*\(\s*[^\s)]', 'Use type_style(Type::…) for size and leading'),
             (r'\bFontWeight\s*::', 'Use font::REGULAR, MEDIUM or EMPHASIS'),
-            (r'\.font_family\s*\((?!\s*font::)', 'Use font::SANS or font::MONO'),
+            (r'\.font_family\s*\((?!\s*font::)', 'Use a shared font role (SANS, MONO or BRAND)'),
             (r'\.rounded(?:_[a-z]+)?\s*\((?!\s*(?:px\(radius::STANDARD\)|\)))', 'Use radius::STANDARD'),
             (r'\.rounded_(?!full\b)\w+\s*\(', 'Use radius::STANDARD (pill/dot: rounded_full)'),
             (r'\.(?:p|px|py|pt|pr|pb|pl|m|mx|my|mt|mr|mb|ml|gap|gap_x|gap_y)\s*\(\s*px\(\s*[-\d]', 'Use the shared space scale'),

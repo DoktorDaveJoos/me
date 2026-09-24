@@ -9,10 +9,19 @@ pub(super) enum Page {
     Browser,
     Knowledge,
     Imports,
+    Logins,
 }
 impl MeApp {
     pub(super) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .relative()
+            .child(motion::field(motion::Field::Sidebar, self.motion_enabled()))
+            .when(self.workspace_activity(), |s| {
+                s.child(motion::activity(
+                    motion::Field::Sidebar,
+                    self.motion_enabled(),
+                ))
+            })
             .w(px(layout::SIDEBAR_WIDTH))
             .h_full()
             .flex_shrink_0()
@@ -31,12 +40,7 @@ impl MeApp {
                     .items_center()
                     .gap(px(space::SM))
                     .child(icon(Icon::Fingerprint, IconSize::Brand, INK))
-                    .child(
-                        div()
-                            .type_style(Type::BrandSmall)
-                            .font_weight(font::EMPHASIS)
-                            .child("ME."),
-                    ),
+                    .child(wordmark(true)),
             )
             .child(
                 div()
@@ -48,6 +52,7 @@ impl MeApp {
             .children(
                 [
                     (Page::Search, "Search", Icon::Search),
+                    (Page::Logins, "Logins", Icon::Key),
                     (Page::Review, "Review", Icon::Check),
                     (Page::Browser, "Browser", Icon::Folder),
                     (Page::Knowledge, "Knowledge", Icon::Honeycomb),
@@ -58,6 +63,13 @@ impl MeApp {
                     let active = self.page == page && !self.show_settings;
                     div()
                         .id(SharedString::from(format!("nav-{label}")))
+                        .relative()
+                        .when(active, |s| {
+                            s.child(motion::frame(
+                                motion::Frame::Navigation,
+                                self.motion_enabled(),
+                            ))
+                        })
                         .h(px(layout::CONTROL_LARGE))
                         .px(px(space::MD))
                         .mb(px(space::XS))
@@ -93,6 +105,13 @@ impl MeApp {
             .child(
                 div()
                     .id("nav-settings")
+                    .relative()
+                    .when(self.show_settings, |s| {
+                        s.child(motion::frame(
+                            motion::Frame::Navigation,
+                            self.motion_enabled(),
+                        ))
+                    })
                     .text_color(rgb(if self.show_settings { INK } else { MUTED }))
                     .id("nav-settings")
                     .h(px(layout::CONTROL_LARGE))
@@ -126,10 +145,12 @@ impl MeApp {
             )
     }
     pub(super) fn navigate(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.busy || self.login_edit_guard(cx) {
             return;
         }
         self.clear_credentials(cx);
+        self.show_onepassword = false;
+        self.logins.revealed.clear();
         self.page = page;
         self.show_settings = false;
         self.error = None;
@@ -138,6 +159,8 @@ impl MeApp {
             self.filter_input.focus_handle(cx)
         } else if page == Page::Knowledge {
             self.knowledge_focus.clone()
+        } else if page == Page::Logins {
+            self.login_search.focus_handle(cx)
         } else if page == Page::Browser {
             self.search.focus_handle(cx)
         } else {
@@ -146,6 +169,9 @@ impl MeApp {
         self.refresh_search(cx);
         if page == Page::Knowledge {
             self.refresh_knowledge(cx);
+        }
+        if page == Page::Logins {
+            self.refresh_logins(cx);
         }
         if page == Page::Imports {
             self.refresh_imports(cx);
