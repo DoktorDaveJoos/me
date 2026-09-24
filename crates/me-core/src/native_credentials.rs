@@ -115,9 +115,26 @@ fn template(kind: CredentialKind) -> Vec<(&'static str, &'static str, bool, bool
         ],
     };
     fields.extend([
-        ("notes", "Notes", true, true),
         ("tags", "Tags", false, true),
+        ("notes", "Notes", true, true),
     ]);
+    if kind == CredentialKind::Login {
+        fields.sort_by_key(|(key, _, _, _)| {
+            [
+                "username",
+                "password",
+                "website",
+                "full_name",
+                "tags",
+                "notes",
+                "totp",
+                "recovery_codes",
+            ]
+            .iter()
+            .position(|k| k == key)
+            .unwrap_or(usize::MAX)
+        });
+    }
     fields
 }
 pub fn credential_draft(kind: CredentialKind) -> LoginDetails {
@@ -128,6 +145,8 @@ pub fn credential_draft(kind: CredentialKind) -> LoginDetails {
             label: label.into(),
             section: if key == "notes" || key == "tags" {
                 "Details"
+            } else if key == "totp" || key == "recovery_codes" {
+                "Recovery & two-factor"
             } else {
                 kind.label()
             }
@@ -350,26 +369,6 @@ impl Vault {
     }
 }
 
-/// Twenty uniformly sampled ASCII characters, generated locally from the OS CSPRNG.
-pub fn generate_credential_password() -> Result<Zeroizing<String>> {
-    use rand_core::RngCore;
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut result = Zeroizing::new(String::with_capacity(20));
-    while result.len() < 20 {
-        let mut bytes = Zeroizing::new([0u8; 32]);
-        rand_core::OsRng
-            .try_fill_bytes(bytes.as_mut())
-            .map_err(|_| Error::Validation("Couldn't generate a password. Try again."))?;
-        for b in bytes.iter().copied().filter(|b| *b < 248) {
-            result.push(ALPHABET[(b % 62) as usize] as char);
-            if result.len() == 20 {
-                break;
-            }
-        }
-    }
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,7 +441,7 @@ mod tests {
         let a = generate_credential_password().unwrap();
         let b = generate_credential_password().unwrap();
         assert_eq!(a.len(), 20);
-        assert!(a.bytes().all(|b| b.is_ascii_alphanumeric()));
+        assert!(a.bytes().any(|b| b.is_ascii_punctuation()));
         assert_ne!(a.as_str(), b.as_str());
     }
     #[test]

@@ -50,7 +50,7 @@ mod shell {
         }
         if matches!(
             mode.as_str(),
-            "new" | "capture" | "api-draft" | "registration-draft" | "accessibility"
+            "new" | "capture" | "api-draft" | "registration-draft" | "generator" | "accessibility"
         ) {
             app.new_credential(&NewCredential, window, cx);
             if mode == "accessibility" {
@@ -68,13 +68,16 @@ mod shell {
                     "https://mail.example.test/security?token=synthetic",
                 ));
             }
-            if mode == "registration-draft" {
+            if matches!(mode.as_str(), "registration-draft" | "generator") {
                 let mut capture = credential_capture::Capture::from_window(br#"{"source":"Synthetic registration window","nodes":[{"label":"Email"},{"label":"Password"},{"label":"Register"}],"url":"https://forge.example.test/register","registration":true,"fill_target":{"source":{"id":0,"pid":0,"bundle":"synthetic.invalid"},"page":"https://forge.example.test/register","fingerprint":"synthetic"}}"#).unwrap();
                 capture
                     .prepare_registration("preview@example.test")
                     .unwrap();
                 app.logins.intake.capture = Some(capture);
                 app.begin_credential(me_core::CredentialKind::Login, window, cx);
+                if mode == "generator" {
+                    app.toggle_password_generator(1, cx);
+                }
             }
             if mode == "api-draft" {
                 app.logins.intake.capture = Some(credential_capture::Capture::from_text(

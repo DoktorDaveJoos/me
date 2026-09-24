@@ -6,6 +6,9 @@ use zeroize::Zeroizing;
 pub const SIGNALS: &[&str] = &[
     "login",
     "sign up",
+    "register",
+    "create account",
+    "create an account",
     "sign in",
     "new password",
     "update password",
@@ -49,6 +52,7 @@ impl Intent {
 pub struct Capture {
     pub source: String,
     pub registration: bool,
+    pub email_expected: bool,
     pub password_present: bool,
     pub fill_target: Option<Zeroizing<String>>,
     pub website: String,
@@ -66,12 +70,11 @@ pub fn origin(value: &str) -> Option<String> {
     Some(u.origin().ascii_serialization())
 }
 fn field(label: &str) -> Option<&'static str> {
-    match label.trim().to_lowercase().as_str() {
-        "username" | "email" | "email address" | "e-mail" | "e-mail address" | "account" => {
-            Some("username")
-        }
+    match normalized_label(label).as_str() {
+        "username" | "user name" | "email" | "email address" | "your email"
+        | "your email address" | "e mail" | "e mail address" | "account" => Some("username"),
         "name" | "full name" | "your name" => Some("full_name"),
-        "password" | "new password" => Some("password"),
+        "password" | "new password" | "create password" => Some("password"),
         "api key" | "access token" | "api token" | "token" => Some("token"),
         "private key" => Some("private_key"),
         "public key" => Some("public_key"),
@@ -84,6 +87,85 @@ fn field(label: &str) -> Option<&'static str> {
         "port" => Some("port"),
         _ => None,
     }
+}
+fn normalized_label(label: &str) -> String {
+    label
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty() && *s != "required")
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+/// Draft inference may use page labels/path; filling still requires the helper's verified target.
+fn registration_evidence(data: &serde_json::Value) -> bool {
+    let nodes = data["nodes"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let labels: Vec<_> = nodes
+        .iter()
+        .filter_map(|n| n["label"].as_str())
+        .map(normalized_label)
+        .collect();
+    let keys: Vec<_> = nodes
+        .iter()
+        .filter_map(|n| {
+            n["key"]
+                .as_str()
+                .or_else(|| n["label"].as_str().and_then(field))
+        })
+        .collect();
+    let path = Url::parse(data["url"].as_str().unwrap_or(""))
+        .ok()
+        .map(|u| u.path().to_lowercase())
+        .unwrap_or_default();
+    let segments: Vec<_> = path.split('/').collect();
+    let registration_path = segments.iter().any(|s| {
+        [
+            "register",
+            "registration",
+            "signup",
+            "sign-up",
+            "join",
+            "create-account",
+        ]
+        .contains(s)
+    });
+    let sign_in_path = segments.iter().any(|s| {
+        [
+            "login",
+            "signin",
+            "sign-in",
+            "reset",
+            "recover",
+            "recovery",
+            "forgot-password",
+        ]
+        .contains(s)
+    });
+    let heading = nodes
+        .iter()
+        .filter(|n| n["role"] == "AXHeading")
+        .filter_map(|n| n["text"].as_str().or(n["label"].as_str()))
+        .map(normalized_label)
+        .any(|s| {
+            ["sign up", "register", "create account", "create an account"]
+                .iter()
+                .any(|cue| s == *cue || s.starts_with(&format!("{cue} ")))
+        });
+    !sign_in_path
+        && (registration_path || heading || data["draft_registration"] == true)
+        && keys.contains(&"username")
+        && keys.contains(&"password")
+        && !labels.iter().any(|s| {
+            [
+                "current password",
+                "change password",
+                "reset password",
+                "update password",
+            ]
+            .contains(&s.as_str())
+        })
 }
 impl Capture {
     pub fn from_text(source: String, text: &str, website: &str) -> Self {
@@ -119,7 +201,13 @@ impl Capture {
             Intent::Create(CredentialKind::Wifi)
         } else if has("database") || has("server") {
             Intent::Create(CredentialKind::Server)
-        } else if has("login") || has("sign up") || has("sign in") {
+        } else if has("login")
+            || has("sign up")
+            || has("sign in")
+            || has("register")
+            || has("create account")
+            || has("create an account")
+        {
             Intent::Create(CredentialKind::Login)
         } else {
             Intent::Unknown
@@ -127,6 +215,7 @@ impl Capture {
         let mut result = Self {
             source,
             registration: false,
+            email_expected: true,
             password_present: false,
             fill_target: None,
             website: origin(website).unwrap_or_default(),
@@ -196,7 +285,7 @@ impl Capture {
             self.values.push((key.into(), Zeroizing::new(value.into())));
         }
     }
-    /// Only proven registration forms receive a new password; sign-in and recovery do not.
+    /// Only recognized registration drafts receive a new password; sign-in and recovery do not.
     pub fn prepare_registration(&mut self, default_email: &str) -> Result<(), me_core::Error> {
         if !self.registration {
             return Ok(());
@@ -213,7 +302,18 @@ impl Capture {
             self.values
                 .push(("password".into(), me_core::generate_credential_password()?));
         }
-        self.set("tags", "Web");
+        if !self.values.iter().any(|(k, _)| k == "tags") {
+            self.set("tags", "Web");
+        }
+        if !self.website.is_empty() && !self.values.iter().any(|(k, _)| k == "notes") {
+            self.set(
+                "notes",
+                &format!(
+                    "Account registration at {}. Review the website form before submitting.",
+                    self.website
+                ),
+            );
+        }
         Ok(())
     }
     pub fn from_window(raw: &[u8]) -> Result<Self, &'static str> {
@@ -252,21 +352,30 @@ impl Capture {
         );
         result.unassigned = None;
         result.password_present = data["password_present"] == true;
-        result.registration =
-            data["registration"] == true && !result.password_present && !result.website.is_empty();
+        result.registration = (data["registration"] == true || registration_evidence(data))
+            && !result.password_present
+            && !result.website.is_empty();
+        result.email_expected = data["nodes"].as_array().unwrap().iter().any(|n| {
+            n["label"]
+                .as_str()
+                .is_some_and(|s| normalized_label(s).contains("mail"))
+        });
         if result.registration {
             result.intent = Intent::Create(CredentialKind::Login);
             if !result.signals.contains(&"sign up") {
                 result.signals.push("sign up");
             }
-            if data["fill_target"].is_object() {
+            if data["registration"] == true && data["fill_target"].is_object() {
                 result.fill_target = Some(Zeroizing::new(data["fill_target"].to_string()));
             }
         }
         result.incomplete |= data["truncated"].as_bool().unwrap_or(false);
         for node in data["nodes"].as_array().unwrap() {
             if let (Some(key), Some(value)) = (
-                node["label"].as_str().and_then(field),
+                node["key"]
+                    .as_str()
+                    .filter(|k| ["username", "password", "full_name"].contains(k))
+                    .or_else(|| node["label"].as_str().and_then(field)),
                 node["value"].as_str(),
             ) {
                 result.set(key, value);
@@ -292,6 +401,42 @@ impl Drop for PrivateJson {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registration_draft_does_not_depend_on_an_autofill_target() {
+        let mut c = Capture::from_window(br#"{"source":"Chrome","nodes":[{"label":"Your email address *"},{"label":"Password (required)"},{"label":"Sign in"}],"url":"https://forge.example.test/register","registration":false,"truncated":true}"#).unwrap();
+        c.prepare_registration("usual@example.test").unwrap();
+        assert!(c.registration && c.fill_target.is_none());
+        for key in ["username", "password", "tags", "notes"] {
+            assert!(c.values.iter().any(|(k, v)| k == key && !v.is_empty()));
+        }
+        let before = c
+            .values
+            .iter()
+            .find(|(k, _)| k == "password")
+            .unwrap()
+            .1
+            .clone();
+        c.prepare_registration("other@example.test").unwrap();
+        assert_eq!(
+            c.values
+                .iter()
+                .find(|(k, _)| k == "password")
+                .unwrap()
+                .1
+                .as_str(),
+            before.as_str()
+        );
+    }
+    #[test]
+    fn sign_in_and_reset_pages_with_registration_links_do_not_generate() {
+        for path in ["login", "reset", "forgot-password"] {
+            let raw = serde_json::json!({"source":"Chrome","nodes":[{"label":"Email"},{"label":"Password"},{"role":"AXLink","label":"Create an account"}],"url":format!("https://example.test/{path}")});
+            let mut c = Capture::from_window(raw.to_string().as_bytes()).unwrap();
+            c.prepare_registration("usual@example.test").unwrap();
+            assert!(!c.registration);
+            assert!(!c.values.iter().any(|(k, _)| k == "password"));
+        }
+    }
     #[test]
     fn registration_drafts_use_origin_and_generate_locally_without_changing_typed_email() {
         let mut c = Capture::from_window(br#"{"source":"Chrome","nodes":[{"label":"Email","value":"chosen@example.test"},{"label":"New password"}],"url":"https://forge.laravel.com/register?private=value#fragment","registration":true,"fill_target":{"page":"https://forge.laravel.com/register"}}"#).unwrap();

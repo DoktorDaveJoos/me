@@ -112,8 +112,8 @@ func origin(_ value: String) -> String? {
     return "\(u.scheme!)://\(host)\(port)"
 }
 func semantic(_ node: Node) -> String? {
-    let name = node.label.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: " *:"))
-    if ["email", "email address", "e-mail", "e-mail address", "username", "user name"].contains(name) { return "username" }
+    let name = node.label.lowercased().replacingOccurrences(of: " (required)", with: "").trimmingCharacters(in: CharacterSet(charactersIn: " *:"))
+    if ["email", "email address", "your email", "your email address", "e-mail", "e-mail address", "username", "user name"].contains(name) { return "username" }
     if ["name", "full name", "your name"].contains(name) { return "full_name" }
     if node.subrole == kAXSecureTextFieldSubrole || ["password", "new password", "confirm password", "confirm new password", "password confirmation", "repeat password"].contains(name) { return "password" }
     return nil
@@ -180,7 +180,8 @@ func capture(_ source: [String: Any]) async {
     var output: [[String: String]] = []; var text = ""; var bytes = 0
     for node in nodes {
         if bytes >= 60000 { break }
-        var row = ["label": node.label]
+        var row = ["label": node.label, "role": node.role]
+        if fields([node]).count == 1, let key = semantic(node) { row["key"] = key }
         text += node.label + "\n"
         if node.subrole != kAXSecureTextFieldSubrole {
             if node.role == kAXStaticTextRole || node.role == kAXHeadingRole || node.role == kAXButtonRole {
@@ -216,7 +217,11 @@ func capture(_ source: [String: Any]) async {
     let registering = registrationAction(buttons) && !lower.contains("current password") && !lower.contains("change password")
     let passwordPresent = passwords.contains { !string($0.element, kAXValueAttribute).isEmpty }
     let registration = registering && users.count == 1 && !passwords.isEmpty && passwords.count <= 2 && !passwordPresent
-    var result: [String: Any] = ["source": running.localizedName ?? "Selected window", "title": string(window, kAXTitleAttribute), "url": url, "nodes": output, "ocr": ocr, "registration": registration, "password_present": passwordPresent, "truncated": partial || bytes >= 60000]
+    // Draft preparation is independent from the stricter, uniquely writable autofill target.
+    let path = URLComponents(string: url)?.path.lowercased().split(separator: "/").map(String.init) ?? []
+    let registrationPath = path.contains { ["register", "registration", "signup", "sign-up", "join", "create-account"].contains($0) }
+    let draftRegistration = (registering || registrationPath) && !users.isEmpty && !passwords.isEmpty && !passwordPresent && !lower.contains("current password") && !lower.contains("reset password")
+    var result: [String: Any] = ["source": running.localizedName ?? "Selected window", "title": string(window, kAXTitleAttribute), "url": url, "nodes": output, "ocr": ocr, "registration": registration, "draft_registration": draftRegistration, "password_present": passwordPresent, "truncated": partial || bytes >= 60000]
     let allowedBrowser = ["com.google.Chrome", "org.chromium.Chromium", "com.microsoft.edgemac", "com.brave.Browser", "com.apple.Safari", "org.mozilla.firefox"].contains(running.bundleIdentifier ?? "")
     if registration && allowedBrowser && !partial && bytes < 60000 && origin(url) != nil && fillableURL(url) {
         let matched = controls.filter { semantic($0) != nil }
@@ -290,6 +295,7 @@ if args.count == 2 && args[1] == "self-test" {
     assert(!registrationAction(["sign in"]))
     assert(!registrationAction(["sign in", "register"]))
     assert(semantic(email) == "username" && semantic(password) == "password")
+    assert(semantic(Node(element: dummy, path: [1], role: kAXTextFieldRole, subrole: "", label: "Your email address (required)")) == "username")
     assert(fingerprint([email, password]) != fingerprint([password, email]))
     assert(origin("https://forge.laravel.com/register?token=example") == "https://forge.laravel.com")
     assert(origin("https://name:secret@forge.laravel.com") == nil)

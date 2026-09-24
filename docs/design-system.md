@@ -448,3 +448,14 @@ Label/Small type and semantic status text. Screen Recording and Accessibility
 have separate grant states, request buttons and Settings links. Done and Check
 again retain the shared action geometry. Opening/checking the panel never captures
 a window. The panel fits both 1120×820 and 800×600 without new visual tokens.
+
+
+### Credential draft tools
+
+The username/email editor offers an inline scrollable list of existing identities,
+using Body/Small roles, monospace values, existing card radius and semantic hover.
+Typing filters the list; Browse all exposes remaining choices. Password options
+expand inside the password card, with the shared input frame and checkbox, wrapped
+character-type controls, and the normal primary action. Tags retain the shared
+chips while editing, with selectable existing tags below. All tools stay within
+the detail pane and its scroll container; no new design tokens or modal are added.

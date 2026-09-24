@@ -46,6 +46,8 @@ pub(super) struct LoginDraft {
     pub(super) title: Entity<TextInput>,
     pub(super) fields: Vec<(usize, Entity<TextInput>)>,
     favorite: bool,
+    pub tools: super::credential_tools_ui::CredentialTools,
+    _subscriptions: Vec<gpui::Subscription>,
 }
 impl MeApp {
     pub(super) fn login_edit_guard(&mut self, cx: &mut Context<Self>) -> bool {
@@ -244,7 +246,7 @@ impl MeApp {
             i.set_text(&details.credential.title, cx);
             i
         });
-        let fields = details
+        let fields: Vec<(usize, Entity<TextInput>)> = details
             .fields
             .iter()
             .enumerate()
@@ -267,11 +269,26 @@ impl MeApp {
             .detail_scroll
             .set_offset(gpui::point(px(0.), px(0.)));
         window.focus(&title.focus_handle(cx));
+        let subscriptions = fields
+            .iter()
+            .map(|(_, input)| {
+                cx.observe(input, |this, _, cx| {
+                    if let Some(draft) = &mut this.logins.draft {
+                        draft.tools.identity_open = None;
+                    }
+                    cx.notify();
+                })
+            })
+            .collect();
+        let tools = super::credential_tools_ui::CredentialTools::new(cx);
         self.logins.draft = Some(LoginDraft {
             title,
             fields,
             favorite: details.favorite,
+            tools,
+            _subscriptions: subscriptions,
         });
+        self.load_credential_suggestions(cx);
         self.logins.revealed.clear();
         self.logins.notice = None;
         self.logins.error = None;
@@ -1247,9 +1264,9 @@ impl MeApp {
                                             .text_color(rgb(ACCENT))
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.generate_login_password(index, cx)
+                                                this.toggle_password_generator(index, cx)
                                             }))
-                                            .child("Generate"),
+                                            .child("Generate…"),
                                     )
                                 },
                             )
@@ -1321,6 +1338,25 @@ impl MeApp {
                 })
                 .into_any_element()
         });
+        if let Some(input) = input {
+            if field.key == "username"
+                || field.label == "Username"
+                || field.label.eq_ignore_ascii_case("email")
+            {
+                body = body.child(self.identity_suggestions(index, input, cx));
+            }
+            if field.presentation == LoginPresentation::Tags {
+                body = body.child(self.tag_suggestions(index, input, cx));
+            }
+            if self
+                .logins
+                .draft
+                .as_ref()
+                .is_some_and(|d| d.tools.generator_open == Some(index))
+            {
+                body = body.child(self.password_generator(index, cx));
+            }
+        }
         div()
             .opacity(motion::login_content_opacity(phase, index))
             .flex_shrink_0()

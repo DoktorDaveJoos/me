@@ -312,6 +312,7 @@ impl MeApp {
             .as_ref()
             .map(|b| b.account.email.clone())
             .unwrap_or_default();
+        let session = self.session.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.logins.intake.cancel = Some(cancel.clone());
         let task = cx.background_executor().spawn(async move {
@@ -331,8 +332,16 @@ impl MeApp {
                         .unwrap_or(Intent::Unknown),
                 };
             }
+            let suggestions = session
+                .lock()
+                .ok()
+                .and_then(|s| s.as_ref().and_then(|v| v.credential_suggestions().ok()))
+                .unwrap_or_default();
+            let identity = suggestions
+                .preferred_identity(&capture.website, capture.email_expected)
+                .unwrap_or(&email);
             capture
-                .prepare_registration(&email)
+                .prepare_registration(identity)
                 .map_err(|_| "Couldn't prepare the registration draft.")?;
             Ok::<_, context_source::CaptureError>(capture)
         });
@@ -397,55 +406,6 @@ impl MeApp {
         })
         .detach();
         cx.notify();
-    }
-    pub(super) fn generate_login_password(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.busy {
-            return;
-        }
-        let Some(input) = self.logins.draft.as_ref().and_then(|d| {
-            d.fields
-                .iter()
-                .find(|(i, _)| *i == index)
-                .map(|(_, i)| i.clone())
-        }) else {
-            return;
-        };
-        // OS random generation is bounded and runs off the UI thread.
-        let generation = self.generation;
-        let request = self.logins.detail_request;
-        let task = cx
-            .background_executor()
-            .spawn(async { me_core::generate_credential_password() });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let _ = this.update(cx, |this, cx| {
-                if this.generation != generation
-                    || this.logins.detail_request != request
-                    || this.logins.draft.is_none()
-                    || this.busy
-                {
-                    return;
-                }
-                match result {
-                    Ok(secret) => {
-                        input.update(cx, |i, cx| {
-                            i.set_concealed(true, cx);
-                            i.set_text(&secret, cx)
-                        });
-                        this.logins.revealed.remove(&index);
-                        this.logins.notice = Some(
-                            "Generated locally · 20 random characters. Save after reviewing."
-                                .into(),
-                        );
-                    }
-                    Err(_) => {
-                        this.logins.error = Some("Couldn't generate a password. Try again.".into())
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
     pub(super) fn credential_intake_modal(
         &self,

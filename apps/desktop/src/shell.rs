@@ -39,6 +39,8 @@ mod context_source;
 mod credential_capture;
 #[path = "credential_create_ui.rs"]
 mod credential_create_ui;
+#[path = "credential_tools_ui.rs"]
+mod credential_tools_ui;
 #[path = "credentials_ui.rs"]
 mod credentials_ui;
 #[path = "logins_ui.rs"]

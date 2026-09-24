@@ -25,14 +25,16 @@ A recognizable empty email/password registration form prepares a Login draft:
 - The stored website is its origin (scheme, host, optional port), without the
   registration path, query or fragment. `https://forge.laravel.com/register`
   therefore becomes `https://forge.laravel.com`.
-- An email already typed in the form takes precedence. Otherwise the remembered
-  ME. account email is suggested, with an editable field for another identity.
+- An email already typed in the form takes precedence. Otherwise a saved identity for
+  the website is preferred, then a frequently used saved email, then the remembered
+  ME. account email. The field remains editable.
 - A 20-character password is generated locally using the OS CSPRNG. Sign-in pages,
   password updates and forms that already contain a password do not get an
   automatically generated replacement.
 - A name already present in a labelled form field is retained. A Name field is
   available for the user to complete; ME. does not invent a name or infer one from
-  an email. The factual tag Web is suggested. Optional notes are left empty.
+  an email. The factual tag Web is suggested. Notes record the website origin
+  and that the draft came from registration; page text and URL tokens are not copied.
 - Clear forms are classified locally. TypeSafe is consulted automatically for
   ambiguous cases using only fixed detected label concepts. Screenshots, raw
   text, URLs, names, emails and credential values never enter that request.
@@ -58,6 +60,31 @@ Paste copied details remains a secondary option (including Cmd/Ctrl+V in the
 chooser). It recognizes labelled fields, OpenSSH key blocks and recovery-code
 lists. Recovery/password updates retain an explicit account-selection and review
 step. Website matches are advisory, not proof of account identity.
+
+## Draft tools
+
+Registration inference is separate from autofill eligibility. A registration URL or
+heading with email/password labels can prepare a draft even when the browser does
+not expose a complete writable form. Existing page passwords, sign-in and recovery
+forms are not automatically replaced. Only the helper's verified target enables
+Save and fill; OCR/heuristic evidence cannot authorize filling.
+
+The username/email field offers deduplicated identities from active, latest-version
+logins in the current unlocked vault, including imported and native records. Typing
+filters candidates; Browse all shows the full scrollable list. Selection changes
+only the draft. Passwords, notes and other secret fields never become candidates.
+Suggestions load on a background worker and are dropped with the draft/on lock.
+
+Generate opens local options: length 8–128, uppercase, lowercase, numbers, symbols,
+and avoiding ambiguous 0/O/1/I/l characters. The default is 20 characters with all
+four classes. Every enabled class occurs at least once; disabled classes never do.
+Generation uses OS randomness with rejection sampling, and rejects invalid length
+or an empty alphabet. Generate password explicitly replaces only the draft value;
+a concurrent edit, save, cancel or lock cannot receive an old generation result.
+
+Tags show chips and existing tags can be added with one click. Tags and notes appear
+before optional recovery and two-factor fields. All suggestions remain editable;
+no organization, name, recovery material or website policy is invented.
 
 ## macOS permission identity and recovery
 
@@ -170,3 +197,19 @@ uses a fresh helper and captures no content. The Screen Recording request path
 honors an immediate successful grant instead of always returning denial; Refresh
 can retry after returning from System Settings. Old registration-test grants do
 not carry to the deliberately separate ME Dev identity.
+
+
+### Draft enrichment and generator verification — 24 September 2026
+
+Regression coverage includes registration drafts without writable autofill targets,
+label normalization, preserving entered identities/passwords, and excluding sign-in
+and recovery pages. Core tests cover every nonempty character-class combination at
+lengths 8, 20 and 128, rejected configurations, and imported/native identity ranking,
+deduplication, edits, archived records and excluded secret fields.
+
+The native synthetic gallery was inspected at 1120×820 and 800×600. Browsing saved
+identities, filtering by typing, choosing an email, adding an existing tag, changing
+length/character options and displaying validation beside the generator were
+exercised. No live website account was created or changed. The reported Forge page
+was not available as the active browser window during this follow-up; live capture
+of that exact form still needs a user retry.
