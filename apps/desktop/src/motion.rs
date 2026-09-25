@@ -1,7 +1,7 @@
 //! Finite native motion and the recurring honeycomb drawing language.
 //! Decoration has no input handlers and never changes data positions.
 use crate::assets::{Icon, IconSize, icon};
-use crate::design_system::{color::*, layout, motion as timing, radius, space};
+use crate::design_system::{DesignStyle, color::*, font, layout, motion as timing, radius, space};
 use gpui::{
     Animation, AnimationExt, AnyElement, Bounds, ElementId, PathBuilder, Pixels, Point, Window,
     canvas, div, point, prelude::*, px, rgb,
@@ -366,6 +366,73 @@ pub fn login_badge(
                     if active { ACCENT } else { MUTED },
                 )),
         )
+}
+
+/// Recipe cells are decorative children of stable rectangular click targets.
+/// Only a successful generation changes the finite animation key; secrets never
+/// influence geometry. Reduced motion renders the completed outline immediately.
+pub fn password_cell(
+    label: &'static str,
+    active: bool,
+    index: usize,
+    generation: usize,
+    animated: bool,
+) -> AnyElement {
+    let render = move |phase: f32| {
+        div()
+            .relative()
+            .size(px(layout::CONTROL_LARGE))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        let center =
+                            point(f32::from(bounds.center().x), f32::from(bounds.center().y));
+                        let size = f32::from(bounds.size.height) / 2. - timing::FRAME_INSET;
+                        let points = hex_outline(center, size, radius::STANDARD);
+                        let mut fill = PathBuilder::fill();
+                        stroke_points(&mut fill, &points);
+                        fill.close();
+                        paint(
+                            window,
+                            fill,
+                            if active { ACCENT } else { HOVER },
+                            if active { timing::LOGIN_BADGE_TINT } else { 1. },
+                        );
+                        let mut border = PathBuilder::stroke(px(timing::TRACE_STROKE));
+                        stroke_points(&mut border, &trace(&points, ease(phase)));
+                        paint(window, border, if active { ACCENT } else { DECORATIVE }, 1.);
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .font_family(font::MONO)
+                    .type_style(crate::design_system::Type::Small)
+                    .text_color(rgb(if active { ACCENT } else { MUTED }))
+                    .child(label),
+            )
+    };
+    if !animated || generation == 0 {
+        return render(1.).into_any_element();
+    }
+    div()
+        .with_animation(
+            (
+                "password-cell",
+                generation.wrapping_mul(4).wrapping_add(index),
+            ),
+            Animation::new(Duration::from_millis(timing::FRAME_TRACE_MS)),
+            move |el, t| el.child(render(t)),
+        )
+        .into_any_element()
 }
 
 fn login_logo(

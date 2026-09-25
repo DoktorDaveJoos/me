@@ -1,5 +1,6 @@
 //! Local editor tools. Candidates and generated secrets never leave the vault/device.
 use super::*;
+use crate::assets;
 use gpui::Div;
 use me_core::{CredentialSuggestions, PasswordOptions};
 
@@ -13,7 +14,20 @@ pub(super) struct CredentialTools {
     pub length: Entity<TextInput>,
     pub generating: bool,
     password_error: Option<String>,
+    generated: Option<GeneratedPassword>,
+    generation_sequence: usize,
     _length_subscription: gpui::Subscription,
+}
+// Keep completion tied to the exact draft value and recipe, never just a click.
+struct GeneratedPassword {
+    index: usize,
+    options: PasswordOptions,
+    value: zeroize::Zeroizing<String>,
+}
+impl GeneratedPassword {
+    fn matches(&self, index: usize, options: PasswordOptions, value: &str) -> bool {
+        self.index == index && self.options == options && self.value.as_str() == value
+    }
 }
 impl CredentialTools {
     pub fn new(cx: &mut Context<MeApp>) -> Self {
@@ -33,6 +47,8 @@ impl CredentialTools {
             length,
             generating: false,
             password_error: None,
+            generated: None,
+            generation_sequence: 0,
             _length_subscription: subscription,
         }
     }
@@ -139,6 +155,13 @@ impl MeApp {
                 }
                 match result {
                     Ok(secret) => {
+                        draft.tools.generation_sequence =
+                            draft.tools.generation_sequence.wrapping_add(1);
+                        draft.tools.generated = Some(GeneratedPassword {
+                            index,
+                            options,
+                            value: secret.clone(),
+                        });
                         input.update(cx, |i, cx| {
                             i.set_concealed(true, cx);
                             i.set_text(&secret, cx);
@@ -157,7 +180,35 @@ impl MeApp {
         cx.notify();
     }
     pub(super) fn password_generator(&self, index: usize, cx: &mut Context<Self>) -> Div {
-        let tools = &self.logins.draft.as_ref().unwrap().tools;
+        let draft = self.logins.draft.as_ref().unwrap();
+        let tools = &draft.tools;
+        let length = tools.length.read(cx).content.trim().parse::<usize>().ok();
+        let options = PasswordOptions {
+            length: length.unwrap_or(0),
+            ..tools.options
+        };
+        let choices = [
+            options.uppercase,
+            options.lowercase,
+            options.digits,
+            options.symbols,
+        ];
+        let count = choices.iter().filter(|&&on| on).count();
+        let valid = length.is_some_and(|n| (8..=128).contains(&n)) && count > 0;
+        let ready = tools.generated.as_ref().is_some_and(|generated| {
+            draft
+                .fields
+                .iter()
+                .find(|(i, _)| *i == index)
+                .is_some_and(|(_, input)| {
+                    generated.matches(index, options, input.read(cx).content.as_ref())
+                })
+        });
+        let status = if ready {
+            "Fresh password ready"
+        } else {
+            "Build your next password"
+        };
         div()
             .flex()
             .flex_col()
@@ -167,43 +218,103 @@ impl MeApp {
             .border_color(rgb(LINE))
             .child(
                 div()
-                    .type_style(Type::Small)
-                    .text_color(rgb(MUTED))
-                    .child("Password options"),
+                    .flex()
+                    .items_center()
+                    .gap(px(space::SM))
+                    .child(assets::icon(Icon::Honeycomb, IconSize::Large, ACCENT))
+                    .child(
+                        div()
+                            .flex_1()
+                            .type_style(Type::Label)
+                            .font_weight(font::EMPHASIS)
+                            .child("Password workshop"),
+                    ),
+            )
+            .child(
+                div().flex().flex_wrap().gap(px(space::SM)).children(
+                    [
+                        ("1 · Tune", false, !ready),
+                        ("2 · Generate", ready, false),
+                        ("3 · Save", false, ready),
+                    ]
+                    .into_iter()
+                    .map(|(label, complete, active)| {
+                        div()
+                            .type_style(Type::Caption)
+                            .px(px(space::SM))
+                            .py(px(space::XS))
+                            .rounded(px(radius::STANDARD))
+                            .bg(rgb(if active { INK } else { BG }))
+                            .text_color(rgb(if active { SURFACE } else { MUTED }))
+                            .flex()
+                            .items_center()
+                            .gap(px(space::XS))
+                            .when(complete, |s| {
+                                s.child(assets::icon(Icon::Check, IconSize::Small, SUCCESS))
+                            })
+                            .child(label)
+                    }),
+                ),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(space::SM))
-                    .child(
-                        div()
-                            .flex_1()
-                            .type_style(Type::Small)
-                            .child("Length · 8–128"),
-                    )
-                    .child(div().w(px(96.)).child(self.login_input_frame(
+                    .child(div().flex_1().type_style(Type::Small).child("Length"))
+                    .children([12, 20, 32].into_iter().map(|preset| {
+                        secondary_action()
+                            .id(("password-length", preset))
+                            .h(px(layout::CONTROL_COMPACT))
+                            .px(px(space::SM))
+                            .when(length == Some(preset), |s| {
+                                s.border_color(rgb(ACCENT)).text_color(rgb(ACCENT))
+                            })
+                            .hover(|s| s.bg(rgb(HOVER)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.busy {
+                                    return;
+                                }
+                                if let Some(draft) = &mut this.logins.draft {
+                                    draft.tools.length.update(cx, |input, cx| {
+                                        input.set_text(&preset.to_string(), cx)
+                                    });
+                                    draft.tools.password_error = None;
+                                    cx.notify();
+                                }
+                            }))
+                            .child(preset.to_string())
+                    }))
+                    .child(div().w(px(64.)).child(self.login_input_frame(
                         &tools.length,
                         false,
                         cx,
                     ))),
             )
             .child(
-                div().flex().flex_wrap().gap(px(space::SM)).children(
+                div().flex().gap(px(space::XS)).children(
                     [
-                        (0, tools.options.uppercase, "Uppercase A–Z"),
-                        (1, tools.options.lowercase, "Lowercase a–z"),
-                        (2, tools.options.digits, "Numbers 0–9"),
-                        (3, tools.options.symbols, "Symbols !@#"),
-                        (4, tools.options.exclude_ambiguous, "Avoid 0 O 1 I l"),
+                        ("A–Z", "Uppercase"),
+                        ("a–z", "Lowercase"),
+                        ("0–9", "Numbers"),
+                        ("!@#", "Symbols"),
                     ]
                     .into_iter()
-                    .map(|(key, checked, label)| {
+                    .enumerate()
+                    .map(|(key, (sample, label))| {
+                        let checked = choices[key];
                         div()
-                            .id(("password-option", key as usize))
-                            .min_w(px(144.))
+                            .id(("password-option", key))
                             .flex_1()
+                            .min_w_0()
+                            .rounded(px(radius::STANDARD))
+                            .py(px(space::SM))
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(space::XS))
                             .cursor_pointer()
+                            .hover(|s| s.bg(rgb(HOVER)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if this.busy {
                                     return;
@@ -214,23 +325,108 @@ impl MeApp {
                                         0 => &mut o.uppercase,
                                         1 => &mut o.lowercase,
                                         2 => &mut o.digits,
-                                        3 => &mut o.symbols,
-                                        _ => &mut o.exclude_ambiguous,
+                                        _ => &mut o.symbols,
                                     };
                                     *value = !*value;
+                                    draft.tools.password_error = None;
                                     cx.notify();
                                 }
                             }))
-                            .child(checkbox(checked, label))
+                            .child(motion::password_cell(
+                                sample,
+                                checked,
+                                key,
+                                tools.generation_sequence,
+                                self.motion_enabled(),
+                            ))
+                            .child(
+                                div()
+                                    .type_style(Type::Caption)
+                                    .text_color(rgb(if checked { INK } else { MUTED }))
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(space::XS))
+                                    .type_style(Type::Caption)
+                                    .text_color(rgb(if checked { ACCENT } else { MUTED }))
+                                    .when(checked, |s| {
+                                        s.child(assets::icon(Icon::Check, IconSize::Small, ACCENT))
+                                    })
+                                    .child(if checked { "On" } else { "Off" }),
+                            )
                     }),
                 ),
             )
             .child(
                 div()
-                    .type_style(Type::Caption)
-                    .text_color(rgb(MUTED))
+                    .id(("password-ambiguity", index))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.busy {
+                            return;
+                        }
+                        if let Some(draft) = &mut this.logins.draft {
+                            draft.tools.options.exclude_ambiguous =
+                                !draft.tools.options.exclude_ambiguous;
+                            cx.notify();
+                        }
+                    }))
+                    .child(checkbox(
+                        options.exclude_ambiguous,
+                        "Avoid lookalikes · 0 O 1 I l",
+                    )),
+            )
+            .child(
+                div()
+                    .p(px(space::MD))
+                    .rounded(px(radius::STANDARD))
+                    .bg(rgb(BG))
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XS))
                     .child(
-                        "Every selected character type is included. Generated only on this device.",
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::SM))
+                            .type_style(Type::Small)
+                            .child(assets::icon(
+                                if ready { Icon::Check } else { Icon::Key },
+                                IconSize::Medium,
+                                if ready { SUCCESS } else { ACCENT },
+                            ))
+                            .child(status),
+                    )
+                    .child(
+                        div()
+                            .type_style(Type::Caption)
+                            .text_color(rgb(MUTED))
+                            .child(if valid {
+                                format!(
+                                    "{} characters · {count} character type{} · local generation",
+                                    options.length,
+                                    if count == 1 { "" } else { "s" }
+                                )
+                            } else {
+                                "Choose 8–128 characters and at least one character type.".into()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .type_style(Type::Caption)
+                            .text_color(rgb(MUTED))
+                            .child(if ready {
+                                if self.logins.creating.is_some() {
+                                    "Review the draft, then save your new item."
+                                } else {
+                                    "Save to update ME. Change it on the website too."
+                                }
+                            } else {
+                                "Settings apply when you generate. Every enabled type is included."
+                            }),
                     ),
             )
             .when_some(tools.password_error.clone(), |s, error| {
@@ -244,11 +440,19 @@ impl MeApp {
             .child(
                 primary_action()
                     .id(("apply-password-options", index))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.generate_login_password(index, cx)),
-                    )
+                    .when(!valid || tools.generating, |s| {
+                        s.opacity(0.5).cursor_default()
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if valid {
+                            this.generate_login_password(index, cx);
+                        }
+                    }))
+                    .child(assets::icon(Icon::Spark, IconSize::Medium, SURFACE))
                     .child(if tools.generating {
                         "Generating…"
+                    } else if ready {
+                        "Generate another"
                     } else {
                         "Generate password"
                     }),
@@ -465,5 +669,38 @@ impl MeApp {
                             }),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn completion_requires_the_same_field_recipe_and_value() {
+        let options = PasswordOptions::default();
+        let generated = GeneratedPassword {
+            index: 1,
+            options,
+            value: zeroize::Zeroizing::new("synthetic-only".into()),
+        };
+        assert!(generated.matches(1, options, "synthetic-only"));
+        assert!(!generated.matches(2, options, "synthetic-only"));
+        assert!(!generated.matches(1, options, "edited"));
+        assert!(!generated.matches(
+            1,
+            PasswordOptions {
+                length: 32,
+                ..options
+            },
+            "synthetic-only"
+        ));
+        assert!(!generated.matches(
+            1,
+            PasswordOptions {
+                symbols: false,
+                ..options
+            },
+            "synthetic-only"
+        ));
     }
 }

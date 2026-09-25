@@ -240,7 +240,7 @@ not action icons; they use the bounded website-artwork loader described below.
 Keyboard shortcut symbols
 and punctuation are text, not icons.
 
-All 31 SVG assets use a 24×24 viewBox, no fill, 1.5 px strokes, round caps and round
+All 33 SVG assets use a 24×24 viewBox, no fill, 1.5 px strokes, round caps and round
 joins. Black is the SVG mask source; GPUI applies the semantic tint at runtime.
 Sizes are `Small` 12, `Medium` 16, `Large` 20, `Brand` 24, `Hero` 72 and
 `Identity` 224. The last three are for the fingerprint identity, not ordinary
@@ -459,3 +459,19 @@ expand inside the password card, with the shared input frame and checkbox, wrapp
 character-type controls, and the normal primary action. Tags retain the shared
 chips while editing, with selectable existing tags below. All tools stay within
 the detail pane and its scroll container; no new design tokens or modal are added.
+
+## Password workshop
+
+Credential fields use shared `icon_action` controls: 32 px hit regions with 16 px
+ME Outline icons, hover labels and the standard radius. Reveal/Hide use Eye/EyeOff;
+Copy works on the current draft as well as saved values. Both retain the existing
+30-second privacy behavior. Notes remain readable in the unlocked vault.
+
+The password workshop uses four 44 px honeycomb cells for character types, explicit
+On/Off labels, length presets and a custom 8–128 field. The Tune → Generate → Save
+trail describes the actual workflow; it is not a security score. Completion refers
+to the exact generated value and settings. Editing either resets that feedback.
+Successful generation traces the cell outlines once over `FRAME_TRACE_MS` (760 ms);
+reduced motion draws settled cells. Geometry uses the shared rounded hexagon,
+control dimensions and semantic palette. Saving in ME does not change a website's
+password; the update guidance says so explicitly.

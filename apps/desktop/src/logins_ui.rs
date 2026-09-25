@@ -587,19 +587,28 @@ impl MeApp {
         if !self.app_ready() {
             return;
         }
-        if let Some(field) = self
+        let value = self
             .logins
-            .details
+            .draft
             .as_ref()
-            .and_then(|d| d.fields.get(index))
-        {
-            cx.write_to_clipboard(ClipboardItem::new_string(field.value.to_string()));
-            self.copied_value = Some(field.value.clone());
+            .and_then(|draft| draft.fields.iter().find(|(i, _)| *i == index))
+            .map(|(_, input)| zeroize::Zeroizing::new(input.read(cx).content.to_string()))
+            .or_else(|| {
+                self.logins
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.fields.get(index))
+                    .map(|f| f.value.clone())
+            });
+        if let Some(value) = value {
+            cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
+            self.copied_value = Some(value);
             self.clear_clipboard_later(cx);
             self.logins.notice = Some("Copied for 30 seconds.".into());
             cx.notify();
         }
     }
+
     fn export_login_file(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
         if self.busy || !self.app_ready() || self.logins.draft.is_some() {
             return;
@@ -1233,71 +1242,73 @@ impl MeApp {
                 .border_1()
                 .border_color(rgb(LINE));
         }
-        body =
-            body.child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .gap(px(space::SM))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .type_style(Type::Small)
-                            .text_color(rgb(MUTED))
-                            .child(field.label.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_shrink_0()
-                            .gap(px(space::MD))
-                            .when(
-                                input.is_some()
-                                    && (field.key == "password" || field.label == "Password"),
-                                |s| {
-                                    s.child(
-                                        div()
-                                            .id(("generate-password", index))
-                                            .type_style(Type::Small)
-                                            .text_color(rgb(ACCENT))
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.toggle_password_generator(index, cx)
-                                            }))
-                                            .child("Generate…"),
+        body = body.child(
+            div()
+                .flex()
+                .justify_between()
+                .items_center()
+                .gap(px(space::SM))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .type_style(Type::Small)
+                        .text_color(rgb(MUTED))
+                        .child(field.label.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .gap(px(space::XS))
+                        .when(
+                            input.is_some()
+                                && (field.key == "password" || field.label == "Password"),
+                            |s| {
+                                s.child(
+                                    icon_action(
+                                        ("generate-password", index),
+                                        Icon::Spark,
+                                        "Password workshop",
                                     )
-                                },
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.toggle_password_generator(index, cx)
+                                        },
+                                    )),
+                                )
+                            },
+                        )
+                        .when(field.concealed, |s| {
+                            s.child(
+                                icon_action(
+                                    ("login-reveal", index),
+                                    if visible { Icon::EyeOff } else { Icon::Eye },
+                                    if visible {
+                                        "Hide value"
+                                    } else {
+                                        "Reveal for 30 seconds"
+                                    },
+                                )
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.reveal_login(index, cx)),
+                                ),
                             )
-                            .when(field.concealed, |s| {
-                                s.child(
-                                    div()
-                                        .id(("login-reveal", index))
-                                        .type_style(Type::Small)
-                                        .text_color(rgb(ACCENT))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.reveal_login(index, cx)
-                                        }))
-                                        .child(if visible { "Hide" } else { "Reveal" }),
+                        })
+                        .when(copyable, |s| {
+                            s.child(
+                                icon_action(
+                                    ("login-copy", index),
+                                    Icon::Copy,
+                                    "Copy for 30 seconds",
                                 )
-                            })
-                            .when(input.is_none() && copyable, |s| {
-                                s.child(
-                                    div()
-                                        .id(("login-copy", index))
-                                        .type_style(Type::Small)
-                                        .text_color(rgb(ACCENT))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.copy_login(index, cx)
-                                        }))
-                                        .child("Copy"),
-                                )
-                            }),
-                    ),
-            );
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.copy_login(index, cx)),
+                                ),
+                            )
+                        }),
+                ),
+        );
         if field.presentation == LoginPresentation::History {
             body = body.child(
                 div()

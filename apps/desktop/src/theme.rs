@@ -256,3 +256,37 @@ pub fn tag_chip(label: impl Into<gpui::SharedString>) -> impl IntoElement {
                 .child(label.into()),
         )
 }
+
+/// Compact actions retain a generous hit area and a descriptive hover label.
+pub fn icon_action(
+    id: impl Into<gpui::ElementId>,
+    icon: Icon,
+    label: &'static str,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(layout::CONTROL_COMPACT))
+        .flex_shrink_0()
+        .rounded(px(radius::STANDARD))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(HOVER)))
+        .tooltip(move |_, cx| cx.new(|_| ActionTooltip(label)).into())
+        .child(crate::assets::icon(icon, IconSize::Medium, MUTED))
+}
+struct ActionTooltip(&'static str);
+impl gpui::Render for ActionTooltip {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(space::SM))
+            .py(px(space::XS))
+            .rounded(px(radius::STANDARD))
+            .bg(rgb(INK))
+            .text_color(rgb(SURFACE))
+            .font_family(font::SANS)
+            .type_style(Type::Small)
+            .child(self.0)
+    }
+}

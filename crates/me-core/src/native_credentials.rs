@@ -116,7 +116,7 @@ fn template(kind: CredentialKind) -> Vec<(&'static str, &'static str, bool, bool
     };
     fields.extend([
         ("tags", "Tags", false, true),
-        ("notes", "Notes", true, true),
+        ("notes", "Notes", false, true),
     ]);
     if kind == CredentialKind::Login {
         fields.sort_by_key(|(key, _, _, _)| {
@@ -381,6 +381,58 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), Zeroizing::new(v.to_string())))
                 .collect(),
+        }
+    }
+    #[test]
+    fn notes_remain_readable_after_save_and_reopen_while_secrets_stay_concealed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("vault");
+        let mut vault = Vault::create(&root, "synthetic-passphrase").unwrap();
+        let mut items = Vec::new();
+        for kind in CredentialKind::ALL {
+            let draft = credential_draft(kind);
+            let notes = draft.fields.iter().find(|f| f.key == "notes").unwrap();
+            assert!(!notes.concealed);
+            assert!(notes.multiline);
+            let secret_key = draft
+                .fields
+                .iter()
+                .find(|f| f.concealed)
+                .unwrap()
+                .key
+                .clone();
+            let item = vault
+                .create_credential(
+                    kind,
+                    update(
+                        0,
+                        &[
+                            ("notes", "Always readable\nStill encrypted in the vault"),
+                            (&secret_key, "synthetic-secret"),
+                        ],
+                    ),
+                )
+                .unwrap();
+            items.push((item, secret_key));
+        }
+        drop(vault);
+        let vault = Vault::unlock(&root, "synthetic-passphrase").unwrap();
+        for (item, secret_key) in items {
+            let details = vault.login_details(item).unwrap();
+            let notes = details.fields.iter().find(|f| f.key == "notes").unwrap();
+            assert!(!notes.concealed);
+            assert_eq!(
+                notes.value.as_str(),
+                "Always readable\nStill encrypted in the vault"
+            );
+            assert!(
+                details
+                    .fields
+                    .iter()
+                    .find(|f| f.key == secret_key)
+                    .unwrap()
+                    .concealed
+            );
         }
     }
     #[test]

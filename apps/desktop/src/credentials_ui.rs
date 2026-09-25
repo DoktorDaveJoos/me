@@ -332,8 +332,8 @@ impl MeApp {
                 .child(div().type_style(Type::Small).font_weight(font::EMPHASIS).child(field.label.clone()))
                 .child(div().type_style(Type::Body).font_family(font::MONO).child(if self.credential_revealed.contains(&index) {field.value.to_string()} else {"••••••••".into()}))
                 .child(div().flex().gap(px(space::LG)).type_style(Type::Small).text_color(rgb(ACCENT))
-                    .child(div().id(("reveal-credential",index)).cursor_pointer().on_click(cx.listener(move|this,_,_,cx|this.reveal_credential_field(index,cx))).child(if self.credential_revealed.contains(&index){"Hide"}else{"Reveal"}))
-                    .child(div().id(("copy-credential",index)).cursor_pointer().on_click(cx.listener(move|this,_,_,cx| {
+                    .child(icon_action(("reveal-credential",index), if self.credential_revealed.contains(&index) { Icon::EyeOff } else { Icon::Eye }, if self.credential_revealed.contains(&index) { "Hide value" } else { "Reveal for 30 seconds" }).on_click(cx.listener(move|this,_,_,cx|this.reveal_credential_field(index,cx))))
+                    .child(icon_action(("copy-credential",index), Icon::Copy, "Copy for 30 seconds").on_click(cx.listener(move|this,_,_,cx| {
                         if !this.app_ready() {return;}
                         if let Some(value)=this.credential.as_ref().and_then(|c|c.fields.get(index)) {
                             cx.write_to_clipboard(ClipboardItem::new_string(value.value.to_string()));
@@ -341,7 +341,7 @@ impl MeApp {
                             this.clear_clipboard_later(cx);
                             this.notice=Some("Copied for 30 seconds.".into());cx.notify();
                         }
-                    })).child("Copy")))))
+                    }))))))
             .when(details.fields.len()>200,|s|s.child(div().type_style(Type::Small).child("Showing the first 200 fields. All fields remain in the original export.")))
             .children(details.attachments.iter().enumerate().map(|(index,attachment)|div().id(("export-credential-attachment",index)).type_style(Type::Small).text_color(rgb(ACCENT)).cursor_pointer()
                 .on_click(cx.listener(move|this,_,_,cx|this.pick_credential_export(Some(index),cx))).child(format!("Export attachment: {}",attachment.name))))
