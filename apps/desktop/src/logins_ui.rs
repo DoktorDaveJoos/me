@@ -318,7 +318,11 @@ impl MeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.page != Page::Logins || !self.app_ready() || self.busy {
+        if self.page != Page::Logins
+            || !self.app_ready()
+            || self.busy
+            || self.password_generator_open().is_some()
+        {
             return;
         }
         let (Some(details), Some(draft)) = (&self.logins.details, &self.logins.draft) else {
@@ -474,6 +478,10 @@ impl MeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.password_generator_open().is_some() {
+            self.password_workshop_tab(backwards, window, cx);
+            return;
+        }
         let Some(draft) = &self.logins.draft else {
             cx.propagate();
             return;
@@ -1266,16 +1274,14 @@ impl MeApp {
                                 && (field.key == "password" || field.label == "Password"),
                             |s| {
                                 s.child(
-                                    icon_action(
-                                        ("generate-password", index),
-                                        Icon::Spark,
-                                        "Password workshop",
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.toggle_password_generator(index, cx)
-                                        },
-                                    )),
+                                    secondary_action()
+                                        .id(("generate-password", index))
+                                        .h(px(layout::CONTROL_COMPACT))
+                                        .px(px(space::SM))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.toggle_password_generator(index, window, cx)
+                                        }))
+                                        .child("Generate"),
                                 )
                             },
                         )
@@ -1358,14 +1364,6 @@ impl MeApp {
             }
             if field.presentation == LoginPresentation::Tags {
                 body = body.child(self.tag_suggestions(index, input, cx));
-            }
-            if self
-                .logins
-                .draft
-                .as_ref()
-                .is_some_and(|d| d.tools.generator_open == Some(index))
-            {
-                body = body.child(self.password_generator(index, cx));
             }
         }
         div()

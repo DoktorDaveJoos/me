@@ -40,6 +40,7 @@ actions!(
 pub struct TextInput {
     focus_handle: FocusHandle,
     secret: bool,
+    monospaced: bool,
     multiline: bool,
     last_lines: Vec<(usize, ShapedLine)>,
     last_line_height: Pixels,
@@ -66,6 +67,7 @@ impl TextInput {
     }
     pub fn set_concealed(&mut self, concealed: bool, cx: &mut Context<Self>) {
         self.secret = concealed;
+        self.monospaced |= concealed;
         self.last_lines.clear();
         self.last_layout = None;
         self.scroll_offset = px(0.);
@@ -131,6 +133,7 @@ impl TextInput {
     pub fn secret(placeholder: &str, cx: &mut Context<Self>) -> Self {
         let mut input = Self::new(placeholder, cx);
         input.secret = true;
+        input.monospaced = true;
         input
     }
     /// An inert field snapshot while its submitted value is being processed.
@@ -145,6 +148,8 @@ impl TextInput {
             .w_full()
             .min_w_0()
             .overflow_hidden()
+            .font_family(font::SANS)
+            .when(self.monospaced, |s| s.font_family(font::MONO))
             .type_style(Type::Body)
             .text_color(rgb(if content.is_empty() { FAINT } else { INK }))
             .child(if content.is_empty() {
@@ -404,6 +409,7 @@ impl TextInput {
         Self {
             focus_handle: cx.focus_handle(),
             secret: false,
+            monospaced: false,
             multiline: false,
             last_lines: Vec::new(),
             last_line_height: px(1.),
@@ -841,6 +847,7 @@ impl Render for TextInput {
             .min_w_0()
             .overflow_hidden()
             .font_family(font::SANS)
+            .when(self.monospaced, |s| s.font_family(font::MONO))
             .text_color(rgb(crate::theme::INK))
             .type_style(Type::Body)
             .when(self.multiline && !self.secret, |s| {

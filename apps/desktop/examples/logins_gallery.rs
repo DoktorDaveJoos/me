@@ -76,7 +76,7 @@ mod shell {
                 app.logins.intake.capture = Some(capture);
                 app.begin_credential(me_core::CredentialKind::Login, window, cx);
                 if mode == "generator" {
-                    app.toggle_password_generator(1, cx);
+                    app.toggle_password_generator(1, window, cx);
                 }
             }
             if mode == "api-draft" {

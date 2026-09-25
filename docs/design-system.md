@@ -460,18 +460,25 @@ character-type controls, and the normal primary action. Tags retain the shared
 chips while editing, with selectable existing tags below. All tools stay within
 the detail pane and its scroll container; no new design tokens or modal are added.
 
-## Password workshop
+## Password generation
 
-Credential fields use shared `icon_action` controls: 32 px hit regions with 16 px
-ME Outline icons, hover labels and the standard radius. Reveal/Hide use Eye/EyeOff;
-Copy works on the current draft as well as saved values. Both retain the existing
-30-second privacy behavior. Notes remain readable in the unlocked vault.
+Credential field headers use a text **Generate** action and compact Eye/EyeOff and
+Copy icons with hover labels. Password generation opens a separate 560 px modal
+on the shared scrim, with a bounded scrolling body and a fixed action footer.
+The dialog uses the existing panel, spacing, radii and typography; four quiet
+honeycomb cells retain the character-type motif without a progress-game trail.
 
-The password workshop uses four 44 px honeycomb cells for character types, explicit
-On/Off labels, length presets and a custom 8–128 field. The Tune → Generate → Save
-trail describes the actual workflow; it is not a security score. Completion refers
-to the exact generated value and settings. Editing either resets that feedback.
-Successful generation traces the cell outlines once over `FRAME_TRACE_MS` (760 ms);
-reduced motion draws settled cells. Geometry uses the shared rounded hexagon,
-control dimensions and semantic palette. Saving in ME does not change a website's
-password; the update guidance says so explicitly.
+A generated candidate belongs only to the dialog. **Use password** copies it into
+the editor; Cancel or Escape discards it and preserves the previous draft value.
+Changing the recipe requires generating again before applying. The item must
+still be saved afterward. Saving in ME does not change the website's password.
+Async results are scoped to the current dialog session and draft. Previews retain
+30-second reveal/copy behavior; closing the dialog clears its candidate.
+Tab and Shift-Tab stay in the dialog, Enter activates the focused action (or
+regenerates from Length), and Escape closes only the dialog. Save shortcuts cannot
+save the underlying item while the dialog is open.
+
+Secret text inputs use Geist Mono in masked, revealed and frozen states; revealing
+never switches back to a proportional face. Ordinary text fields keep Geist.
+Notes remain readable in the unlocked vault. Shared recipe cells draw once over
+`FRAME_TRACE_MS` after generation; reduced motion shows settled outlines.

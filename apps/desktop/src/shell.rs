@@ -521,6 +521,10 @@ impl MeApp {
         if self.busy {
             return;
         }
+        if self.password_generator_open().is_some() {
+            self.close_password_generator(window, cx);
+            return;
+        }
         if self.page == Page::Logins && !self.show_settings {
             if self.logins.intake.open {
                 self.close_credential_intake(cx);
@@ -1086,6 +1090,16 @@ impl Render for MeApp {
                     self.motion_enabled(),
                 ))
             })
+            .when(
+                self.password_generator_open().is_some() && !self.show_settings,
+                |s| {
+                    s.child(motion::overlay(
+                        self.password_generator_modal(window, cx).into_any_element(),
+                        "overlay-password-generator",
+                        self.motion_enabled(),
+                    ))
+                },
+            )
             .when(self.credential.is_some(), |s| {
                 s.child(motion::overlay(
                     self.credential_modal(cx).into_any_element(),
