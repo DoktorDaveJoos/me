@@ -109,6 +109,10 @@ impl TextInput {
         );
     }
     fn multiline_index(&self, position: Point<Pixels>) -> usize {
+        // The placeholder has a painted layout, but it is not editable content.
+        if self.content.is_empty() {
+            return 0;
+        }
         let Some(bounds) = self.last_bounds else {
             return 0;
         };
@@ -303,9 +307,20 @@ impl TextInput {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.valid_offset(offset);
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         cx.notify()
+    }
+
+    /// Layouts may still describe a placeholder or the frame before an edit.
+    /// Keep every cursor/selection endpoint inside the current UTF-8 content.
+    fn valid_offset(&self, offset: usize) -> usize {
+        let mut offset = offset.min(self.content.len());
+        while !self.content.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        offset
     }
 
     fn cursor_offset(&self) -> usize {
@@ -340,6 +355,7 @@ impl TextInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.valid_offset(offset);
         if self.selection_reversed {
             self.selected_range.start = offset
         } else {
@@ -1111,5 +1127,60 @@ mod paste_tests {
         assert_eq!(pasted_text(text, true, false), text);
         assert_eq!(pasted_text(text, false, true), text);
         assert_eq!(pasted_text("first\nsecond", false, false), "first second");
+    }
+}
+
+#[cfg(test)]
+mod editing_tests {
+    use super::*;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+
+    fn notes_editor(cx: &mut TestAppContext) -> (Entity<TextInput>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            crate::assets::load_fonts(cx).unwrap();
+            register_bindings(cx);
+        });
+        cx.add_window_view(|_, cx| TextInput::multiline("Notes", cx))
+    }
+
+    fn click_after_placeholder(input: &Entity<TextInput>, cx: &mut VisualTestContext) {
+        let position = input.read_with(cx, |input, _| {
+            let bounds = input.last_bounds.unwrap();
+            point(bounds.left() + px(160.), bounds.top() + px(5.))
+        });
+        cx.simulate_click(position, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn typing_after_clicking_empty_notes_starts_at_zero(cx: &mut TestAppContext) {
+        let (input, cx) = notes_editor(cx);
+        click_after_placeholder(&input, cx);
+        input.read_with(cx, |input, _| assert_eq!(input.selected_range, 0..0));
+        cx.simulate_input("First note");
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.content.as_ref(), "First note");
+            assert_eq!(input.selected_range, 10..10);
+        });
+    }
+
+    #[gpui::test]
+    fn cleared_notes_accept_navigation_newlines_and_unicode(cx: &mut TestAppContext) {
+        let (input, cx) = notes_editor(cx);
+        click_after_placeholder(&input, cx);
+        cx.simulate_input("café 🗝\n日本語");
+        cx.dispatch_action(SelectAll);
+        cx.dispatch_action(Backspace);
+        click_after_placeholder(&input, cx);
+        cx.simulate_keystrokes("down up enter");
+        cx.simulate_input("New 🐝 note");
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.content.as_ref(), "\nNew 🐝 note");
+            assert_eq!(input.selected_range.start, input.content.len());
+        });
+        cx.dispatch_action(SelectAll);
+        cx.simulate_input("Replacement\nsecond line");
+        input.read_with(cx, |input, _| {
+            assert_eq!(input.content.as_ref(), "Replacement\nsecond line");
+        });
     }
 }
