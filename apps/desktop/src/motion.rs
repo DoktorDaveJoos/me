@@ -393,12 +393,7 @@ pub fn password_cell(
                         let mut fill = PathBuilder::fill();
                         stroke_points(&mut fill, &points);
                         fill.close();
-                        paint(
-                            window,
-                            fill,
-                            if active { ACCENT } else { HOVER },
-                            if active { timing::LOGIN_BADGE_TINT } else { 1. },
-                        );
+                        paint(window, fill, if active { ACCENT } else { HOVER }, 1.);
                         let mut border = PathBuilder::stroke(px(timing::TRACE_STROKE));
                         stroke_points(&mut border, &trace(&points, ease(phase)));
                         paint(window, border, if active { ACCENT } else { DECORATIVE }, 1.);
@@ -416,7 +411,7 @@ pub fn password_cell(
                     .justify_center()
                     .font_family(font::MONO)
                     .type_style(crate::design_system::Type::Small)
-                    .text_color(rgb(if active { ACCENT } else { MUTED }))
+                    .text_color(rgb(if active { SURFACE } else { MUTED }))
                     .child(label),
             )
     };

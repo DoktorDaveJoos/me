@@ -454,26 +454,35 @@ a window. The panel fits both 1120×820 and 800×600 without new visual tokens.
 
 The username/email editor offers an inline scrollable list of existing identities,
 using Body/Small roles, monospace values, existing card radius and semantic hover.
-Typing filters the list; Browse all exposes remaining choices. Password options
-expand inside the password card, with the shared input frame and checkbox, wrapped
-character-type controls, and the normal primary action. Tags retain the shared
-chips while editing, with selectable existing tags below. All tools stay within
-the detail pane and its scroll container; no new design tokens or modal are added.
+Typing filters the list; Browse all exposes remaining choices. Tags retain the
+shared chips while editing, with selectable existing tags below. Identity and tag
+tools stay within the detail pane; password generation uses the modal below.
 
 ## Password generation
 
 Credential field headers use a text **Generate** action and compact Eye/EyeOff and
 Copy icons with hover labels. Password generation opens a separate 560 px modal
 on the shared scrim, with a bounded scrolling body and a fixed action footer.
-The dialog uses the existing panel, spacing, radii and typography; four quiet
-honeycomb cells retain the character-type motif without a progress-game trail.
+The dialog uses the existing panel, spacing, radii and typography. A honeycomb
+header and four selectable character tiles share the ME Outline and rounded-hex
+language. Enabled cells use an accent fill with inverse text; On/Off labels and
+checks communicate selection without relying on color. The preview has a FOCUS
+border, Geist Mono values and explicit local-generation feedback.
 
 A generated candidate belongs only to the dialog. **Use password** copies it into
 the editor; Cancel or Escape discards it and preserves the previous draft value.
-Changing the recipe requires generating again before applying. The item must
-still be saved afterward. Saving in ME does not change the website's password.
-Async results are scoped to the current dialog session and draft. Previews retain
-30-second reveal/copy behavior; closing the dialog clears its candidate.
+Changing any valid option automatically regenerates, including typed lengths.
+Invalid input clears the candidate and gives a specific correction; Use password
+and Copy cannot apply an older preview. Repeated input notifications without a
+recipe change do not regenerate. Requests are versioned so rapid A → B → A edits,
+invalid lengths, closing and reopening cannot publish an outdated result.
+Generate again creates a different variation with the same options.
+
+New passwords are visible when the dialog opens. The eye control hides/shows them,
+and that choice persists across regeneration until the dialog closes. This preview
+has no reveal timeout; saved credential fields retain their 30-second reveal timer.
+Copy still clears after 30 seconds. Closing the dialog clears its candidate. The
+item must still be saved afterward; saving in ME does not change the website.
 Tab and Shift-Tab stay in the dialog, Enter activates the focused action (or
 regenerates from Length), and Escape closes only the dialog. Save shortcuts cannot
 save the underlying item while the dialog is open.

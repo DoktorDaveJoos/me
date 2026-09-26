@@ -19,7 +19,7 @@ pub(super) struct CredentialTools {
     generator_epoch: u64,
     preview_revealed: bool,
     preview_copied: bool,
-    preview_reveal_token: u64,
+    requests: PreviewRequests,
     controls: Vec<gpui::FocusHandle>,
     workshop_scroll: gpui::ScrollHandle,
     _length_subscription: gpui::Subscription,
@@ -33,6 +33,25 @@ struct GeneratedPassword {
 impl GeneratedPassword {
     fn matches(&self, index: usize, options: PasswordOptions) -> bool {
         self.index == index && self.options == options
+    }
+}
+/// Accept only the newest recipe request, even if recipes change A → B → A.
+#[derive(Default)]
+struct PreviewRequests {
+    sequence: u64,
+    recipe: Option<PasswordOptions>,
+}
+impl PreviewRequests {
+    fn request(&mut self, recipe: Option<PasswordOptions>, force: bool) -> Option<u64> {
+        if !force && self.recipe == recipe {
+            return None;
+        }
+        self.sequence = self.sequence.wrapping_add(1);
+        self.recipe = recipe;
+        Some(self.sequence)
+    }
+    fn accepts(&self, sequence: u64, recipe: PasswordOptions) -> bool {
+        self.sequence == sequence && self.recipe == Some(recipe)
     }
 }
 impl CredentialTools {
@@ -59,7 +78,10 @@ impl CredentialTools {
             input.set_text("20", cx);
             input
         });
-        let subscription = cx.observe(&length, |_, _, cx| cx.notify());
+        let subscription = cx.observe(&length, |this, _, cx| {
+            this.refresh_password_preview(cx);
+            cx.notify();
+        });
         Self {
             suggestions: CredentialSuggestions::default(),
             loading: true,
@@ -75,7 +97,7 @@ impl CredentialTools {
             generator_epoch: 0,
             preview_revealed: false,
             preview_copied: false,
-            preview_reveal_token: 0,
+            requests: PreviewRequests::default(),
             controls: (0..13).map(|_| cx.focus_handle()).collect(),
             workshop_scroll: gpui::ScrollHandle::default(),
             _length_subscription: subscription,
@@ -152,10 +174,10 @@ impl MeApp {
             tools.generated = None;
             tools.generating = false;
             tools.password_error = None;
-            tools.preview_revealed = false;
+            tools.preview_revealed = true;
             tools.preview_copied = false;
             window.focus(&tools.length.focus_handle(cx));
-            self.generate_login_password(index, cx);
+            self.generate_login_password(index, true, cx);
             cx.notify();
         }
     }
@@ -174,26 +196,35 @@ impl MeApp {
             cx.notify();
         }
     }
-    fn generate_login_password(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn refresh_password_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self.password_generator_open() {
+            self.generate_login_password(index, false, cx);
+        }
+    }
+    fn generate_login_password(&mut self, index: usize, force: bool, cx: &mut Context<Self>) {
         if self.busy || !self.app_ready() {
             return;
         }
         let Some(draft) = &mut self.logins.draft else {
             return;
         };
-        if draft.tools.generating || draft.tools.generator_open != Some(index) {
+        if draft.tools.generator_open != Some(index) {
             return;
         }
-        let Some(options) = draft.tools.recipe(cx) else {
+        let recipe = draft.tools.recipe(cx);
+        let Some(request) = draft.tools.requests.request(recipe, force) else {
+            return;
+        };
+        draft.tools.generated = None;
+        draft.tools.preview_copied = false;
+        draft.tools.password_error = None;
+        draft.tools.generating = recipe.is_some();
+        let Some(options) = recipe else {
+            cx.notify();
             return;
         };
         let draft_id = draft.title.entity_id();
         let epoch = draft.tools.generator_epoch;
-        draft.tools.generating = true;
-        draft.tools.generated = None;
-        draft.tools.password_error = None;
-        draft.tools.preview_revealed = false;
-        draft.tools.preview_copied = false;
         let generation = self.generation;
         let task = cx
             .background_executor()
@@ -210,6 +241,8 @@ impl MeApp {
                 if draft.title.entity_id() != draft_id
                     || draft.tools.generator_epoch != epoch
                     || draft.tools.generator_open != Some(index)
+                    || !draft.tools.requests.accepts(request, options)
+                    || draft.tools.recipe(cx) != Some(options)
                 {
                     return;
                 }
@@ -257,37 +290,10 @@ impl MeApp {
         cx.notify();
     }
     fn reveal_password_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(draft) = &mut self.logins.draft else {
-            return;
-        };
-        if draft.tools.generated.is_none() {
-            return;
+        if let Some(draft) = &mut self.logins.draft {
+            draft.tools.preview_revealed = !draft.tools.preview_revealed;
+            cx.notify();
         }
-        let tools = &mut draft.tools;
-        tools.preview_revealed = !tools.preview_revealed;
-        tools.preview_reveal_token = tools.preview_reveal_token.wrapping_add(1);
-        let token = tools.preview_reveal_token;
-        let epoch = tools.generator_epoch;
-        let draft_id = draft.title.entity_id();
-        if tools.preview_revealed {
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(30))
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(draft) = &mut this.logins.draft
-                        && draft.title.entity_id() == draft_id
-                        && draft.tools.generator_epoch == epoch
-                        && draft.tools.preview_reveal_token == token
-                    {
-                        draft.tools.preview_revealed = false;
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
-        }
-        cx.notify();
     }
     fn password_workshop_action(
         &mut self,
@@ -322,10 +328,10 @@ impl MeApp {
                 *value = !*value;
             }
             7 => tools.options.exclude_ambiguous = !tools.options.exclude_ambiguous,
-            8 => self.generate_login_password(index, cx),
+            8 => self.generate_login_password(index, true, cx),
             9 => self.reveal_password_preview(cx),
             10 => {
-                if let Some(candidate) = &tools.generated {
+                if let Some(candidate) = tools.candidate(cx) {
                     let value = candidate.value.clone();
                     cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
                     self.copied_value = Some(value);
@@ -337,6 +343,9 @@ impl MeApp {
             12 => self.use_generated_password(window, cx),
             _ => {}
         }
+        if action <= 7 {
+            self.refresh_password_preview(cx);
+        }
         cx.notify();
     }
     fn password_workshop_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -346,7 +355,7 @@ impl MeApp {
             && draft.tools.length.focus_handle(cx).is_focused(window)
             && let Some(index) = draft.tools.generator_open
         {
-            self.generate_login_password(index, cx);
+            self.generate_login_password(index, true, cx);
         }
     }
     pub(super) fn password_workshop_tab(
@@ -380,41 +389,46 @@ impl MeApp {
     }
     pub(super) fn password_generator_modal(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let tools = &self.logins.draft.as_ref().unwrap().tools;
-        let index = tools.generator_open.unwrap();
         let recipe = tools.recipe(cx);
         let length = tools.length.read(cx).content.trim().parse::<usize>().ok();
-        let ready = tools.candidate(cx).is_some();
-        let generated = tools.generated.is_some();
+        let candidate = tools.candidate(cx);
+        let ready = candidate.is_some();
         let o = tools.options;
         let choices = [o.uppercase, o.lowercase, o.digits, o.symbols];
-        let settings_match = tools
-            .generated
-            .as_ref()
-            .is_some_and(|g| recipe.is_some_and(|r| g.matches(index, r)));
+        let validation = if !length.is_some_and(|n| (8..=128).contains(&n)) {
+            Some("Enter a whole number from 8 to 128.")
+        } else if !choices.iter().any(|&on| on) {
+            Some("Choose at least one character type below.")
+        } else {
+            None
+        };
         let message = if tools.generating {
-            "Generating on this device…".to_owned()
-        } else if let Some(g) = &tools.generated {
+            "Updating your password…".to_owned()
+        } else if let Some(g) = candidate {
             format!("{} characters · generated on this device", g.value.len())
         } else {
-            "Choose options to generate a password.".to_owned()
+            "Your password appears here once the options are valid.".to_owned()
         };
         let content = div().id("password-workshop-content").track_scroll(&tools.workshop_scroll).min_h_0().overflow_y_scroll().flex().flex_col().gap(px(space::LG))
-            .child(div().p(px(space::MD)).rounded(px(radius::STANDARD)).border_1().border_color(rgb(LINE)).bg(rgb(BG))
+            .child(div().p(px(space::LG)).rounded(px(radius::STANDARD)).border_1().border_color(rgb(FOCUS)).bg(rgb(BG))
                 .flex().flex_col().gap(px(space::SM))
                 .child(div().flex().items_center().justify_between()
-                    .child(eyebrow("PASSWORD PREVIEW"))
+                    .child(eyebrow("YOUR NEW PASSWORD"))
                     .child(div().flex().gap(px(space::XS))
-                        .child(icon_action("reveal-password-preview", if tools.preview_revealed { Icon::EyeOff } else { Icon::Eye }, if tools.preview_revealed { "Hide password" } else { "Reveal for 30 seconds" })
+                        .child(icon_action("reveal-password-preview", if tools.preview_revealed { Icon::EyeOff } else { Icon::Eye }, if tools.preview_revealed { "Hide password" } else { "Show password" })
                             .track_focus(&tools.controls[9]).focus(|s|s.bg(rgb(HOVER)))
-                            .when(!generated, |s|s.opacity(0.5))
+                            .when(!ready, |s|s.opacity(0.5))
                             .on_click(cx.listener(|this,_,window,cx|this.password_workshop_action(9,window,cx))))
                         .child(icon_action("copy-password-preview", Icon::Copy, "Copy for 30 seconds")
                             .track_focus(&tools.controls[10]).focus(|s|s.bg(rgb(HOVER)))
-                            .when(!generated, |s|s.opacity(0.5))
+                            .when(!ready, |s|s.opacity(0.5))
                             .on_click(cx.listener(|this,_,window,cx|this.password_workshop_action(10,window,cx))))))
                 .child(div().id("password-preview-value").w_full().overflow_x_scroll().type_style(Type::Value).font_family(font::MONO)
-                    .child(if tools.preview_revealed { tools.generated.as_ref().map(|g|g.value.to_string()).unwrap_or_default() } else if generated { "••••••••••••••••".into() } else { "—".into() }))
-                .child(div().type_style(Type::Caption).text_color(rgb(MUTED)).child(if tools.preview_copied { "Copied for 30 seconds.".to_owned() } else { message })))
+                    .child(match candidate { Some(g) if tools.preview_revealed => g.value.to_string(), Some(_) => "••••••••••••••••".into(), None => "—".into() }))
+                .child(div().flex().items_center().gap(px(space::SM)).type_style(Type::Caption).text_color(rgb(MUTED))
+                    .when(ready, |s|s.child(assets::icon(Icon::Check,IconSize::Small,SUCCESS)))
+                    .child(if tools.preview_copied { "Copied for 30 seconds.".to_owned() } else { message })))
+            .when_some(validation, |s, message|s.child(div().type_style(Type::Small).text_color(rgb(DANGER)).child(message)))
             .child(div().flex().items_center().gap(px(space::SM))
                 .child(div().flex_1().type_style(Type::Small).child("Length · 8–128"))
                 .children([12,20,32].into_iter().enumerate().map(|(n,preset)|secondary_action().id(("password-length",preset)).h(px(layout::CONTROL_COMPACT)).px(px(space::SM))
@@ -422,9 +436,13 @@ impl MeApp {
                     .when(length == Some(preset),|s|s.border_color(rgb(ACCENT)).text_color(rgb(ACCENT)))
                     .on_click(cx.listener(move|this,_,window,cx|this.password_workshop_action(n,window,cx))).child(preset.to_string())))
                 .child(div().w(px(64.)).child(self.login_input_frame(&tools.length,false,cx))))
-            .child(div().flex().gap(px(space::SM)).children([("A–Z","Uppercase"),("a–z","Lowercase"),("0–9","Numbers"),("!@#","Symbols")].into_iter().enumerate().map(|(key,(sample,label))| {
+            .child(div().flex().flex_col().gap(px(space::SM))
+                .child(div().flex().items_center().justify_between().child(eyebrow("INCLUDE CHARACTERS"))
+                    .child(div().type_style(Type::Caption).text_color(rgb(MUTED)).child("Click to toggle")))
+                .child(div().flex().gap(px(space::SM)).children([("A–Z","Uppercase"),("a–z","Lowercase"),("0–9","Numbers"),("!@#","Symbols")].into_iter().enumerate().map(|(key,(sample,label))| {
                 let checked = choices[key];
                 div().id(("password-option",key)).flex_1().min_w_0().rounded(px(radius::STANDARD)).py(px(space::SM))
+                    .border_1().border_color(rgb(if checked { FOCUS } else { LINE })).bg(rgb(if checked { SURFACE } else { BG }))
                     .track_focus(&tools.controls[key+3]).focus(|s|s.bg(rgb(HOVER))).hover(|s|s.bg(rgb(HOVER))).cursor_pointer()
                     .on_click(cx.listener(move|this,_,window,cx|this.password_workshop_action(key+3,window,cx)))
                     .flex().flex_col().items_center().gap(px(space::XS))
@@ -432,13 +450,13 @@ impl MeApp {
                     .child(div().type_style(Type::Caption).child(label))
                     .child(div().flex().items_center().gap(px(space::XS)).type_style(Type::Caption).text_color(rgb(if checked { ACCENT } else { MUTED }))
                         .when(checked, |s|s.child(assets::icon(Icon::Check,IconSize::Small,ACCENT))).child(if checked { "On" } else { "Off" }))
-            })))
+            }))))
             .child(div().id("password-ambiguity").track_focus(&tools.controls[7]).focus(|s|s.bg(rgb(HOVER)))
                 .on_click(cx.listener(|this,_,window,cx|this.password_workshop_action(7,window,cx)))
                 .child(checkbox(o.exclude_ambiguous,"Avoid lookalikes · 0 O 1 I l")))
-            .child(div().type_style(Type::Caption).text_color(rgb(MUTED)).child(if recipe.is_none() { "Choose 8–128 characters and at least one character type." }
-                else if generated && !settings_match { "Options changed. Generate again to apply them to the preview." }
-                else { "Use password changes this draft. Save the item afterward; update the website separately." }))
+            .child(div().type_style(Type::Caption).text_color(rgb(MUTED)).child(if self.logins.creating.is_some() {
+                "Use password adds it to your draft. Save the item when you’re ready."
+            } else { "Use password updates your draft. Save in ME, then update the password on the website." }))
             .when_some(tools.password_error.clone(),|s,error|s.child(div().type_style(Type::Small).text_color(rgb(DANGER)).child(error)));
         self.overlay(cx)
             .p(px(space::LG))
@@ -462,18 +480,14 @@ impl MeApp {
                         this.password_workshop_tab(true, window, cx)
                     }))
                     .child(
-                        div()
-                            .flex_shrink_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(space::XS))
-                            .child(heading("Generate password"))
-                            .child(
-                                div()
-                                    .type_style(Type::Small)
-                                    .text_color(rgb(MUTED))
-                                    .child("Choose a password, then apply it to your draft."),
-                            ),
+                        div().flex_shrink_0().flex().items_center().gap(px(space::MD))
+                            .child(div().size(px(layout::CONTROL_LARGE)).flex_shrink_0()
+                                .rounded(px(radius::STANDARD)).bg(rgb(HOVER)).flex().items_center().justify_center()
+                                .child(assets::icon(Icon::Honeycomb,IconSize::Large,ACCENT)))
+                            .child(div().flex().flex_col().gap(px(space::XS))
+                                .child(heading("Generate password"))
+                                .child(div().type_style(Type::Small).text_color(rgb(MUTED))
+                                    .child("Adjust the options. Your password updates automatically."))),
                     )
                     .child(content)
                     .child(
@@ -506,7 +520,7 @@ impl MeApp {
                                     }))
                                     .child(if tools.generating {
                                         "Generating…"
-                                    } else if generated {
+                                    } else if ready {
                                         "Generate again"
                                     } else {
                                         "Generate"
@@ -743,6 +757,27 @@ impl MeApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_the_latest_recipe_request_can_publish() {
+        let a = PasswordOptions::default();
+        let b = PasswordOptions { length: 32, ..a };
+        let mut requests = PreviewRequests::default();
+        let first = requests.request(Some(a), false).unwrap();
+        assert!(requests.accepts(first, a));
+        assert!(requests.request(Some(a), false).is_none());
+        let second = requests.request(Some(b), false).unwrap();
+        let third = requests.request(Some(a), false).unwrap();
+        assert!(!requests.accepts(first, a));
+        assert!(!requests.accepts(second, b));
+        assert!(requests.accepts(third, a));
+        requests.request(None, false).unwrap();
+        assert!(!requests.accepts(third, a));
+        let fourth = requests.request(Some(a), false).unwrap();
+        assert!(requests.accepts(fourth, a));
+        let variation = requests.request(Some(a), true).unwrap();
+        assert!(!requests.accepts(fourth, a));
+        assert!(requests.accepts(variation, a));
+    }
     #[test]
     fn candidate_requires_the_same_field_and_recipe() {
         let options = PasswordOptions::default();
