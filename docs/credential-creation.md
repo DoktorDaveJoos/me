@@ -216,8 +216,10 @@ of that exact form still needs a user retry.
 
 ## Deleted credentials and history
 
-Every saved credential in Logins has Delete beside Edit. It opens a confirmation
-naming that exact item; Cancel is focused by default. Only **Move to Deleted**
+Every saved credential in Logins has a pencil edit action beside its title, with
+an “Edit item” tooltip. Delete lives in a separate Danger zone at the bottom of
+the detail view, after fields, history, attachments and metadata. It opens a
+confirmation naming that exact item; Cancel is focused by default. Only **Move to Deleted**
 submits the deletion. Escape cancels. The operation compares the displayed
 revision, so an item changed since the dialog opened cannot be deleted silently.
 
@@ -239,7 +241,8 @@ copy controls. It shows the date a value stopped being current (UTC) and elapsed
 time; imported entries without dates say so. Newest changes appear first, even
 when several changes share a timestamp. Deleting/restoring never rewrites history.
 
-Validation: the synthetic native gallery covers confirmation, Cancel/Enter,
+Validation: the synthetic native gallery covers the pencil edit action and
+bottom Danger zone at both window sizes, plus confirmation, Cancel/Enter,
 Escape, explicit Tab/Enter and mouse submission, active-list exclusion, Restore,
 empty Deleted and retained history at 1120×820 and 800×600 (reduced motion at the
 minimum size). Core regressions cover every native type, stale/repeated requests,

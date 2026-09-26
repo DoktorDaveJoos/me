@@ -1047,8 +1047,13 @@ impl MeApp {
                             self.login_input_frame(&draft.title, false, cx)
                                 .into_any_element()
                         } else {
-                            heading(details.credential.title.clone())
-                                .whitespace_normal()
+                            div().flex().items_start().gap(px(space::SM))
+                                .child(div().flex_1().min_w_0()
+                                    .child(heading(details.credential.title.clone()).whitespace_normal()))
+                                .child(icon_action("edit-login", Icon::Edit, "Edit item")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.edit_login(&EditLogin, window, cx)
+                                    })))
                                 .into_any_element()
                         })
                         .child(
@@ -1056,21 +1061,6 @@ impl MeApp {
                                 .flex()
                                 .flex_wrap()
                                 .gap(px(space::SM))
-                                .when(draft.is_none(), |s| {
-                                    s.child(
-                                        secondary_action()
-                                            .id("edit-login")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.edit_login(&EditLogin, window, cx)
-                                            }))
-                                            .child("Edit"),
-                                    ).child(
-                                        secondary_action().id("delete-login")
-                                            .text_color(rgb(DANGER))
-                                            .on_click(cx.listener(|this, _, window, cx| this.request_login_delete(window, cx)))
-                                            .child("Delete…")
-                                    )
-                                })
                                 .when(draft.is_some(), |s| {
                                     s.child(
                                         primary_action()
@@ -1211,7 +1201,21 @@ impl MeApp {
                                 .replace('Z', " UTC"),
                             details.revision
                         )),
-                );
+                )
+                .when(draft.is_none(), |s| s.child(
+                    div().p(px(space::LG)).rounded(px(radius::STANDARD))
+                        .border_1().border_color(rgb(LINE)).bg(rgb(DANGER_SURFACE))
+                        .flex().flex_col().gap(px(space::MD))
+                        .child(div().type_style(Type::Label).text_color(rgb(DANGER)).child("Danger zone"))
+                        .child(div().type_style(Type::Small).text_color(rgb(INK))
+                            .child("Move this item to Deleted. You can restore it anytime, including its fields, attachments and password history."))
+                        .child(div().flex().child(
+                            secondary_action().id("delete-login").text_color(rgb(DANGER))
+                                .hover(|s| s.bg(rgb(DANGER_SURFACE)))
+                                .on_click(cx.listener(|this, _, window, cx| this.request_login_delete(window, cx)))
+                                .child("Delete item…")
+                        ))
+                ));
             panel = panel.child(content);
         } else {
             panel = panel.child(

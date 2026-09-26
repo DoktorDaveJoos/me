@@ -240,12 +240,15 @@ not action icons; they use the bounded website-artwork loader described below.
 Keyboard shortcut symbols
 and punctuation are text, not icons.
 
-All 33 SVG assets use a 24×24 viewBox, no fill, 1.5 px strokes, round caps and round
+All 34 SVG assets use a 24×24 viewBox, no fill, 1.5 px strokes, round caps and round
 joins. Black is the SVG mask source; GPUI applies the semantic tint at runtime.
 Sizes are `Small` 12, `Medium` 16, `Large` 20, `Brand` 24, `Hero` 72 and
 `Identity` 224. The last three are for the fingerprint identity, not ordinary
 action icons. Icon-only controls
 still need a surrounding hit area; a 12 px glyph is not a 12 px button.
+
+The edit action uses the ME Outline pencil through `Icon::Edit`, with the shared
+icon-button hit area and an “Edit item” tooltip.
 
 Add an icon only when no existing symbol fits. Match the SVG contract and add its
 typed enum variant, path and embedded bytes in `assets.rs` together. Unknown names
