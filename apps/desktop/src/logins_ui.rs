@@ -13,6 +13,7 @@ pub(super) enum LoginScope {
     All,
     Favorites,
     Archived,
+    Deleted,
 }
 #[derive(Default)]
 pub(super) struct LoginsState {
@@ -26,6 +27,7 @@ pub(super) struct LoginsState {
     pub selected: Option<u64>,
     pub details: Option<LoginDetails>,
     pub draft: Option<LoginDraft>,
+    pub deleting: Option<super::credential_lifecycle_ui::DeleteConfirmation>,
     pub scope: LoginScope,
     pub loading: bool,
     pub detail_loading: bool,
@@ -51,6 +53,9 @@ pub(super) struct LoginDraft {
 }
 impl MeApp {
     pub(super) fn login_edit_guard(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.logins.deleting.is_some() {
+            return true;
+        }
         if self.logins.draft.is_some() || self.logins.intake.open {
             self.logins.notice =
                 Some("Save or cancel your changes before leaving this item.".into());
@@ -92,15 +97,17 @@ impl MeApp {
         self.logins.list_request += 1;
         self.logins.loading = true;
         let request = self.logins.list_request;
+        let deleted = self.logins.scope == LoginScope::Deleted;
         let generation = self.generation;
         let session = self.session.clone();
         let task = cx.background_executor().spawn(async move {
-            session
-                .lock()
-                .map_err(|_| me_core::Error::Format)?
-                .as_ref()
-                .ok_or(me_core::Error::Format)?
-                .logins()
+            let session = session.lock().map_err(|_| me_core::Error::Format)?;
+            let vault = session.as_ref().ok_or(me_core::Error::Format)?;
+            if deleted {
+                vault.deleted_logins()
+            } else {
+                vault.logins()
+            }
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -132,9 +139,10 @@ impl MeApp {
             .enumerate()
             .filter(|(_, i)| {
                 (match self.logins.scope {
-                    LoginScope::All => true,
-                    LoginScope::Favorites => i.favorite,
-                    LoginScope::Archived => i.archived,
+                    LoginScope::All => i.deleted_at.is_none(),
+                    LoginScope::Favorites => i.deleted_at.is_none() && i.favorite,
+                    LoginScope::Archived => i.deleted_at.is_none() && i.archived,
+                    LoginScope::Deleted => i.deleted_at.is_some(),
                 }) && query.split_whitespace().all(|q| {
                     i.title.to_lowercase().contains(q) || i.vault.to_lowercase().contains(q)
                 })
@@ -192,6 +200,11 @@ impl MeApp {
         self.logins.revealed.clear();
         self.logins.error = None;
         self.logins.notice = None;
+        if self.logins.scope == LoginScope::Deleted {
+            self.logins.detail_loading = false;
+            cx.notify();
+            return;
+        }
         self.logins.detail_loading = true;
         let request = self.logins.detail_request;
         let generation = self.generation;
@@ -233,6 +246,7 @@ impl MeApp {
             || self.show_settings
             || self.show_onepassword
             || self.logins.intake.open
+            || self.logins.deleting.is_some()
             || self.busy
             || self.logins.draft.is_some()
         {
@@ -864,11 +878,12 @@ impl MeApp {
                                     }),
                             )
                             .child(
-                                div().flex().gap(px(space::XS)).children(
+                                div().flex().flex_wrap().gap(px(space::XS)).children(
                                     [
                                         (LoginScope::All, "All"),
                                         (LoginScope::Favorites, "Favorites"),
                                         (LoginScope::Archived, "Archive"),
+                                        (LoginScope::Deleted, "Deleted"),
                                     ]
                                     .into_iter()
                                     .map(|(scope, label)| {
@@ -893,9 +908,23 @@ impl MeApp {
                                             .cursor_pointer()
                                             .hover(|s| s.bg(rgb(HOVER)))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                if !this.login_edit_guard(cx) {
+                                                if !this.busy && !this.login_edit_guard(cx) {
+                                                    let reload = (scope == LoginScope::Deleted)
+                                                        != (this.logins.scope
+                                                            == LoginScope::Deleted);
                                                     this.logins.scope = scope;
-                                                    this.filter_logins(cx);
+                                                    if reload {
+                                                        this.logins.items.clear();
+                                                        this.logins.visible.clear();
+                                                        this.logins.selected = None;
+                                                        this.logins.details = None;
+                                                        this.logins.detail_request += 1;
+                                                        this.logins.detail_loading = false;
+                                                        this.logins.revealed.clear();
+                                                        this.refresh_logins(cx);
+                                                    } else {
+                                                        this.filter_logins(cx);
+                                                    }
                                                 }
                                             }))
                                             .child(label)
@@ -950,7 +979,9 @@ impl MeApp {
                                     .p(px(space::LG))
                                     .type_style(Type::Small)
                                     .text_color(rgb(MUTED))
-                                    .child(if self.logins.items.is_empty() {
+                                    .child(if self.logins.scope == LoginScope::Deleted {
+                                        "Deleted items are kept until you restore them."
+                                    } else if self.logins.items.is_empty() {
                                         "Create an item or import your 1Password export."
                                     } else {
                                         "No matching logins."
@@ -977,6 +1008,9 @@ impl MeApp {
             .px(px(space::XXL))
             .pt(px(space::PAGE_TOP))
             .pb(px(space::PAGE));
+        if self.logins.scope == LoginScope::Deleted {
+            return panel.child(self.deleted_login_detail(phase, cx));
+        }
         if let Some(details) = &self.logins.details {
             let draft = self.logins.draft.as_ref();
             let favorite = draft.map_or(details.favorite, |d| d.favorite);
@@ -1030,6 +1064,11 @@ impl MeApp {
                                                 this.edit_login(&EditLogin, window, cx)
                                             }))
                                             .child("Edit"),
+                                    ).child(
+                                        secondary_action().id("delete-login")
+                                            .text_color(rgb(DANGER))
+                                            .on_click(cx.listener(|this, _, window, cx| this.request_login_delete(window, cx)))
+                                            .child("Delete…")
                                     )
                                 })
                                 .when(draft.is_some(), |s| {
@@ -1122,6 +1161,10 @@ impl MeApp {
                             index == 0 || details.fields[index - 1].section != field.section,
                             phase, cx)
                     }))
+                .child(div().flex().flex_col().gap(px(space::SM))
+                    .when(!details.fields.iter().any(|f| f.presentation == LoginPresentation::History), |s| s.child(eyebrow("Password & secret history")))
+                    .child(div().type_style(Type::Caption).text_color(rgb(MUTED))
+                        .child("Previous passwords are kept automatically when you save a change, including when you clear a password. History stays with this item in Deleted.")))
                 .when(!details.credential.attachments.is_empty(), |s| {
                     s.child(
                         div()

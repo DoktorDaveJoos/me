@@ -59,6 +59,14 @@ impl MeApp {
         window.focus(&self.login_focus);
         self.logins.fill_target = None;
         self.logins.fill_after_save = false;
+        if self.logins.scope == super::logins_ui::LoginScope::Deleted {
+            self.logins.scope = super::logins_ui::LoginScope::All;
+            self.logins.items.clear();
+            self.logins.visible.clear();
+            self.logins.selected = None;
+            self.logins.details = None;
+            self.logins.loaded = false;
+        }
         if !self.logins.loaded {
             self.refresh_logins(cx);
         }
@@ -422,6 +430,7 @@ impl MeApp {
             .iter()
             .filter(|i| {
                 i.category == "001"
+                    && i.deleted_at.is_none()
                     && !i.archived
                     && capture.is_some_and(|c| {
                         !c.website.is_empty()

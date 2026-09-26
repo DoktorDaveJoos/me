@@ -302,7 +302,12 @@ impl Vault {
             details.fields.push(LoginField {
                 key: format!("history/{i}"),
                 label: format!("Previous {label}"),
-                section: "History".into(),
+                section: if matches!(kind, CredentialKind::Login | CredentialKind::Password) {
+                    "Password history"
+                } else {
+                    "Secret history"
+                }
+                .into(),
                 value: Zeroizing::new(h["value"].as_str().ok_or(Error::Format)?.into()),
                 concealed: true,
                 kind: LoginValueKind::Text,
@@ -382,6 +387,144 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), Zeroizing::new(v.to_string())))
                 .collect(),
         }
+    }
+    #[test]
+    fn soft_delete_restore_preserves_every_credential_kind_and_rejects_stale_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("vault");
+        let mut v = Vault::create(&root, "synthetic-passphrase").unwrap();
+        let mut retained = Vec::new();
+        for kind in CredentialKind::ALL {
+            let item = v
+                .create_credential(
+                    kind,
+                    update(0, &[("notes", "Synthetic notes"), ("tags", "keep")]),
+                )
+                .unwrap();
+            let raw: String =
+                v.db.query_row(
+                    "SELECT raw_json FROM credential_record WHERE item_id=?",
+                    [sql_id(item).unwrap()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(v.delete_login(item, 0).is_err());
+            v.delete_login(item, 1).unwrap();
+            assert!(v.delete_login(item, 1).is_err());
+            assert!(v.delete_login(item, 2).is_err());
+            assert!(v.login_details(item).is_err());
+            assert!(v.credential_details(item).is_err());
+            assert!(
+                v.update_login(item, update(2, &[("notes", "Should not save")]))
+                    .is_err()
+            );
+            assert!(v.toggle_pin(item).is_err());
+            retained.push((item, raw));
+        }
+        assert!(v.logins().unwrap().is_empty());
+        assert!(
+            v.collection("Synthetic credential", false)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(v.deleted_logins().unwrap().len(), CredentialKind::ALL.len());
+        assert!(
+            v.deleted_logins()
+                .unwrap()
+                .iter()
+                .all(|i| i.deleted_at.is_some() && i.revision == 2)
+        );
+        assert_eq!(v.db.query_row("SELECT count(*) FROM local_change WHERE kind='credential_delete' AND payload_json='{}'", [], |r| r.get::<_, i64>(0)).unwrap(), retained.len() as i64);
+        drop(v);
+        let mut v = Vault::unlock(&root, "synthetic-passphrase").unwrap();
+        for (item, raw) in retained {
+            assert!(v.restore_login(item, 1).is_err());
+            v.restore_login(item, 2).unwrap();
+            assert!(v.restore_login(item, 3).is_err());
+            assert_eq!(v.login_details(item).unwrap().revision, 3);
+            assert_eq!(
+                v.db.query_row(
+                    "SELECT raw_json FROM credential_record WHERE item_id=?",
+                    [sql_id(item).unwrap()],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                raw
+            );
+        }
+        assert!(v.deleted_logins().unwrap().is_empty());
+        assert_eq!(v.logins().unwrap().len(), CredentialKind::ALL.len());
+        let note = v.save_note(None, "Synthetic note", "text").unwrap();
+        assert!(v.delete_login(note, 1).is_err());
+        assert!(v.delete_login(u64::MAX, 1).is_err());
+    }
+    #[test]
+    fn saved_password_changes_keep_reversions_clears_and_survive_deleted_backup_restore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut v = Vault::create(&tmp.path().join("vault"), "synthetic-passphrase").unwrap();
+        let item = v
+            .create_credential(
+                CredentialKind::Login,
+                update(
+                    0,
+                    &[
+                        ("username", "synthetic@example.test"),
+                        ("password", "FIRST"),
+                    ],
+                ),
+            )
+            .unwrap();
+        for (revision, next) in [(1, "SECOND"), (2, "FIRST"), (3, "")] {
+            v.update_login(item, update(revision, &[("password", next)]))
+                .unwrap();
+        }
+        v.update_login(
+            item,
+            update(4, &[("password", ""), ("notes", "Changed notes")]),
+        )
+        .unwrap();
+        assert!(
+            v.update_login(item, update(4, &[("password", "stale")]))
+                .is_err()
+        );
+        v.delete_login(item, 5).unwrap();
+        assert!(v.credential_suggestions().unwrap().identities.is_empty());
+        let backup = tmp.path().join("deleted.mebackup");
+        v.backup(&backup).unwrap();
+        drop(v);
+        let mut v = Vault::restore(
+            &backup,
+            &tmp.path().join("restored"),
+            "synthetic-passphrase",
+        )
+        .unwrap();
+        assert_eq!(v.deleted_logins().unwrap()[0].id, item);
+        v.restore_login(item, 6).unwrap();
+        let d = v.login_details(item).unwrap();
+        let history: Vec<_> = d
+            .fields
+            .iter()
+            .filter(|f| f.presentation == LoginPresentation::History)
+            .collect();
+        assert_eq!(
+            history.iter().map(|f| f.value.as_str()).collect::<Vec<_>>(),
+            ["FIRST", "SECOND", "FIRST"]
+        );
+        assert!(history.iter().all(|f| f.concealed
+            && !f.editable
+            && f.used_until.is_some()
+            && f.used_until_date.is_some()));
+        assert_eq!(
+            d.fields
+                .iter()
+                .find(|f| f.key == "password")
+                .unwrap()
+                .value
+                .as_str(),
+            ""
+        );
+        assert_eq!(v.credential_suggestions().unwrap().identities.len(), 1);
     }
     #[test]
     fn notes_remain_readable_after_save_and_reopen_while_secrets_stay_concealed() {

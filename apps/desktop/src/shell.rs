@@ -39,6 +39,8 @@ mod context_source;
 mod credential_capture;
 #[path = "credential_create_ui.rs"]
 mod credential_create_ui;
+#[path = "credential_lifecycle_ui.rs"]
+mod credential_lifecycle_ui;
 #[path = "credential_tools_ui.rs"]
 mod credential_tools_ui;
 #[path = "credentials_ui.rs"]
@@ -519,6 +521,10 @@ impl MeApp {
             return;
         }
         if self.busy {
+            return;
+        }
+        if self.logins.deleting.is_some() {
+            self.cancel_login_delete(window, cx);
             return;
         }
         if self.password_generator_open().is_some() {
@@ -1100,6 +1106,13 @@ impl Render for MeApp {
                     ))
                 },
             )
+            .when(self.logins.deleting.is_some(), |s| {
+                s.child(motion::overlay(
+                    self.login_delete_modal(window, cx).into_any_element(),
+                    "overlay-delete-credential",
+                    self.motion_enabled(),
+                ))
+            })
             .when(self.credential.is_some(), |s| {
                 s.child(motion::overlay(
                     self.credential_modal(cx).into_any_element(),

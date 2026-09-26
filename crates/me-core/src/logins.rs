@@ -18,6 +18,8 @@ pub struct LoginSummary {
     pub vault: String,
     pub website: String,
     pub archived: bool,
+    pub deleted_at: Option<String>,
+    pub revision: i64,
     pub favorite: bool,
     pub versions: usize,
     pub version: usize,
@@ -293,6 +295,8 @@ fn login_fields(item: &Value) -> Result<Vec<LoginField>> {
             .filter(|time| (0..=253_402_300_799).contains(time));
         history.push(field);
     }
+    // Appended changes can share a second; the later entry is still newer.
+    history.reverse();
     history.sort_by_key(|f| std::cmp::Reverse(f.used_until));
     fields.extend(history);
     Ok(fields)
@@ -302,9 +306,17 @@ impl Vault {
     /// No 200-result collection cap: every imported Login has a row, including
     /// archives and retained import versions. Other 1Password categories stay intact.
     pub fn logins(&self) -> Result<Vec<LoginSummary>> {
-        let mut stmt = self.db.prepare("SELECT i.local_id,i.title,c.vault_name,c.archived,i.pinned,count(*) OVER (PARTITION BY c.account_uuid,c.vault_uuid,c.item_uuid),row_number() OVER (PARTITION BY c.account_uuid,c.vault_uuid,c.item_uuid ORDER BY i.local_id),COALESCE(NULLIF(json_extract(c.raw_json,'$.overview.url'),''),json_extract(c.raw_json,'$.overview.urls[0].url'),json_extract(c.raw_json,'$.fields.website'),''),c.category FROM collection_item i JOIN credential_record c ON c.item_id=i.local_id WHERE i.deleted_at IS NULL AND i.kind='credential' AND (c.category='001' OR c.format='me-v1') ORDER BY i.title COLLATE NOCASE,c.vault_name,i.local_id")?;
+        self.login_summaries(false)
+    }
+    /// Deleted credentials stay encrypted in the vault, without an expiry or purge.
+    /// Only metadata is exposed here. Restore before reading or editing secrets.
+    pub fn deleted_logins(&self) -> Result<Vec<LoginSummary>> {
+        self.login_summaries(true)
+    }
+    fn login_summaries(&self, deleted: bool) -> Result<Vec<LoginSummary>> {
+        let mut stmt = self.db.prepare("SELECT i.local_id,i.title,c.vault_name,c.archived,i.pinned,count(*) OVER (PARTITION BY c.account_uuid,c.vault_uuid,c.item_uuid),row_number() OVER (PARTITION BY c.account_uuid,c.vault_uuid,c.item_uuid ORDER BY i.local_id),COALESCE(NULLIF(json_extract(c.raw_json,'$.overview.url'),''),json_extract(c.raw_json,'$.overview.urls[0].url'),json_extract(c.raw_json,'$.fields.website'),''),c.category,i.deleted_at,i.revision FROM collection_item i JOIN credential_record c ON c.item_id=i.local_id WHERE (i.deleted_at IS NOT NULL)=? AND i.kind='credential' AND (c.category='001' OR c.format='me-v1') ORDER BY i.title COLLATE NOCASE,c.vault_name,i.local_id")?;
         Ok(stmt
-            .query_map([], |r| {
+            .query_map([deleted], |r| {
                 Ok(LoginSummary {
                     id: r.get::<_, i64>(0)? as u64,
                     title: r.get(1)?,
@@ -315,9 +327,34 @@ impl Vault {
                     version: r.get::<_, i64>(6)? as usize,
                     website: r.get(7)?,
                     category: r.get(8)?,
+                    deleted_at: r.get(9)?,
+                    revision: r.get(10)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?)
+    }
+    /// Soft delete only. The caller must confirm the exact revision being removed.
+    pub fn delete_login(&mut self, item: u64, revision: i64) -> Result<()> {
+        self.set_login_deleted(item, revision, true)
+    }
+    pub fn restore_login(&mut self, item: u64, revision: i64) -> Result<()> {
+        self.set_login_deleted(item, revision, false)
+    }
+    fn set_login_deleted(&mut self, item: u64, revision: i64, deleted: bool) -> Result<()> {
+        let tx = self.db.transaction()?;
+        // Compare-and-set also rejects repeat submissions and stale confirmations.
+        // Never touch the credential JSON, source, import archive or attachments.
+        let changed: Option<String> = tx.query_row(
+            "UPDATE collection_item SET deleted_at=CASE WHEN ?3 THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE NULL END,revision=revision+1 WHERE local_id=?1 AND revision=?2 AND (deleted_at IS NULL)=?3 AND kind='credential' AND EXISTS(SELECT 1 FROM credential_record c WHERE c.item_id=local_id AND (c.category='001' OR c.format='me-v1')) RETURNING stable_id",
+            params![sql_id(item)?,revision,deleted], |r| r.get(0)
+        ).optional()?;
+        let stable = changed.ok_or(Error::Validation(
+            "This item changed. Reopen it before deleting or restoring.",
+        ))?;
+        tx.execute("INSERT INTO local_change(operation_id,item_id,revision,kind,payload_json,recorded_at) VALUES(?,?,?,?,'{}',strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            params![id(),stable,revision+1,if deleted { "credential_delete" } else { "credential_restore" }])?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn login_details(&self, item: u64) -> Result<LoginDetails> {
         if let Some(kind) = self.native_kind(item)? {
@@ -504,5 +541,28 @@ impl Vault {
         tx.execute("INSERT INTO local_change(operation_id,item_id,revision,kind,payload_json,recorded_at) VALUES(?,?,?,'credential_edit','{}',strftime('%Y-%m-%dT%H:%M:%fZ','now'))", params![id(),stable,revision+1])?;
         tx.commit()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn password_history_orders_equal_timestamps_by_latest_change_and_keeps_unknown_dates() {
+        let data = value!({"details":{"passwordHistory":[
+            {"value":"first", "time":100}, {"value":"unknown"},
+            {"value":"second", "time":100}, {"value":"old", "time":50}
+        ]}});
+        let fields = login_fields(&data).unwrap();
+        let history: Vec<_> = fields
+            .iter()
+            .filter(|f| f.presentation == LoginPresentation::History)
+            .collect();
+        assert_eq!(
+            history.iter().map(|f| f.value.as_str()).collect::<Vec<_>>(),
+            ["second", "first", "old", "unknown"]
+        );
+        assert!(history.iter().all(|f| !f.editable && f.concealed));
+        assert!(history.last().unwrap().used_until.is_none());
     }
 }

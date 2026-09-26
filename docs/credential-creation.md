@@ -213,3 +213,36 @@ length/character options and displaying validation beside the generator were
 exercised. No live website account was created or changed. The reported Forge page
 was not available as the active browser window during this follow-up; live capture
 of that exact form still needs a user retry.
+
+## Deleted credentials and history
+
+Every saved credential in Logins has Delete beside Edit. It opens a confirmation
+naming that exact item; Cancel is focused by default. Only **Move to Deleted**
+submits the deletion. Escape cancels. The operation compares the displayed
+revision, so an item changed since the dialog opened cannot be deleted silently.
+
+Deleted is a separate, searchable filter in Logins. Deleted entries are excluded
+from active lists, global search, the Knowledge map and identity suggestions.
+Restore returns the same item to Logins with its fields, favorite/archive state,
+attachments, notes and history intact. Deleted items have no expiry or permanent
+delete action. Only the collection tombstone and revision change; encrypted
+credential records and original import archives remain intact. Vault backups
+include Deleted. Re-importing an identical 1Password entry does not undelete it.
+Original-export downloads still contain the complete original import, as labeled.
+
+A saved change to a nonempty primary password appends the old value and its
+replacement time, including clearing or reverting a password. Unchanged values,
+notes-only edits, canceled drafts and failed saves add no history. Native API
+keys, private keys, passphrases and recovery codes keep their previous values too.
+History is read-only and concealed by default, with the existing timed reveal and
+copy controls. It shows the date a value stopped being current (UTC) and elapsed
+time; imported entries without dates say so. Newest changes appear first, even
+when several changes share a timestamp. Deleting/restoring never rewrites history.
+
+Validation: the synthetic native gallery covers confirmation, Cancel/Enter,
+Escape, explicit Tab/Enter and mouse submission, active-list exclusion, Restore,
+empty Deleted and retained history at 1120×820 and 800×600 (reduced motion at the
+minimum size). Core regressions cover every native type, stale/repeated requests,
+backup recovery, import deduplication, attachments, password clears/reversions,
+and same-second history ordering. Linux rendering and screen-reader behavior
+were not visually verified.

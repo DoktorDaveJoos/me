@@ -91,6 +91,9 @@ mod shell {
         if mode == "permissions" {
             app.open_permissions(&OpenPermissions, window, cx);
         }
+        if mode == "delete" {
+            app.request_login_delete(window, cx);
+        }
         if mode == "edit" {
             app.edit_login(&EditLogin, window, cx);
         }

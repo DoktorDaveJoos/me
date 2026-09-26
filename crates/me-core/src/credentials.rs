@@ -639,6 +639,70 @@ mod tests {
     const PASSWORD: &str = "synthetic-vault-password";
     const SECRET: &str = "  SYNTHETIC-PASSWORD-unique-86402 🗝  ";
     #[test]
+    fn imported_deleted_login_retains_attachments_edits_history_and_import_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        let mut item = login();
+        item["details"]["documentAttributes"] = json!({"documentId":"doc1","fileName":"key.txt"});
+        let original = archive(
+            &data(vec![item]),
+            &[("files/doc1__key.txt", b"SYNTHETIC-ATTACHMENT")],
+        );
+        let import = OnePasswordImport::from_bytes(original.clone()).unwrap();
+        v.import_onepassword(&import).unwrap();
+        let id = v.logins().unwrap()[0].id;
+        let d = v.login_details(id).unwrap();
+        let mut update = login_update(&d);
+        update.fields = vec![(
+            d.fields[1].key.clone(),
+            Zeroizing::new("NEW-password".into()),
+        )];
+        v.update_login(id, update).unwrap();
+        let expected: String =
+            v.db.query_row(
+                "SELECT raw_json FROM credential_record WHERE item_id=?",
+                [sql_id(id).unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        v.delete_login(id, 2).unwrap();
+        assert!(v.logins().unwrap().is_empty());
+        assert!(v.credential_details(id).is_err());
+        assert!(
+            v.export_credential_attachment(id, 0, &dir.path().join("blocked.txt"))
+                .is_err()
+        );
+        assert_eq!(v.import_onepassword(&import).unwrap().duplicates, 1);
+        assert!(
+            v.logins().unwrap().is_empty(),
+            "Re-import must not resurrect deleted entries"
+        );
+        let backup = dir.path().join("deleted.mebackup");
+        v.backup(&backup).unwrap();
+        drop(v);
+        let mut v = Vault::restore(&backup, &dir.path().join("restored"), PASSWORD).unwrap();
+        v.restore_login(id, 3).unwrap();
+        let d = v.login_details(id).unwrap();
+        assert_eq!(d.fields[1].value.as_str(), "NEW-password");
+        assert_eq!(d.fields.iter().filter(|f| !f.editable).count(), 2);
+        assert_eq!(
+            v.db.query_row(
+                "SELECT raw_json FROM credential_record WHERE item_id=?",
+                [sql_id(id).unwrap()],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            expected
+        );
+        let attachment = dir.path().join("attachment.txt");
+        v.export_credential_attachment(id, 0, &attachment).unwrap();
+        assert_eq!(fs::read(attachment).unwrap(), b"SYNTHETIC-ATTACHMENT");
+        let recovered = dir.path().join("recovered.1pux");
+        v.export_credential_original(id, &recovered).unwrap();
+        assert_eq!(fs::read(recovered).unwrap(), *original);
+        no_plaintext(&dir.path().join("restored"));
+    }
+    #[test]
     fn custom_password_labels_do_not_change_primary_password_or_its_history() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = vault(&dir);
