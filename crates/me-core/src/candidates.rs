@@ -1896,9 +1896,7 @@ pub(crate) fn has_euro_cent_columns(text: &str) -> bool {
 }
 
 /// Every explicit currency marker in `text` (symbols, ISO codes, "Euro").
-/// Reserved for a later task's currency resolution (document marker, else type
-/// default); only tested here.
-#[allow(dead_code)]
+/// Used to resolve a document's currency (document marker, else type default).
 pub(crate) fn currencies_in(text: &str) -> std::collections::BTreeSet<&'static str> {
     let mut found = std::collections::BTreeSet::new();
     for (i, _) in text.char_indices() {

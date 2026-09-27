@@ -16,6 +16,8 @@ pub use doc_types::{
 };
 mod graph;
 pub use graph::*;
+mod typing;
+pub use typing::*;
 mod intake;
 pub use intake::*;
 mod authority;
