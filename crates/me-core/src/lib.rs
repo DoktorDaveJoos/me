@@ -11,8 +11,8 @@ mod candidates;
 pub use candidates::*;
 pub mod doc_types;
 pub use doc_types::{
-    DOC_TYPES, DocType, PAYMENT_PERIODS, Slot, SlotValidity, Target, Tier, ValueKind, doc_type,
-    family_types,
+    DOC_TYPES, DocType, PAYMENT_PERIODS, Slot, SlotValidity, TAX_CLASSES, Target, Tier, ValueKind,
+    default_currency, doc_type, family_types,
 };
 mod graph;
 pub use graph::*;

@@ -6,7 +6,7 @@ use crate::{CandidateKind as C, EntityKind, Period};
 use serde::{Deserialize, Serialize};
 
 /// Changing any type, slot or link changes this version and reruns later stages.
-pub const REGISTRY_VERSION: &str = "doc-types-v1";
+pub const REGISTRY_VERSION: &str = "doc-types-v2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +54,11 @@ pub enum ValueKind {
     Name,
     /// A closed set judged by TypeSafe from the document, not a printed span.
     Category(&'static [(&'static str, &'static str)]),
+    /// A month or year the document covers; code computes its first and last day.
+    Period,
+    /// A signed one-off amount whose direction (refund or payment) TypeSafe judges;
+    /// code stores a refund as negative.
+    Balance,
 }
 
 /// Validity of the assertion a slot or link produces. Computed in code from dates.
@@ -208,10 +213,67 @@ pub const FAMILIES: &[Family] = &[
 ];
 
 const DATE: &[C] = &[C::Date];
-const MONEY: &[C] = &[C::Money];
+const MONEY: &[C] = &[C::Money, C::Amount];
 const ORG: &[C] = &[C::Organization, C::LabelValue];
 const IDENT: &[C] = &[C::Identifier, C::LabelValue];
 const TEXT: &[C] = &[C::LabelValue];
+const PERIOD: &[C] = &[C::Period];
+
+/// Wage tax classes; printed as `1`–`6` or Roman numerals.
+pub const TAX_CLASSES: &[(&str, &str)] = &[
+    (
+        "I",
+        "Steuerklasse I: single, or separated/divorced/widowed without the relief",
+    ),
+    (
+        "II",
+        "Steuerklasse II: single parent with the relief amount",
+    ),
+    (
+        "III",
+        "Steuerklasse III: married, the higher-earning partner",
+    ),
+    (
+        "IV",
+        "Steuerklasse IV: married, both partners earning similarly (also with factor)",
+    ),
+    (
+        "V",
+        "Steuerklasse V: married, the partner of someone in class III",
+    ),
+    ("VI", "Steuerklasse VI: a second or further employment"),
+];
+
+/// Legal currency of German payroll and tax forms, used only when the document
+/// itself prints no single currency.
+pub fn default_currency(doc_type: &str) -> Option<&'static str> {
+    matches!(
+        doc_type,
+        "payslip" | "wage_tax_certificate" | "tax_assessment"
+    )
+    .then_some("EUR")
+}
+
+const fn employee_money(
+    key: &'static str,
+    property: &'static str,
+    period: Period,
+    label: &'static str,
+    description: &'static str,
+) -> Slot {
+    valid(
+        slot(
+            key,
+            Some(property),
+            Target::Subject,
+            ValueKind::Money(Some(period)),
+            MONEY,
+            label,
+            description,
+        ),
+        SlotValidity::DocumentPeriod,
+    )
+}
 
 const fn slot(
     key: &'static str,
@@ -572,9 +634,58 @@ pub const DOC_TYPES: &[DocType] = &[
                     ValueKind::Money(Some(Period::Year)),
                     MONEY,
                     "gross wage",
-                    "The gross wage for the certificate period (Bruttoarbeitslohn, line 3)",
+                    "Line 3: Bruttoarbeitslohn einschl. Sachbezüge for the certificate period",
                 ),
                 SlotValidity::DocumentPeriod,
+            ),
+            employee_money(
+                "wage_tax",
+                "person.wage_tax",
+                Period::Year,
+                "wage tax",
+                "Line 4: Einbehaltene Lohnsteuer von 3.",
+            ),
+            employee_money(
+                "solidarity_surcharge",
+                "person.solidarity_surcharge",
+                Period::Year,
+                "solidarity surcharge",
+                "Line 5: Einbehaltener Solidaritätszuschlag von 3.",
+            ),
+            employee_money(
+                "church_tax",
+                "person.church_tax",
+                Period::Year,
+                "church tax",
+                "Line 6: Einbehaltene Kirchensteuer des Arbeitnehmers von 3. (line 7 is the spouse's, not this)",
+            ),
+            employee_money(
+                "pension_contribution",
+                "person.pension_contribution",
+                Period::Year,
+                "pension contribution",
+                "Line 23 a: Arbeitnehmeranteil zur gesetzlichen Rentenversicherung (line 22 is the employer's)",
+            ),
+            employee_money(
+                "health_contribution",
+                "person.health_insurance_contribution",
+                Period::Year,
+                "health insurance contribution",
+                "Line 25: Arbeitnehmerbeiträge zur gesetzlichen Krankenversicherung",
+            ),
+            employee_money(
+                "care_contribution",
+                "person.care_insurance_contribution",
+                Period::Year,
+                "care insurance contribution",
+                "Line 26: Arbeitnehmerbeiträge zur sozialen Pflegeversicherung",
+            ),
+            employee_money(
+                "unemployment_contribution",
+                "person.unemployment_insurance_contribution",
+                Period::Year,
+                "unemployment insurance contribution",
+                "Line 27: Arbeitnehmerbeiträge zur Arbeitslosenversicherung",
             ),
             PERIOD_START,
             PERIOD_END,
@@ -621,6 +732,53 @@ pub const DOC_TYPES: &[DocType] = &[
                 "tax office",
                 "The name of the tax office (Finanzamt) that issued the notice",
             ),
+            slot(
+                "tax_year",
+                None,
+                Target::Subject,
+                ValueKind::Period,
+                PERIOD,
+                "tax year",
+                "The calendar year assessed (Veranlagungszeitraum)",
+            ),
+            employee_money(
+                "taxable_income",
+                "person.taxable_income",
+                Period::Year,
+                "taxable income",
+                "Zu versteuerndes Einkommen for the tax year",
+            ),
+            employee_money(
+                "income_tax_assessed",
+                "person.income_tax_assessed",
+                Period::Year,
+                "assessed income tax",
+                "Festgesetzte Einkommensteuer for the tax year, not amounts already paid or still due",
+            ),
+            valid(
+                slot(
+                    "tax_balance",
+                    Some("person.tax_balance"),
+                    Target::Subject,
+                    ValueKind::Balance,
+                    MONEY,
+                    "refund or back payment",
+                    "The remaining amount of this assessment: Erstattung (refund) or Nachzahlung (payment due)",
+                ),
+                SlotValidity::DocumentPeriod,
+            ),
+            valid(
+                slot(
+                    "payment_due",
+                    Some("person.tax_payment_due"),
+                    Target::Subject,
+                    ValueKind::Date,
+                    DATE,
+                    "payment due date",
+                    "The date by which a back payment must be paid, if printed",
+                ),
+                SlotValidity::DocumentPeriod,
+            ),
             DOCUMENT_DATE,
         ],
         links: &[Link {
@@ -659,29 +817,89 @@ pub const DOC_TYPES: &[DocType] = &[
                 "employer",
                 "The name of the employer",
             ),
-            required(valid(
-                slot(
-                    "gross",
-                    Some("person.gross_income"),
-                    Target::Subject,
-                    ValueKind::Money(Some(Period::Month)),
-                    MONEY,
-                    "gross pay",
-                    "Total gross pay for this month (Gesamtbrutto), not year-to-date totals",
-                ),
-                SlotValidity::DocumentPeriod,
+            required(employee_money(
+                "gross",
+                "person.gross_income",
+                Period::Month,
+                "gross pay",
+                "Total gross pay for this month (Gesamtbrutto), not year-to-date totals",
             )),
+            employee_money(
+                "net",
+                "person.net_income",
+                Period::Month,
+                "net pay",
+                "Net pay for this month (Nettoverdienst), before other deductions such as advances",
+            ),
+            employee_money(
+                "wage_tax",
+                "person.wage_tax",
+                Period::Month,
+                "wage tax",
+                "Lohnsteuer withheld from this month's pay, not the year-to-date total",
+            ),
+            employee_money(
+                "solidarity_surcharge",
+                "person.solidarity_surcharge",
+                Period::Month,
+                "solidarity surcharge",
+                "Solidaritätszuschlag withheld this month",
+            ),
+            employee_money(
+                "church_tax",
+                "person.church_tax",
+                Period::Month,
+                "church tax",
+                "Kirchensteuer withheld from the employee this month",
+            ),
             valid(
                 slot(
-                    "net",
-                    Some("person.net_income"),
+                    "tax_class",
+                    Some("person.tax_class"),
                     Target::Subject,
-                    ValueKind::Money(Some(Period::Month)),
-                    MONEY,
-                    "net pay",
-                    "Net pay for this month (Nettoverdienst), before other deductions such as advances",
+                    ValueKind::Category(TAX_CLASSES),
+                    &[],
+                    "tax class",
+                    "The wage tax class (Steuerklasse, StKl) applied this month",
                 ),
                 SlotValidity::DocumentPeriod,
+            ),
+            employee_money(
+                "pension_contribution",
+                "person.pension_contribution",
+                Period::Month,
+                "pension contribution",
+                "Employee share of statutory pension insurance (RV-Beitrag AN) this month",
+            ),
+            employee_money(
+                "health_contribution",
+                "person.health_insurance_contribution",
+                Period::Month,
+                "health insurance contribution",
+                "Employee share of statutory health insurance including the additional contribution (KV-Beitrag AN) this month",
+            ),
+            employee_money(
+                "care_contribution",
+                "person.care_insurance_contribution",
+                Period::Month,
+                "care insurance contribution",
+                "Employee share of long-term care insurance (PV-Beitrag AN) this month",
+            ),
+            employee_money(
+                "unemployment_contribution",
+                "person.unemployment_insurance_contribution",
+                Period::Month,
+                "unemployment insurance contribution",
+                "Employee share of unemployment insurance (AV-Beitrag AN) this month",
+            ),
+            slot(
+                "pay_month",
+                None,
+                Target::Subject,
+                ValueKind::Period,
+                PERIOD,
+                "pay month",
+                "The month this payslip covers (Abrechnungsmonat)",
             ),
             slot(
                 "tax_id",
@@ -1470,5 +1688,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tax_documents_list_the_tax_checklist() {
+        let keys =
+            |t: &str| -> Vec<&str> { doc_type(t).unwrap().slots.iter().map(|s| s.key).collect() };
+        let payslip = keys("payslip");
+        for k in [
+            "gross",
+            "net",
+            "wage_tax",
+            "solidarity_surcharge",
+            "church_tax",
+            "tax_class",
+            "pension_contribution",
+            "health_contribution",
+            "care_contribution",
+            "unemployment_contribution",
+            "pay_month",
+        ] {
+            assert!(payslip.contains(&k), "payslip lacks {k}");
+        }
+        let certificate = keys("wage_tax_certificate");
+        for k in [
+            "gross_wage",
+            "wage_tax",
+            "solidarity_surcharge",
+            "church_tax",
+            "pension_contribution",
+            "health_contribution",
+            "care_contribution",
+            "unemployment_contribution",
+        ] {
+            assert!(certificate.contains(&k), "certificate lacks {k}");
+        }
+        let assessment = keys("tax_assessment");
+        for k in [
+            "tax_year",
+            "taxable_income",
+            "income_tax_assessed",
+            "tax_balance",
+            "payment_due",
+        ] {
+            assert!(assessment.contains(&k), "assessment lacks {k}");
+        }
+        let balance = doc_type("tax_assessment")
+            .unwrap()
+            .slot("tax_balance")
+            .unwrap();
+        assert_eq!(balance.value, ValueKind::Balance);
+        assert_eq!(
+            doc_type("payslip").unwrap().slot("wage_tax").unwrap().value,
+            ValueKind::Money(Some(Period::Month))
+        );
+        assert_eq!(
+            doc_type("wage_tax_certificate")
+                .unwrap()
+                .slot("wage_tax")
+                .unwrap()
+                .value,
+            ValueKind::Money(Some(Period::Year))
+        );
+    }
+
+    #[test]
+    fn only_german_payroll_and_tax_forms_default_to_euro() {
+        assert_eq!(default_currency("payslip"), Some("EUR"));
+        assert_eq!(default_currency("wage_tax_certificate"), Some("EUR"));
+        assert_eq!(default_currency("tax_assessment"), Some("EUR"));
+        assert_eq!(default_currency("insurance_policy"), None);
+        assert_eq!(default_currency("invoice"), None);
     }
 }
