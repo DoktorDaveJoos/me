@@ -131,6 +131,7 @@ pub struct MeApp {
     #[cfg(any(debug_assertions, feature = "development-tools"))]
     development: development_ui::DevelopmentState,
     show_onepassword: bool,
+    onepassword_step: credentials_ui::OnePasswordStep,
     onepassword_preview: Option<(me_core::OnePasswordImport, me_core::OnePasswordSummary)>,
     onepassword_result: Option<me_core::OnePasswordSummary>,
     credential: Option<me_core::CredentialDetails>,
@@ -265,6 +266,7 @@ impl MeApp {
             #[cfg(any(debug_assertions, feature = "development-tools"))]
             development: Default::default(),
             show_onepassword: false,
+            onepassword_step: Default::default(),
             onepassword_preview: None,
             onepassword_result: None,
             credential: None,
@@ -1125,7 +1127,13 @@ impl Render for MeApp {
             })
             .when(
                 self.page == Page::Logins && self.show_onepassword && !self.show_settings,
-                |s| s.child(self.login_import_modal(cx)),
+                |s| {
+                    s.child(motion::overlay(
+                        self.onepassword_modal(window, cx).into_any_element(),
+                        "overlay-onepassword-import",
+                        self.motion_enabled(),
+                    ))
+                },
             )
             .when(self.logins.intake.open && !self.show_settings, |s| {
                 s.child(motion::overlay(

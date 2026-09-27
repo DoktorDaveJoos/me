@@ -1,4 +1,5 @@
 use super::*;
+use gpui::Div;
 use me_diagnostics::{Field as F, record};
 
 fn onepassword_failure(stage: &'static str, error: &me_core::Error) {
@@ -18,9 +19,25 @@ fn onepassword_failure(stage: &'static str, error: &me_core::Error) {
     record("onepassword.failed", &fields);
 }
 
+/// The 1Password import dialog shows one step at a time. Preview and result
+/// data stay in `onepassword_preview` / `onepassword_result`.
+#[derive(Default)]
+pub(super) enum OnePasswordStep {
+    #[default]
+    Choose,
+    Checking,
+    Review,
+    /// Keeps the confirmed counts visible while the vault transaction runs.
+    Importing(me_core::OnePasswordSummary),
+    Done,
+}
+
+const IMPORT_STEPS: &[&str] = &["Export", "Review", "Import"];
+
 impl MeApp {
     pub(super) fn clear_credentials(&mut self, cx: &mut Context<Self>) {
         self.credential_generation += 1;
+        self.onepassword_step = OnePasswordStep::Choose;
         self.onepassword_result = None;
         self.credential_revealed.clear();
         let preview = self.onepassword_preview.take();
@@ -37,8 +54,6 @@ impl MeApp {
         if !self.app_ready() || self.busy {
             return;
         }
-        self.show_onepassword = true;
-        self.clear_credentials(cx);
         self.error = None;
         self.notice = None;
         let generation = self.credential_generation;
@@ -76,9 +91,9 @@ impl MeApp {
             return;
         }
         self.clear_credentials(cx);
+        self.onepassword_step = OnePasswordStep::Checking;
         self.busy = true;
         self.error = None;
-        self.notice = Some("Checking the 1Password export…".into());
         let session = self.session.clone();
         let generation = self.credential_generation;
         let task = cx.background_executor().spawn(async move {
@@ -113,10 +128,15 @@ impl MeApp {
                     return;
                 }
                 this.busy = false;
-                this.notice = None;
                 match result {
-                    Ok(preview) => this.onepassword_preview = Some(preview),
-                    Err(e) => this.error = Some(e.to_string()),
+                    Ok(preview) => {
+                        this.onepassword_preview = Some(preview);
+                        this.onepassword_step = OnePasswordStep::Review;
+                    }
+                    Err(e) => {
+                        this.error = Some(e.to_string());
+                        this.onepassword_step = OnePasswordStep::Choose;
+                    }
                 }
                 cx.notify();
             });
@@ -132,6 +152,7 @@ impl MeApp {
         let Some((import, summary)) = self.onepassword_preview.take() else {
             return;
         };
+        self.onepassword_step = OnePasswordStep::Importing(summary.clone());
         self.busy = true;
         self.error = None;
         self.notice = None;
@@ -169,6 +190,7 @@ impl MeApp {
                 match result {
                     Ok(result) => {
                         this.onepassword_result = Some(result);
+                        this.onepassword_step = OnePasswordStep::Done;
                         if this.page == Page::Logins {
                             this.refresh_logins(cx);
                         }
@@ -177,6 +199,7 @@ impl MeApp {
                     Err(error) => {
                         this.error = Some(error.to_string());
                         this.onepassword_preview = Some((import, summary));
+                        this.onepassword_step = OnePasswordStep::Review;
                     }
                 }
                 cx.notify();
@@ -186,32 +209,534 @@ impl MeApp {
         cx.notify();
     }
 
-    pub(super) fn onepassword_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div().w(px(640.)).max_w_full().min_w_0().flex_shrink_0().p(px(space::XXL)).bg(rgb(SURFACE)).border_1().border_color(rgb(LINE)).rounded(px(radius::STANDARD)).flex().flex_col().gap(px(space::MD))
-            .child(eyebrow("1PASSWORD"))
-            .child(div().type_style(Type::Section).font_weight(font::EMPHASIS).child("Import from 1Password"))
-            .child(div().max_w(px(592.)).flex_shrink_0().whitespace_normal().type_style(Type::Body).text_color(rgb(MUTED)).child("In 1Password 8, choose File → Export → 1PUX, then select that file here."))
-            .child(div().max_w(px(592.)).flex_shrink_0().whitespace_normal().type_style(Type::Small).text_color(rgb(MUTED)).child("Logins, notes, cards, custom fields, password history, and attachments are stored locally and excluded from AI."))
-            .child(div().max_w(px(592.)).flex_shrink_0().whitespace_normal().type_style(Type::Small).text_color(rgb(MUTED)).child("Passkeys aren't included. Use 1PUX; CSV and 1PIF aren't supported. The export is unencrypted—delete it after checking the import."))
-            .child(primary_action().id("pick-onepassword").flex_shrink_0()
-                .hover(|s| s.bg(rgb(PRIMARY_HOVER))).on_click(cx.listener(|this,_,_,cx|this.pick_onepassword(cx))).child(if self.busy {"Please wait…"} else {"Choose export…"}))
-            .when_some(self.onepassword_result.as_ref(),|s,result|s.child(div().p(px(space::LG)).rounded(px(radius::STANDARD)).bg(rgb(BG)).flex_shrink_0().flex().flex_col().gap(px(space::SM))
-                .child(div().type_style(Type::Label).font_weight(font::EMPHASIS).child("Import complete"))
-                .child(div().max_w(px(560.)).whitespace_normal().type_style(Type::Body).child(format!("{} imported · {} unchanged · {} changed versions kept",result.to_import(),result.duplicates,result.changed)))
-                .child(div().max_w(px(560.)).whitespace_normal().type_style(Type::Small).text_color(rgb(MUTED)).child("Check your imported entries, then delete the unencrypted export."))
-                .child(div().id("show-imported-credentials").type_style(Type::Body).text_color(rgb(ACCENT)).cursor_pointer().on_click(cx.listener(|this,_,window,cx|this.navigate(Page::Logins,window,cx))).child("View logins"))))
-            .when_some(self.error.clone(),|s,error|s.child(div().max_w(px(560.)).whitespace_normal().type_style(Type::Small).text_color(rgb(DANGER)).child(error)))
-            .when_some(self.onepassword_preview.as_ref(),|s,(_,summary)|s
-                .child(div().p(px(space::LG)).rounded(px(radius::STANDARD)).bg(rgb(BG)).flex().flex_col().gap(px(space::SM))
-                    .child(div().type_style(Type::Label).font_weight(font::EMPHASIS).child("Review import"))
-                    .child(div().type_style(Type::Body).child(format!("{} entries · {} new · {} unchanged · {} changed",summary.total,summary.new,summary.duplicates,summary.changed)))
-                    .child(div().type_style(Type::Small).text_color(rgb(MUTED)).child(format!("{} archived entries · {} files in the original export",summary.archived,summary.files)))
-                    .children(summary.vaults.iter().take(20).map(|(name,count)|div().type_style(Type::Small).text_ellipsis().child(format!("{name} · {count} entries"))))
-                    .child(div().max_w(px(592.)).flex_shrink_0().whitespace_normal().type_style(Type::Small).text_color(rgb(MUTED)).child("Duplicates are skipped. Changed entries are saved as additional versions."))
-                    .when(summary.to_import()>0,|s|s.child(primary_action().id("confirm-onepassword").flex_shrink_0()
-                        .hover(|s| s.bg(rgb(PRIMARY_HOVER))).on_click(cx.listener(|this,_,_,cx|this.commit_onepassword(cx))).child(format!("Import {} entries",summary.to_import()))))
-                    .when(summary.to_import()==0,|s|s.child(div().type_style(Type::Body).child(if summary.total==0 {"This export is empty."} else {"All entries are already in ME."})))
-                    .child(div().id("cancel-onepassword").type_style(Type::Small).cursor_pointer().on_click(cx.listener(|this,_,_,cx|{this.clear_credentials(cx);cx.notify();})).child("Cancel"))))
+    /// Opens the import dialog on Logins at its first step.
+    pub(super) fn open_onepassword_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.app_ready() || self.busy || self.login_edit_guard(cx) {
+            return;
+        }
+        if self.page != Page::Logins || self.show_settings {
+            self.navigate(Page::Logins, window, cx);
+        }
+        self.clear_credentials(cx);
+        self.show_onepassword = true;
+        self.error = None;
+        self.notice = None;
+        cx.notify();
+    }
+
+    fn close_onepassword_import(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.show_onepassword = false;
+        self.error = None;
+        self.clear_credentials(cx);
+        self.refresh_logins(cx);
+        cx.notify();
+    }
+
+    fn restart_onepassword_import(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.error = None;
+        self.clear_credentials(cx);
+        cx.notify();
+    }
+
+    pub(super) fn onepassword_modal(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let (rail, title, subtitle) = match &self.onepassword_step {
+            OnePasswordStep::Choose => (
+                0,
+                "Import from 1Password",
+                "Bring your 1Password entries into your encrypted ME. vault.",
+            ),
+            OnePasswordStep::Checking => (
+                1,
+                "Checking your export",
+                "Reading the file on this device. Nothing is saved yet.",
+            ),
+            OnePasswordStep::Review => (
+                1,
+                "Review your import",
+                "This is exactly what will be added. Nothing is saved until you confirm.",
+            ),
+            OnePasswordStep::Importing(_) => {
+                (1, "Review your import", "Saving to your encrypted vault…")
+            }
+            OnePasswordStep::Done => (
+                3,
+                "Import complete",
+                "Your entries are saved in your encrypted vault.",
+            ),
+        };
+        let body = match &self.onepassword_step {
+            OnePasswordStep::Choose => self.onepassword_choose_body(),
+            OnePasswordStep::Checking => self.onepassword_checking_body(),
+            OnePasswordStep::Review => match self.onepassword_preview.as_ref() {
+                Some((_, summary)) => self.onepassword_review_body(summary),
+                None => div(),
+            },
+            OnePasswordStep::Importing(summary) => self.onepassword_review_body(summary),
+            OnePasswordStep::Done => match self.onepassword_result.as_ref() {
+                Some(result) => self.onepassword_done_body(result),
+                None => div(),
+            },
+        };
+        self.overlay(cx).p(px(space::LG)).child(
+            modal_panel(600., self.motion_enabled())
+                .id("onepassword-import-modal")
+                .max_h(window.viewport_size().height - px(space::SECTION))
+                .gap(px(space::XL))
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                    cx.stop_propagation();
+                    let choosing = matches!(this.onepassword_step, OnePasswordStep::Choose);
+                    match paths.paths() {
+                        [path]
+                            if choosing
+                                && path
+                                    .extension()
+                                    .is_some_and(|e| e.eq_ignore_ascii_case("1pux")) =>
+                        {
+                            this.prepare_onepassword(path.clone(), cx)
+                        }
+                        _ if choosing => {
+                            this.error = Some("Drop a single .1pux export from 1Password.".into());
+                            cx.notify();
+                        }
+                        _ => {}
+                    }
+                }))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(space::XL))
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap(px(space::MD))
+                                .child(
+                                    div()
+                                        .size(px(layout::CONTROL_LARGE))
+                                        .flex_shrink_0()
+                                        .rounded(px(radius::STANDARD))
+                                        .bg(rgb(HOVER))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(icon(Icon::Key, IconSize::Large, ACCENT)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(space::XS))
+                                        .child(heading(title))
+                                        .child(
+                                            div()
+                                                .whitespace_normal()
+                                                .type_style(Type::Small)
+                                                .text_color(rgb(MUTED))
+                                                .child(subtitle),
+                                        ),
+                                )
+                                .when(!self.busy, |s| {
+                                    s.child(
+                                        icon_action(
+                                            "close-onepassword-import",
+                                            Icon::Close,
+                                            "Close",
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.close_onepassword_import(cx)
+                                            }),
+                                        ),
+                                    )
+                                }),
+                        )
+                        .child(step_rail(IMPORT_STEPS, rail)),
+                )
+                .child(
+                    div()
+                        .id(("onepassword-import-body", rail))
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(body),
+                )
+                .child(self.onepassword_footer(cx)),
+        )
+    }
+
+    fn onepassword_footer(&self, cx: &mut Context<Self>) -> Div {
+        let footer = div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(space::SM));
+        let animated = self.motion_enabled();
+        match &self.onepassword_step {
+            OnePasswordStep::Choose => footer
+                .child(
+                    secondary_action()
+                        .id("cancel-onepassword")
+                        .hover(|s| s.bg(rgb(HOVER)))
+                        .on_click(cx.listener(|this, _, _, cx| this.close_onepassword_import(cx)))
+                        .child("Cancel"),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .type_style(Type::Caption)
+                        .text_color(rgb(MUTED))
+                        .child("or drop the file here"),
+                )
+                .child(
+                    primary_action()
+                        .id("pick-onepassword")
+                        .hover(|s| s.bg(rgb(PRIMARY_HOVER)))
+                        .on_click(cx.listener(|this, _, _, cx| this.pick_onepassword(cx)))
+                        .child("Choose 1PUX file…")
+                        .child(action_indicator(false, animated)),
+                ),
+            OnePasswordStep::Checking => footer.child(div().flex_1()).child(
+                primary_action()
+                    .id("checking-onepassword")
+                    .cursor_default()
+                    .child("Checking…")
+                    .child(action_indicator(true, animated)),
+            ),
+            OnePasswordStep::Review => {
+                let count = self
+                    .onepassword_preview
+                    .as_ref()
+                    .map_or(0, |(_, summary)| summary.to_import());
+                footer
+                    .child(
+                        secondary_action()
+                            .id("back-onepassword")
+                            .hover(|s| s.bg(rgb(HOVER)))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.restart_onepassword_import(cx)),
+                            )
+                            .child("Choose another file"),
+                    )
+                    .child(div().flex_1())
+                    .child(if count > 0 {
+                        primary_action()
+                            .id("confirm-onepassword")
+                            .hover(|s| s.bg(rgb(PRIMARY_HOVER)))
+                            .on_click(cx.listener(|this, _, _, cx| this.commit_onepassword(cx)))
+                            .child(entries(count, "Import"))
+                            .child(action_indicator(false, animated))
+                    } else {
+                        primary_action()
+                            .id("close-empty-onepassword")
+                            .hover(|s| s.bg(rgb(PRIMARY_HOVER)))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.close_onepassword_import(cx)),
+                            )
+                            .child("Close")
+                    })
+            }
+            OnePasswordStep::Importing(summary) => footer
+                .child(
+                    secondary_action()
+                        .id("back-onepassword")
+                        .cursor_default()
+                        .opacity(0.5)
+                        .child("Choose another file"),
+                )
+                .child(div().flex_1())
+                .child(
+                    primary_action()
+                        .id("confirm-onepassword")
+                        .cursor_default()
+                        .child(entries(summary.to_import(), "Importing"))
+                        .child(action_indicator(true, animated)),
+                ),
+            OnePasswordStep::Done => footer
+                .child(
+                    secondary_action()
+                        .id("import-another-onepassword")
+                        .hover(|s| s.bg(rgb(HOVER)))
+                        .on_click(cx.listener(|this, _, _, cx| this.restart_onepassword_import(cx)))
+                        .child("Import another export"),
+                )
+                .child(div().flex_1())
+                .child(
+                    primary_action()
+                        .id("show-imported-credentials")
+                        .hover(|s| s.bg(rgb(PRIMARY_HOVER)))
+                        .on_click(cx.listener(|this, _, _, cx| this.close_onepassword_import(cx)))
+                        .child("View logins")
+                        .child(action_indicator(false, animated)),
+                ),
+        }
+    }
+
+    fn onepassword_error(&self) -> Option<Div> {
+        self.error.clone().map(|error| {
+            div()
+                .p(px(space::LG))
+                .rounded(px(radius::STANDARD))
+                .bg(rgb(DANGER_SURFACE))
+                .flex()
+                .items_start()
+                .gap(px(space::SM))
+                .child(icon(Icon::Info, IconSize::Medium, DANGER))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .type_style(Type::Small)
+                        .text_color(rgb(DANGER))
+                        .child(error),
+                )
+        })
+    }
+
+    fn onepassword_choose_body(&self) -> Div {
+        let how = [
+            "Open 1Password 8 on this computer.",
+            "Choose File → Export, then select the account.",
+            "Pick the 1PUX format and save the file.",
+        ];
+        let included = [
+            (
+                Icon::Key,
+                "Logins and passwords, including password history",
+            ),
+            (
+                Icon::Text,
+                "Secure notes, cards, identities and every other entry type",
+            ),
+            (
+                Icon::Hash,
+                "Custom fields, one-time password secrets and tags",
+            ),
+            (Icon::Attach, "Attachments, archived entries and favorites"),
+        ];
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::LG))
+            .children(self.onepassword_error())
+            .child(
+                card()
+                    .child(eyebrow("EXPORT FROM 1PASSWORD"))
+                    .children(how.iter().enumerate().map(|(index, step)| {
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap(px(space::MD))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .type_style(Type::Body)
+                                    .font_family(font::MONO)
+                                    .text_color(rgb(ACCENT))
+                                    .child(format!("0{}", index + 1)),
+                            )
+                            .child(div().flex_1().min_w_0().whitespace_normal().type_style(Type::Body).child(*step))
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::SM))
+                    .child(eyebrow("WHAT COMES ACROSS"))
+                    .children(included.into_iter().map(|(glyph, text)| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::MD))
+                            .child(icon(glyph, IconSize::Medium, MUTED))
+                            .child(div().flex_1().min_w_0().whitespace_normal().type_style(Type::Body).child(text))
+                    })),
+            )
+            .child(
+                div()
+                    .whitespace_normal()
+                    .type_style(Type::Small)
+                    .text_color(rgb(MUTED))
+                    .child("Passkeys aren’t part of 1Password exports. CSV and 1PIF files aren’t supported. Everything stays encrypted on this device and is never shared with AI."),
+            )
+    }
+
+    fn onepassword_checking_body(&self) -> Div {
+        card()
+            .items_center()
+            .py(px(space::SECTION))
+            .child(motion::spinner(self.motion_enabled()))
+            .child(div().type_style(Type::Label).child("Reading and validating the export"))
+            .child(
+                div()
+                    .whitespace_normal()
+                    .type_style(Type::Small)
+                    .text_color(rgb(MUTED))
+                    .child("Large exports can take a moment. Entries are compared with your vault to find duplicates."),
+            )
+    }
+
+    fn onepassword_review_body(&self, summary: &me_core::OnePasswordSummary) -> Div {
+        let adding = summary.to_import();
+        let mut notes = Vec::new();
+        if summary.archived > 0 {
+            notes.push(if summary.archived == 1 {
+                "1 archived entry keeps its Archived label.".into()
+            } else {
+                format!(
+                    "{} archived entries keep their Archived label.",
+                    summary.archived
+                )
+            });
+        }
+        if summary.files > 0 {
+            notes.push(format!(
+                "{} {} in the export are stored with the original.",
+                summary.files,
+                if summary.files == 1 { "file" } else { "files" }
+            ));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::XL))
+            .children(self.onepassword_error())
+            .child(
+                card()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::SM))
+                            .child(div().type_style(Type::Title).child(adding.to_string()))
+                            .child(div().type_style(Type::Label).text_color(rgb(MUTED)).child(if adding == 1 {
+                                "entry will be added"
+                            } else {
+                                "entries will be added"
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(space::SM))
+                            .child(stat("New", summary.new, "Not yet in ME."))
+                            .child(stat("Changed", summary.changed, "Saved as another version."))
+                            .child(stat("Already in ME", summary.duplicates, "Skipped.")),
+                    ),
+            )
+            .when(summary.total == 0, |s| {
+                s.child(div().type_style(Type::Body).text_color(rgb(MUTED)).child("This export contains no entries."))
+            })
+            .when(summary.total > 0 && adding == 0, |s| {
+                s.child(
+                    div()
+                        .whitespace_normal()
+                        .type_style(Type::Body)
+                        .text_color(rgb(MUTED))
+                        .child("Everything in this export is already in ME. There’s nothing new to import."),
+                )
+            })
+            .when(!summary.categories.is_empty(), |s| {
+                s.child(group_list("BY TYPE", &summary.categories, None))
+            })
+            .when(!summary.vaults.is_empty(), |s| {
+                s.child(group_list("BY VAULT", &summary.vaults, Some(Icon::Folder)))
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XS))
+                    .children(notes.into_iter().map(|note| {
+                        div().whitespace_normal().type_style(Type::Small).text_color(rgb(MUTED)).child(note)
+                    }))
+                    .child(
+                        div()
+                            .whitespace_normal()
+                            .type_style(Type::Small)
+                            .text_color(rgb(MUTED))
+                            .child("Nothing you already have is overwritten. Favorites are pinned."),
+                    ),
+            )
+    }
+
+    fn onepassword_done_body(&self, result: &me_core::OnePasswordSummary) -> Div {
+        let breakdown = [
+            (result.new, "new"),
+            (result.changed, "changed, kept as another version"),
+            (result.duplicates, "already in ME, skipped"),
+        ]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, label)| format!("{count} {label}"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::LG))
+            .child(
+                card()
+                    .flex_row()
+                    .items_start()
+                    .child(icon(Icon::Check, IconSize::Large, SUCCESS))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::XS))
+                            .child(
+                                div()
+                                    .type_style(Type::Section)
+                                    .child(format!("{} added", entries(result.to_import(), ""))),
+                            )
+                            .child(
+                                div()
+                                    .whitespace_normal()
+                                    .type_style(Type::Small)
+                                    .text_color(rgb(MUTED))
+                                    .child(breakdown),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .p(px(space::LG))
+                    .rounded(px(radius::STANDARD))
+                    .bg(rgb(WARNING_SURFACE))
+                    .flex()
+                    .items_start()
+                    .gap(px(space::SM))
+                    .child(icon(Icon::Info, IconSize::Medium, WARNING))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::XS))
+                            .child(div().type_style(Type::Label).font_weight(font::EMPHASIS).text_color(rgb(WARNING)).child("Delete the export file"))
+                            .child(
+                                div()
+                                    .whitespace_normal()
+                                    .type_style(Type::Small)
+                                    .text_color(rgb(WARNING))
+                                    .child("The .1pux file is not encrypted. After checking your logins, move it to the Trash and empty it."),
+                            ),
+                    ),
+            )
     }
 
     pub(super) fn open_credential(&mut self, item: u64, cx: &mut Context<Self>) {
@@ -351,4 +876,171 @@ impl MeApp {
             .when_some(self.notice.clone(),|s,n|s.child(div().type_style(Type::Small).text_color(rgb(MUTED)).child(n)))
             .child(div().id("close-credential").type_style(Type::Body).cursor_pointer().on_click(cx.listener(|this,_,window,cx|this.dismiss(&Dismiss,window,cx))).child("Close")))
     }
+}
+
+fn entries(count: usize, verb: &str) -> String {
+    let noun = if count == 1 { "entry" } else { "entries" };
+    if verb.is_empty() {
+        format!("{count} {noun}")
+    } else {
+        format!("{verb} {count} {noun}")
+    }
+}
+
+fn group_breakdown(group: &me_core::OnePasswordGroup) -> String {
+    [
+        (group.new, "new"),
+        (group.changed, "changed"),
+        (group.unchanged, "already in ME"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, label)| format!("{count} {label}"))
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+fn category_icon(name: &str) -> Icon {
+    match name {
+        "Login" | "Password" | "Database" | "Server" | "SSH key" | "Wi-Fi" | "API credential" => {
+            Icon::Key
+        }
+        "Credit card" | "Bank account" | "Membership" | "Rewards program" => Icon::Card,
+        "Identity" | "Passport" | "Driver's license" | "Social insurance" => Icon::User,
+        "Secure note" => Icon::Text,
+        "Document" => Icon::Document,
+        "Email account" => Icon::Mail,
+        _ => Icon::Hash,
+    }
+}
+
+/// Inset review card inside a dialog.
+fn card() -> Div {
+    div()
+        .p(px(space::LG))
+        .rounded(px(radius::STANDARD))
+        .bg(rgb(BG))
+        .border_1()
+        .border_color(rgb(LINE))
+        .flex()
+        .flex_col()
+        .gap(px(space::MD))
+}
+
+fn stat(label: &'static str, count: usize, caption: &'static str) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .p(px(space::MD))
+        .rounded(px(radius::STANDARD))
+        .bg(rgb(SURFACE))
+        .border_1()
+        .border_color(rgb(LINE))
+        .flex()
+        .flex_col()
+        .gap(px(space::XS))
+        .child(
+            div()
+                .type_style(Type::Caption)
+                .text_color(rgb(MUTED))
+                .child(label),
+        )
+        .child(
+            div()
+                .type_style(Type::Section)
+                .text_color(rgb(if count > 0 { INK } else { FAINT }))
+                .child(count.to_string()),
+        )
+        .child(
+            div()
+                .whitespace_normal()
+                .type_style(Type::Caption)
+                .text_color(rgb(MUTED))
+                .child(caption),
+        )
+}
+
+const GROUP_ROWS: usize = 20;
+
+fn group_list(
+    title: &'static str,
+    groups: &[me_core::OnePasswordGroup],
+    glyph: Option<Icon>,
+) -> Div {
+    let hidden = groups.len().saturating_sub(GROUP_ROWS);
+    let last = groups.len().min(GROUP_ROWS).saturating_sub(1);
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(space::SM))
+        .child(eyebrow(title))
+        .child(
+            div()
+                .rounded(px(radius::STANDARD))
+                .border_1()
+                .border_color(rgb(LINE))
+                .flex()
+                .flex_col()
+                .children(
+                    groups
+                        .iter()
+                        .take(GROUP_ROWS)
+                        .enumerate()
+                        .map(|(index, group)| {
+                            let adding = group.to_import();
+                            div()
+                                .px(px(space::LG))
+                                .py(px(space::MD))
+                                .flex()
+                                .items_center()
+                                .gap(px(space::MD))
+                                .when(index < last, |s| s.border_b_1().border_color(rgb(LINE)))
+                                .child(icon(
+                                    glyph.unwrap_or_else(|| category_icon(&group.name)),
+                                    IconSize::Medium,
+                                    MUTED,
+                                ))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .child(
+                                            div()
+                                                .type_style(Type::Body)
+                                                .text_ellipsis()
+                                                .child(group.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .type_style(Type::Caption)
+                                                .text_color(rgb(MUTED))
+                                                .child(group_breakdown(group)),
+                                        ),
+                                )
+                                .child(if adding > 0 {
+                                    div()
+                                        .flex_shrink_0()
+                                        .type_style(Type::Label)
+                                        .font_weight(font::EMPHASIS)
+                                        .child(format!("+{adding}"))
+                                } else {
+                                    div()
+                                        .flex_shrink_0()
+                                        .type_style(Type::Small)
+                                        .text_color(rgb(MUTED))
+                                        .child("Nothing new")
+                                })
+                        }),
+                ),
+        )
+        .when(hidden > 0, |s| {
+            s.child(
+                div()
+                    .type_style(Type::Caption)
+                    .text_color(rgb(MUTED))
+                    .child(format!("And {hidden} more")),
+            )
+        })
 }

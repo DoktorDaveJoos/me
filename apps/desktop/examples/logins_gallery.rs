@@ -13,7 +13,7 @@ mod shell {
     pub fn fixture(
         cx: &mut Context<MeApp>,
         window: &mut Window,
-        vault: Vault,
+        mut vault: Vault,
         mode: String,
         fixture: PathBuf,
     ) -> MeApp {
@@ -43,10 +43,23 @@ mod shell {
                 app.logins.error = Some("Couldn't open this login. Try again.".into());
             }
         }
+        let imported = (mode == "done").then(|| {
+            vault
+                .import_onepassword(&me_core::OnePasswordImport::read(&fixture).unwrap())
+                .unwrap()
+        });
         app.session = Arc::new(Mutex::new(Some(vault)));
-        if mode == "preview" {
+        if matches!(mode.as_str(), "import" | "preview" | "checking" | "done") {
             app.show_onepassword = true;
+        }
+        if mode == "preview" {
             app.prepare_onepassword(fixture, cx);
+        } else if mode == "checking" {
+            app.onepassword_step = credentials_ui::OnePasswordStep::Checking;
+            app.busy = true;
+        } else if let Some(result) = imported {
+            app.onepassword_result = Some(result);
+            app.onepassword_step = credentials_ui::OnePasswordStep::Done;
         }
         if matches!(
             mode.as_str(),
@@ -136,7 +149,10 @@ fn main() {
         me_core::Vault::create(&root, "synthetic-gallery-passphrase").unwrap()
     };
     vault.set_automatic_evaluation(false).unwrap();
-    if !matches!(mode.as_str(), "empty" | "preview" | "error") {
+    if !matches!(
+        mode.as_str(),
+        "empty" | "preview" | "error" | "import" | "checking" | "done"
+    ) {
         vault
             .import_onepassword(&me_core::OnePasswordImport::read(&fixture).unwrap())
             .unwrap();

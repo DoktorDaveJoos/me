@@ -151,8 +151,10 @@ impl MeApp {
         }) {
             if paths.len() == 1 {
                 self.cancel_import_confirmation(cx);
-                self.show_settings = true;
+                self.page = Page::Logins;
+                self.show_settings = false;
                 self.show_onepassword = true;
+                self.refresh_logins(cx);
                 self.prepare_onepassword(paths[0].clone(), cx);
             } else {
                 self.error = Some(

@@ -152,6 +152,45 @@ pub fn checkbox(checked: bool, label: &'static str) -> Div {
         .child(div().flex_1().min_w_0().child(label))
 }
 
+/// Numbered progress for multi-step flows: completed steps show a check,
+/// the current step is accent-colored and later steps stay muted.
+pub fn step_rail(labels: &[&'static str], step: usize) -> Div {
+    div()
+        .flex()
+        .gap(px(space::SM))
+        .children(labels.iter().copied().enumerate().map(|(index, label)| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(space::SM))
+                .child(
+                    div()
+                        .h(px(space::MICRO))
+                        .bg(rgb(if index <= step { ACCENT } else { LINE })),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::XS))
+                        .type_style(Type::Caption)
+                        .text_color(rgb(if index == step { ACCENT } else { MUTED }))
+                        .child(if index < step {
+                            crate::assets::icon(Icon::Check, IconSize::Small, ACCENT)
+                                .into_any_element()
+                        } else {
+                            div()
+                                .font_family(font::MONO)
+                                .child(format!("0{}", index + 1))
+                                .into_any_element()
+                        })
+                        .child(label),
+                )
+        }))
+}
+
 /// Dialogs share their surface, border, inset and content rhythm.
 pub fn modal_panel(width: f32, animated: bool) -> Div {
     div()

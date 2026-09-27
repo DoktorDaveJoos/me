@@ -1,19 +1,25 @@
 # Import from 1Password
 
-Use **Logins → Import** or **Settings → 1Password** to select a `.1pux` export
-from 1Password 8. Dropping a `.1pux` file also reaches the import review. The
-import confirmation requires a 1PUX export to be selected on its own.
+Use **Logins → Import** or **Settings → Import from 1Password…** to open the
+import dialog on Logins. Dropping a `.1pux` file on the dialog, or confirming a
+dropped export on its own, also opens it. The dialog shows one step at a time:
 
-1. Export from 1Password with **File → Export → 1PUX**.
-2. Select the export in ME. Parsing and validation run locally in a worker.
-3. Review the counts of new, unchanged, changed and archived items, and vaults.
-4. Import. Unchanged items are skipped. Changed items are additional versions;
-   existing credentials are never overwritten. Favorites become pinned items.
-5. Open **Logins** for the list and inline detail/editor. Other categories remain
+1. **Export** explains how to export with **File → Export → 1PUX** and what is
+   included. Choose the file or drop it on the dialog. Parsing and validation run
+   locally in a worker while a Checking state is shown.
+2. **Review** shows how many entries will be added, split into new, changed and
+   already-present entries, then a breakdown by entry type and by vault (names and
+   counts only), plus archived entries and exported files. Nothing is saved yet.
+   **Choose another file** returns to the first step.
+3. **Import** commits in one transaction. Unchanged items are skipped. Changed
+   items are additional versions; existing credentials are never overwritten.
+   Favorites become pinned items. The result step repeats the counts and asks you
+   to delete the unencrypted export.
+4. Open **Logins** for the list and inline detail/editor. Other categories remain
    available through Search and Browser. Reveal or copy individual fields.
    Values are hidden again after 30 seconds. Copied values expire after 30 seconds
    if the clipboard has not been replaced. Lock clears the view and owned clipboard.
-6. Check the imported data, then delete the plaintext export yourself.
+5. Check the imported data, then delete the plaintext export yourself.
 
 The import supports 1PUX version 3. CSV and legacy 1PIF imports are not implemented.
 Passkeys are not included in 1Password's desktop exports. OTP secrets/URIs are
@@ -147,7 +153,8 @@ For an isolated native preview:
 ME_VAULT_DIR=/tmp/me-logins-preview/vault ./scripts/cargo run --release -p me-app --example logins_gallery -- list
 ```
 
-The gallery accepts `list`, `edit`, `empty`, `preview`, `error`, or `no-match`, plus
+The gallery accepts `list`, `edit`, `empty`, `import`, `checking`, `preview`, `done`,
+`error`, or `no-match`, plus
 `small` for 800×600. Use a fresh `/tmp` vault for empty/preview states. The gallery
 never connects to a provider. The same test vault can be reopened to check saved
 edits. Normal user testing can import the fixture through Logins → Import.

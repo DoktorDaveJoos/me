@@ -69,40 +69,7 @@ impl MeApp {
                 _ => &["Account", "Recovery", "ChatGPT"],
             }
         };
-        let rail =
-            div()
-                .flex()
-                .gap(px(space::SM))
-                .children(labels.iter().copied().enumerate().map(|(index, label)| {
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(space::SM))
-                        .child(div().h(px(space::MICRO)).bg(rgb(if index <= step {
-                            ACCENT
-                        } else {
-                            LINE
-                        })))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(space::XS))
-                                .type_style(Type::Caption)
-                                .text_color(rgb(if index == step { ACCENT } else { MUTED }))
-                                .child(if index < step {
-                                    icon(Icon::Check, IconSize::Small, ACCENT).into_any_element()
-                                } else {
-                                    div()
-                                        .font_family(font::MONO)
-                                        .child(format!("0{}", index + 1))
-                                        .into_any_element()
-                                })
-                                .child(label),
-                        )
-                }));
+        let rail = step_rail(labels, step);
         let panel = div()
             .w(px(layout::ONBOARDING_PANEL_WIDTH))
             .max_w_full()

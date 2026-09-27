@@ -847,10 +847,8 @@ impl MeApp {
                                     .child(
                                         secondary_action()
                                             .id("login-import")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                if !this.login_edit_guard(cx) {
-                                                    this.pick_onepassword(cx);
-                                                }
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.open_onepassword_import(window, cx)
                                             }))
                                             .child("Import"),
                                     ),
@@ -1483,28 +1481,6 @@ impl MeApp {
             } else {
                 input.clone().into_any_element()
             })
-    }
-    pub(super) fn login_import_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        self.overlay(cx).child(
-            modal_panel(688., self.motion_enabled())
-                .max_h(px(520.))
-                .id("login-import-modal")
-                .overflow_y_scroll()
-                .child(self.onepassword_settings(cx))
-                .child(
-                    secondary_action()
-                        .id("close-login-import")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if !this.busy {
-                                this.show_onepassword = false;
-                                this.clear_credentials(cx);
-                                this.refresh_logins(cx);
-                                cx.notify();
-                            }
-                        }))
-                        .child("Done"),
-                ),
-        )
     }
 }
 

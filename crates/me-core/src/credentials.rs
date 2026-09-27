@@ -50,11 +50,37 @@ pub struct OnePasswordSummary {
     pub changed: usize,
     pub archived: usize,
     pub files: usize,
-    pub vaults: Vec<(String, usize)>,
+    /// Entry types (1Password categories), largest first.
+    pub categories: Vec<OnePasswordGroup>,
+    /// Vaults by name, largest first.
+    pub vaults: Vec<OnePasswordGroup>,
 }
 impl OnePasswordSummary {
     pub fn to_import(&self) -> usize {
         self.new + self.changed
+    }
+}
+/// Import outcome for one entry type or vault. Contains names and counts only.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct OnePasswordGroup {
+    pub name: String,
+    pub new: usize,
+    pub changed: usize,
+    pub unchanged: usize,
+}
+impl OnePasswordGroup {
+    pub fn total(&self) -> usize {
+        self.new + self.changed + self.unchanged
+    }
+    pub fn to_import(&self) -> usize {
+        self.new + self.changed
+    }
+    fn add(&mut self, status: IdentityStatus) {
+        match status {
+            IdentityStatus::New => self.new += 1,
+            IdentityStatus::Duplicate => self.unchanged += 1,
+            IdentityStatus::Changed => self.changed += 1,
+        }
     }
 }
 
@@ -596,7 +622,7 @@ impl Vault {
         Ok(Zeroizing::new(data))
     }
 }
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum IdentityStatus {
     New,
     Duplicate,
@@ -616,18 +642,35 @@ fn summarize(db: &rusqlite::Connection, import: &OnePasswordImport) -> Result<On
         files: import.files,
         ..Default::default()
     };
-    let mut vaults = BTreeMap::new();
+    let mut categories = BTreeMap::<&str, OnePasswordGroup>::new();
+    let mut vaults = BTreeMap::<&str, OnePasswordGroup>::new();
     for item in &import.items {
-        match identity_status(db, item)? {
+        let status = identity_status(db, item)?;
+        match status {
             IdentityStatus::New => result.new += 1,
             IdentityStatus::Duplicate => result.duplicates += 1,
             IdentityStatus::Changed => result.changed += 1,
         }
         result.archived += usize::from(item.archived);
-        *vaults.entry(item.vault_name.clone()).or_insert(0) += 1;
+        let category = credential_category(&item.category);
+        categories.entry(category).or_default().add(status);
+        vaults.entry(&item.vault_name).or_default().add(status);
     }
-    result.vaults = vaults.into_iter().collect();
+    result.categories = ranked_groups(categories);
+    result.vaults = ranked_groups(vaults);
     Ok(result)
+}
+fn ranked_groups(groups: BTreeMap<&str, OnePasswordGroup>) -> Vec<OnePasswordGroup> {
+    let mut groups: Vec<_> = groups
+        .into_iter()
+        .map(|(name, group)| OnePasswordGroup {
+            name: name.into(),
+            ..group
+        })
+        .collect();
+    // Stable sort keeps names alphabetical within equal sizes.
+    groups.sort_by_key(|g| std::cmp::Reverse(g.total()));
+    groups
 }
 
 #[cfg(test)]
@@ -1350,6 +1393,45 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+    #[test]
+    fn preview_breaks_down_outcomes_by_entry_type_and_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        v.import_onepassword(&batch(vec![login()])).unwrap();
+        let mut changed = login();
+        changed["details"]["loginFields"][1]["value"] = json!("replacement");
+        let mut second = login();
+        second["uuid"] = json!("item2");
+        let mut note = login();
+        note["uuid"] = json!("item3");
+        note["categoryUuid"] = json!("003");
+        let mut input = data(vec![changed, second]);
+        input["accounts"][0]["vaults"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"attrs":{"uuid":"vault2","name":"Work"},"items":[note, login()]}));
+        let import = OnePasswordImport::from_bytes(archive(&input, &[])).unwrap();
+        let preview = v.preview_onepassword(&import).unwrap();
+        let group = |name: &str, new, changed, unchanged| OnePasswordGroup {
+            name: name.into(),
+            new,
+            changed,
+            unchanged,
+        };
+        assert_eq!(
+            preview.categories,
+            [group("Login", 2, 1, 0), group("Secure note", 1, 0, 0)]
+        );
+        assert_eq!(
+            preview.vaults,
+            [group("Personal", 1, 1, 0), group("Work", 2, 0, 0)]
+        );
+        assert_eq!(preview.to_import(), 4);
+        v.import_onepassword(&import).unwrap();
+        let repeat = v.preview_onepassword(&import).unwrap();
+        assert_eq!(repeat.categories[0], group("Login", 0, 0, 3));
+        assert_eq!(repeat.to_import(), 0);
     }
     #[test]
     fn item_identity_is_scoped_to_account_and_vault() {

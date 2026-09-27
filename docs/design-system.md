@@ -124,6 +124,10 @@ it is not a contrast/accessibility certification.
   radius, a 2 px ink outline when unchecked and accent-filled with an ME Outline check when
   checked. Its label shares a minimum 44 px hit row. Callers supply state, focus,
   keyboard activation and busy behavior; labels stay stable when toggled.
+- `step_rail(labels, step)`: numbered progress for multi-step flows (account
+  onboarding, identity setup, 1Password import). A 2 px bar per step, `ACCENT`
+  through the current step; completed steps show a check, later steps stay muted.
+  Pass `labels.len()` as the step to mark the flow complete.
 - `modal_panel(width, animated)`: shared white surface, 1 px border, 8 px radius, 24 px inset
   and 24 px content gap, constrained to the available width. The feature owns
   scrolling and maximum height. The common overlay owns the scrim.
@@ -530,3 +534,17 @@ Secret text inputs use Geist Mono in masked, revealed and frozen states; reveali
 never switches back to a proportional face. Ordinary text fields keep Geist.
 Notes remain readable in the unlocked vault. Shared recipe cells draw once over
 `FRAME_TRACE_MS` after generation; reduced motion shows settled outlines.
+
+## 1Password import dialog
+
+Import is a 600 px `modal_panel` on the shared scrim, constrained to the viewport
+with `space::LG` clearance. The header (key tile, title, subtitle, Close) and
+`step_rail` (Export · Review · Import) stay fixed; only the body scrolls; the
+action footer stays fixed. Each step replaces the body instead of stacking.
+Export lists numbered 1Password instructions in an inset `BG` card and what comes
+across with ME Outline icons. Review leads with the total to be added, three
+equal stat tiles (New, Changed, Already in ME) and bordered By type / By vault
+lists with a `+N` count per row; zero counts use `FAINT`. Done uses a success
+card and the shared warning surface for deleting the plaintext export. Errors use
+the danger surface inside the current step. No new tokens were added.
+
