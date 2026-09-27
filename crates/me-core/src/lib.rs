@@ -18,6 +18,8 @@ mod graph;
 pub use graph::*;
 mod typing;
 pub use typing::*;
+mod coverage;
+pub use coverage::*;
 mod intake;
 pub use intake::*;
 mod authority;
