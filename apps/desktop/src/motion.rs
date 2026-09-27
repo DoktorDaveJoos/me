@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy)]
 pub enum Field {
-    /// Locked screens: a wide perimeter band around the account form.
+    /// Locked screens: an uneven perimeter band around the account form.
     Identity,
-    /// Unlocked window: one thin ring shared by the sidebar and workspace.
-    Window,
+    /// Unlocked content: an off-balance pair of lobes, top right and lower left.
+    Workspace,
 }
 #[derive(Clone, Copy)]
 pub enum Frame {
@@ -78,23 +78,22 @@ pub fn overlay(content: AnyElement, key: impl Into<ElementId>, enabled: bool) ->
 
 /// Add before foreground siblings; GPUI paints children in insertion order.
 /// Keep activity beside this field in that same background layer.
-/// `ambient` is the throttled ambient clock in seconds; `None` holds the lattice still.
-pub fn field(kind: Field, enabled: bool, ambient: Option<f32>) -> AnyElement {
+pub fn field(kind: Field, enabled: bool) -> AnyElement {
     let body = div().absolute().inset_0().overflow_hidden();
     if !enabled {
-        return body.child(field_at(kind, 1., None)).into_any_element();
+        return body.child(field_at(kind, 1.)).into_any_element();
     }
     body.with_animation(
         ("honeycomb-field", kind as usize),
         Animation::new(Duration::from_millis(timing::FIELD_ENTER_MS)),
-        move |el, t| el.child(field_at(kind, t, ambient)),
+        move |el, t| el.child(field_at(kind, t)),
     )
     .into_any_element()
 }
 
-/// Busy-only, clockwise pulsing light moving through the perimeter lattice.
+/// Busy-only, clockwise pulsing light moving through the existing lattice.
 /// There is no timer or minimum duration between the operation and its next step.
-pub fn activity(kind: Field, enabled: bool, ambient: Option<f32>) -> AnyElement {
+pub fn activity(kind: Field, enabled: bool) -> AnyElement {
     let body = div().absolute().inset_0().overflow_hidden();
     if !enabled {
         return body.into_any_element();
@@ -107,7 +106,7 @@ pub fn activity(kind: Field, enabled: bool, ambient: Option<f32>) -> AnyElement 
                 canvas(
                     |_, _, _| (),
                     move |bounds, _, window, _| {
-                        paint_activity(bounds, kind, t, ambient, window);
+                        paint_activity(bounds, kind, t, window);
                     },
                 )
                 .absolute()
@@ -116,44 +115,6 @@ pub fn activity(kind: Field, enabled: bool, ambient: Option<f32>) -> AnyElement 
         },
     )
     .into_any_element()
-}
-
-/// Advances the ambient clock by one throttled tick. Long stalls are capped so a
-/// resumed window continues smoothly; every ambient period divides the cycle.
-pub fn advance_ambient(seconds: f32, elapsed: Duration) -> f32 {
-    (seconds + elapsed.as_secs_f32().min(timing::AMBIENT_MAX_STEP))
-        .rem_euclid(timing::AMBIENT_CYCLE)
-}
-
-/// A slow Lissajous drift of the whole lattice, a few pixels at most.
-fn drift(ambient: Option<f32>) -> Point<f32> {
-    let Some(seconds) = ambient else {
-        return point(0., 0.);
-    };
-    let tau = std::f32::consts::TAU;
-    point(
-        timing::DRIFT_AMPLITUDE * (tau * seconds / timing::DRIFT_PERIOD_X).sin(),
-        timing::DRIFT_AMPLITUDE * 0.75 * (tau * seconds / timing::DRIFT_PERIOD_Y).sin(),
-    )
-}
-
-/// A diagonal band of light sweeping across the embossed highlights.
-fn shimmer(ambient: Option<f32>, at: Point<f32>) -> f32 {
-    ambient.map_or(1., |seconds| {
-        let wave = 0.5
-            + 0.5
-                * (std::f32::consts::TAU
-                    * ((at.x + at.y) / timing::SHIMMER_WAVELENGTH
-                        - seconds / timing::SHIMMER_PERIOD))
-                    .cos();
-        1. - timing::SHIMMER_DEPTH * (1. - wave)
-    })
-}
-
-/// Brightness of the activity wave; `progress` is its lap, so the pulse loops seamlessly.
-fn pulse(progress: f32) -> f32 {
-    let wave = 0.5 - 0.5 * (std::f32::consts::TAU * timing::ACTIVITY_PULSES * progress).cos();
-    timing::ACTIVITY_PULSE_FLOOR + (1. - timing::ACTIVITY_PULSE_FLOOR) * wave
 }
 
 /// A small progress drawing, using the same stroke and tint as ME Outline.
@@ -193,47 +154,62 @@ pub fn spinner(enabled: bool) -> AnyElement {
     .into_any_element()
 }
 
-fn paint_activity(
-    bounds: Bounds<Pixels>,
-    kind: Field,
-    progress: f32,
-    ambient: Option<f32>,
-    window: &mut Window,
-) {
-    let mask = Mask::of(kind, window);
+fn paint_activity(bounds: Bounds<Pixels>, kind: Field, progress: f32, window: &mut Window) {
+    let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+    if w <= 0. || h <= 0. {
+        return;
+    }
     let size = field_cell_size(kind);
+    let width = 3f32.sqrt() * size;
+    let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
     let pulse = pulse(progress);
     let mut lights = FadedPaths::strokes(timing::TRACE_STROKE);
     let mut glow = FadedPaths::fills();
-    // Angles are measured around the window center, so the wave laps the whole
-    // window even when the sidebar and workspace paint separate regions.
-    for (_, _, center) in cells(mask, bounds, drift(ambient)) {
-        let position = (((center.y / mask.h - 0.5).atan2(center.x / mask.w - 0.5)
-            + std::f32::consts::FRAC_PI_2)
-            / std::f32::consts::TAU)
-            .rem_euclid(1.);
-        let distance = (progress - position).rem_euclid(1.);
-        if distance >= timing::ACCOUNT_ACTIVITY_TAIL {
-            continue;
+    for r in -1..=(h / (1.5 * size)).ceil() as i32 + 1 {
+        for q in -1..=(w / width).ceil() as i32 + 1 {
+            let x = q as f32 * width + if r.rem_euclid(2) == 0 { 0. } else { width / 2. };
+            let y = r as f32 * 1.5 * size;
+            if !field_cell_visible(kind, x, y, w, h, size) {
+                continue;
+            }
+            let Some(cell) = organic_cell(kind, q, r, x, y, w, h) else {
+                continue;
+            };
+            let position = (((y / h - 0.5).atan2(x / w - 0.5) + std::f32::consts::FRAC_PI_2)
+                / std::f32::consts::TAU)
+                .rem_euclid(1.);
+            let distance = (progress - position).rem_euclid(1.);
+            if distance >= timing::ACCOUNT_ACTIVITY_TAIL {
+                continue;
+            }
+            let strength = (distance / timing::ACCOUNT_ACTIVITY_TAIL * std::f32::consts::PI)
+                .sin()
+                .powi(2)
+                * pulse;
+            let outline = hex_outline(point(ox + x, oy + y), size, radius::STANDARD);
+            lights.stroke_alpha(&outline, kind, bounds, strength);
+            glow.fill(
+                &outline,
+                field_fade(kind, x, y, w, h) * cell.tone * strength,
+            );
         }
-        let strength = (distance / timing::ACCOUNT_ACTIVITY_TAIL * std::f32::consts::PI)
-            .sin()
-            .powi(2)
-            * pulse;
-        let outline = hex_outline(center, size, radius::STANDARD);
-        lights.stroke_alpha(&outline, mask, strength);
-        glow.fill(&outline, mask.fade(center) * strength);
     }
     let emphasis = field_opacity(kind) / timing::FIELD_OPACITY;
     glow.paint(window, ACCENT, timing::ACTIVITY_FILL_OPACITY * emphasis);
     lights.paint(window, ACCENT, timing::TRACE_OPACITY * emphasis);
 }
 
+/// Brightness of the activity wave; `progress` is its lap, so the pulse loops seamlessly.
+fn pulse(progress: f32) -> f32 {
+    let wave = 0.5 - 0.5 * (std::f32::consts::TAU * timing::ACTIVITY_PULSES * progress).cos();
+    timing::ACTIVITY_PULSE_FLOOR + (1. - timing::ACTIVITY_PULSE_FLOOR) * wave
+}
+
 /// Also used by the synthetic gallery to inspect exact drawing phases.
-pub fn field_at(kind: Field, progress: f32, ambient: Option<f32>) -> impl IntoElement {
+pub fn field_at(kind: Field, progress: f32) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        move |bounds, _, window, _| paint_field(bounds, kind, progress, ambient, window),
+        move |bounds, _, window, _| paint_field(bounds, kind, progress, window),
     )
     .absolute()
     .size_full()
@@ -678,92 +654,134 @@ fn paint(window: &mut Window, builder: PathBuilder, color: u32, opacity: f32) {
     }
 }
 
-/// All drawing layers, including busy highlights, share one continuous mask in
-/// window coordinates, fading inward from every window edge.
-#[derive(Clone, Copy)]
-struct Mask {
-    kind: Field,
-    w: f32,
-    h: f32,
-}
-impl Mask {
-    fn of(kind: Field, window: &Window) -> Self {
-        let viewport = window.viewport_size();
-        Self {
-            kind,
-            w: f32::from(viewport.width),
-            h: f32::from(viewport.height),
+/// All drawing layers, including busy highlights, use the same continuous mask.
+/// Value noise bends its boundary into lobes, so no two edges look alike.
+fn field_depth(kind: Field, x: f32, y: f32, w: f32, h: f32) -> f32 {
+    let base = match kind {
+        Field::Identity => {
+            // The band's reach varies slowly along the edges: deep in some
+            // places, almost absent in others.
+            let reach = timing::ORGANIC_REACH_MIN
+                + timing::ORGANIC_REACH_RANGE
+                    * noise(
+                        x / timing::ORGANIC_REACH_SCALE,
+                        y / timing::ORGANIC_REACH_SCALE,
+                    );
+            x.min(w - x).min(y).min(h - y).max(0.) / (timing::FIELD_BAND * reach)
         }
-    }
-    fn edge(self, at: Point<f32>) -> f32 {
-        at.x.min(self.w - at.x).min(at.y).min(self.h - at.y)
-    }
-    fn depth(self, at: Point<f32>) -> f32 {
-        self.edge(at).max(0.) / field_band(self.kind)
-    }
-    fn fade(self, at: Point<f32>) -> f32 {
-        let t = self.depth(at).clamp(0., 1.);
-        1. - t * t * (3. - 2. * t)
+        // Anchored to the top-right corner so resizing keeps the same silhouette.
+        Field::Workspace => {
+            let header = ((w - x).max(0.) / timing::HEADER_FIELD_WIDTH)
+                .hypot(y.max(0.) / timing::HEADER_FIELD_HEIGHT);
+            let foot = (x.max(0.) / timing::FOOT_FIELD_WIDTH)
+                .hypot((h - y).max(0.) / timing::FOOT_FIELD_HEIGHT);
+            header.min(foot)
+        }
+    };
+    let (u, v) = match kind {
+        Field::Identity => (x, y),
+        Field::Workspace => (w - x, y),
+    };
+    base + timing::ORGANIC_WARP
+        * (noise(
+            u / timing::ORGANIC_WARP_SCALE + 17.,
+            v / timing::ORGANIC_WARP_SCALE + 5.,
+        ) - 0.5)
+        * 2.
+}
+fn field_fade(kind: Field, x: f32, y: f32, w: f32, h: f32) -> f32 {
+    let t = field_depth(kind, x, y, w, h).clamp(0., 1.);
+    1. - t * t * (3. - 2. * t)
+}
+fn field_cell_visible(kind: Field, x: f32, y: f32, w: f32, h: f32, size: f32) -> bool {
+    match kind {
+        Field::Identity => {
+            x.min(w - x).min(y).min(h - y)
+                <= timing::FIELD_BAND * (timing::ORGANIC_REACH_MIN + timing::ORGANIC_REACH_RANGE)
+                    + size
+        }
+        // Keep cells whose outermost strokes still meet the fade, even when their
+        // center is outside it. Culling at the center produces truncated hexagons.
+        Field::Workspace => {
+            field_depth(kind, x + size, y - size, w, h).min(field_depth(
+                kind,
+                x - size,
+                y + size,
+                w,
+                h,
+            )) < 1.
+        }
     }
 }
 
-/// Lattice cells that can touch `bounds`, as (column, row, window-space center).
-/// The lattice is anchored to the window rather than the painting element, so
-/// cells continue seamlessly across the sidebar border.
-fn cells(
-    mask: Mask,
-    bounds: Bounds<Pixels>,
-    offset: Point<f32>,
-) -> impl Iterator<Item = (i32, i32, Point<f32>)> {
-    let size = field_cell_size(mask.kind);
-    let width = 3f32.sqrt() * size;
-    let (left, top) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-    let (right, bottom) = (
-        left + f32::from(bounds.size.width),
-        top + f32::from(bounds.size.height),
-    );
-    let rows = ((top - size - offset.y) / (1.5 * size)).floor() as i32 - 1
-        ..=((bottom + size - offset.y) / (1.5 * size)).ceil() as i32 + 1;
-    let columns = ((left - size - offset.x) / width).floor() as i32 - 1
-        ..=((right + size - offset.x) / width).ceil() as i32 + 1;
-    let empty = right <= left || bottom <= top;
-    rows.flat_map(move |r| columns.clone().map(move |q| (q, r)))
-        .filter(move |_| !empty)
-        .filter_map(move |(q, r)| {
-            let shift = if r.rem_euclid(2) == 0 { 0. } else { width / 2. };
-            let center = point(
-                q as f32 * width + shift + offset.x,
-                r as f32 * 1.5 * size + offset.y,
-            );
-            // Keep cells whose outer strokes still meet the band or the region,
-            // even when their center is outside. Center culling truncates hexagons.
-            let touches = center.x + size >= left
-                && center.x - size <= right
-                && center.y + size >= top
-                && center.y - size <= bottom;
-            (touches && mask.edge(center) <= field_band(mask.kind) + size).then_some((q, r, center))
-        })
+/// Per-cell organic variation, derived only from lattice coordinates.
+struct OrganicCell {
+    /// Opacity multiplier, so neighboring cells differ in weight.
+    tone: f32,
+    /// Share of the outline drawn; fringe cells open into arcs.
+    coverage: f32,
+    /// Where an open arc starts, as a corner index.
+    start: usize,
+    cube: bool,
 }
-fn field_band(kind: Field) -> f32 {
-    match kind {
-        Field::Identity => timing::FIELD_BAND,
-        Field::Window => timing::WINDOW_FIELD_BAND,
+/// `None` leaves a hole. Holes and open arcs grow toward the fringe while the
+/// core stays whole, so the field dissolves instead of stopping at a line.
+fn organic_cell(
+    kind: Field,
+    q: i32,
+    r: i32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Option<OrganicCell> {
+    let depth = field_depth(kind, x, y, w, h).clamp(0., 1.);
+    let seed = |salt: i32| {
+        hash(
+            q.wrapping_mul(3).wrapping_add(salt),
+            r.wrapping_mul(5).wrapping_sub(salt),
+        )
+    };
+    if seed(1) < timing::ORGANIC_HOLES * depth * depth {
+        return None;
     }
+    let open =
+        ((depth - timing::ORGANIC_OPEN_FROM) / (1. - timing::ORGANIC_OPEN_FROM)).clamp(0., 1.);
+    Some(OrganicCell {
+        tone: 1. - timing::ORGANIC_TONE * seed(2),
+        coverage: 1. - open * (0.35 + 0.5 * seed(3)),
+        start: (seed(4) * 6.) as usize % 6,
+        cube: seed(5) < timing::ORGANIC_CUBE_SHARE,
+    })
 }
-fn field_cell_size(kind: Field) -> f32 {
-    match kind {
-        Field::Identity => timing::FIELD_CELL_RADIUS,
-        Field::Window => timing::WINDOW_CELL_RADIUS,
-    }
+/// Stable integer hash in [0, 1).
+fn hash(x: i32, y: i32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(668_265_261) ^ (y as u32).wrapping_mul(374_761_393);
+    h ^= h >> 15;
+    h = h.wrapping_mul(2_246_822_507);
+    h ^= h >> 13;
+    h = h.wrapping_mul(3_266_489_909);
+    h ^= h >> 16;
+    (h & 0xffff) as f32 / 65536.
+}
+/// Smooth 2D value noise in [0, 1].
+fn noise(x: f32, y: f32) -> f32 {
+    let (ix, iy) = (x.floor(), y.floor());
+    let (fx, fy) = (x - ix, y - iy);
+    let (sx, sy) = (fx * fx * (3. - 2. * fx), fy * fy * (3. - 2. * fy));
+    let (ix, iy) = (ix as i32, iy as i32);
+    let top = hash(ix, iy) + (hash(ix + 1, iy) - hash(ix, iy)) * sx;
+    let bottom = hash(ix, iy + 1) + (hash(ix + 1, iy + 1) - hash(ix, iy + 1)) * sx;
+    top + (bottom - top) * sy
+}
+fn field_cell_size(_: Field) -> f32 {
+    timing::FIELD_CELL_RADIUS
 }
 fn field_opacity(kind: Field) -> f32 {
     match kind {
         Field::Identity => timing::FIELD_OPACITY,
-        Field::Window => timing::WINDOW_FIELD_OPACITY,
+        Field::Workspace => timing::HEADER_FIELD_OPACITY,
     }
-}
-fn shifted(points: &[Point<f32>], by: f32) -> Vec<Point<f32>> {
-    points.iter().map(|p| point(p.x + by, p.y + by)).collect()
 }
 
 /// Short segments share 32 alpha batches, keeping the fade smooth without a
@@ -793,26 +811,17 @@ impl FadedPaths {
             .min(timing::FIELD_FADE_BUCKETS - 1);
         self.0.get_mut(index)
     }
-    fn stroke(&mut self, points: &[Point<f32>], mask: Mask) {
-        self.stroke_alpha(points, mask, 1.);
+    fn stroke(&mut self, points: &[Point<f32>], kind: Field, bounds: Bounds<Pixels>) {
+        self.stroke_alpha(points, kind, bounds, 1.);
     }
-    /// Whole-cell strokes at one alpha: cheap for the faint emboss layers.
-    fn outline(&mut self, points: &[Point<f32>], alpha: f32) {
-        if points.len() > 1
-            && let Some(path) = self.bucket(alpha)
-        {
-            stroke_points(path, points);
-        }
-    }
-    fn fill(&mut self, points: &[Point<f32>], alpha: f32) {
-        if points.len() > 2
-            && let Some(path) = self.bucket(alpha)
-        {
-            stroke_points(path, points);
-            path.close();
-        }
-    }
-    fn stroke_alpha(&mut self, points: &[Point<f32>], mask: Mask, opacity: f32) {
+    fn stroke_alpha(
+        &mut self,
+        points: &[Point<f32>],
+        kind: Field,
+        bounds: Bounds<Pixels>,
+        opacity: f32,
+    ) {
+        let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
         for line in points.windows(2) {
             let a = line[0];
             let b = line[1];
@@ -824,10 +833,25 @@ impl FadedPaths {
                 let start = at(i as f32 / count as f32);
                 let end = at((i + 1) as f32 / count as f32);
                 let mid = at((i as f32 + 0.5) / count as f32);
-                if let Some(path) = self.bucket(mask.fade(mid) * opacity) {
+                let alpha = field_fade(
+                    kind,
+                    mid.x - ox,
+                    mid.y - oy,
+                    f32::from(bounds.size.width),
+                    f32::from(bounds.size.height),
+                );
+                if let Some(path) = self.bucket(alpha * opacity) {
                     stroke_points(path, &[start, end]);
                 }
             }
+        }
+    }
+    fn fill(&mut self, points: &[Point<f32>], alpha: f32) {
+        if points.len() > 2
+            && let Some(path) = self.bucket(alpha)
+        {
+            stroke_points(path, points);
+            path.close();
         }
     }
     fn dot(&mut self, center: Point<f32>, alpha: f32) {
@@ -857,67 +881,73 @@ impl FadedPaths {
     }
 }
 
-/// Four fronts converge from the viewport perimeter. Afterwards only the
-/// throttled ambient clock moves the lattice, and only while it is running.
-fn paint_field(
-    bounds: Bounds<Pixels>,
-    kind: Field,
-    progress: f32,
-    ambient: Option<f32>,
-    window: &mut Window,
-) {
-    let mask = Mask::of(kind, window);
+/// Four fronts converge from the viewport perimeter, then all animation stops.
+fn paint_field(bounds: Bounds<Pixels>, kind: Field, progress: f32, window: &mut Window) {
+    let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+    if w <= 0. || h <= 0. {
+        return;
+    }
     let size = field_cell_size(kind);
-    let mut shadows = FadedPaths::strokes(timing::FIELD_SHADOW_STROKE);
+    let width = 3f32.sqrt() * size;
+    let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
     let mut structure = FadedPaths::strokes(timing::FIELD_STROKE);
-    let mut highlights = FadedPaths::strokes(timing::FIELD_STROKE);
     let mut fronts = FadedPaths::strokes(timing::TRACE_STROKE);
     let mut cubes = FadedPaths::strokes(timing::FIELD_STROKE);
     let mut dots = FadedPaths::fills();
-    for (q, r, center) in cells(mask, bounds, drift(ambient)) {
-        let stagger = ((q * 17 + r * 31).rem_euclid(11) as f32) / 11. * timing::FIELD_STAGGER;
-        let delay = mask.depth(center).clamp(0., 1.) * timing::FIELD_SPREAD + stagger;
-        let local = ((progress - delay) / timing::CELL_DRAW_FRACTION).clamp(0., 1.);
-        if local <= 0. {
-            continue;
-        }
-        let mut outline = hex_outline(center, size, radius::STANDARD);
-        if (q + r).rem_euclid(2) == 0 {
-            outline.reverse();
-        }
-        let revealed = trace(&outline, local);
-        let fade = mask.fade(center);
-        // Embossed depth: a soft drop line below-right and a light edge above-left.
-        shadows.outline(&shifted(&revealed, timing::FIELD_SHADOW_OFFSET), fade);
-        structure.stroke(&revealed, mask);
-        highlights.outline(
-            &shifted(&revealed, -timing::FIELD_HIGHLIGHT_OFFSET),
-            fade * shimmer(ambient, center),
-        );
-        if local < 1. {
-            fronts.stroke(
-                &trace_range(&outline, (local - timing::TRACE_TAIL).max(0.), local),
-                mask,
-            );
-        }
-        // Three inner edges turn selected hexagons into quiet isometric cubes.
-        if (q + r * 2).rem_euclid(4) == 0 {
-            for index in 0..3 {
-                let angle = (index as f32 * 120. - 30.).to_radians();
-                let distance = size - radius::STANDARD / 3.;
-                let vertex = point(
-                    center.x + angle.cos() * distance,
-                    center.y + angle.sin() * distance,
-                );
-                cubes.stroke(&trace(&[center, vertex], local), mask);
+    for r in -1..=(h / (1.5 * size)).ceil() as i32 + 1 {
+        for q in -1..=(w / width).ceil() as i32 + 1 {
+            let x = q as f32 * width + if r.rem_euclid(2) == 0 { 0. } else { width / 2. };
+            let y = r as f32 * 1.5 * size;
+            if !field_cell_visible(kind, x, y, w, h, size) {
+                continue;
             }
-            dots.dot(center, fade * local);
+            let Some(cell) = organic_cell(kind, q, r, x, y, w, h) else {
+                continue;
+            };
+            let stagger = ((q * 17 + r * 31).rem_euclid(11) as f32) / 11. * timing::FIELD_STAGGER;
+            let delay =
+                field_depth(kind, x, y, w, h).clamp(0., 1.) * timing::FIELD_SPREAD + stagger;
+            let local = ((progress - delay) / timing::CELL_DRAW_FRACTION).clamp(0., 1.);
+            if local <= 0. {
+                continue;
+            }
+            let center = point(ox + x, oy + y);
+            let mut outline = hex_outline(center, size, radius::STANDARD);
+            // Each outline starts at its own corner; fringe cells stay open arcs.
+            outline.pop();
+            let corner = outline.len() / 6;
+            outline.rotate_left(cell.start * corner);
+            outline.push(outline[0]);
+            if (q + r).rem_euclid(2) == 0 {
+                outline.reverse();
+            }
+            let end = local * cell.coverage;
+            let revealed = trace(&outline, end);
+            structure.stroke_alpha(&revealed, kind, bounds, cell.tone);
+            if local < 1. {
+                fronts.stroke(
+                    &trace_range(&outline, (end - timing::TRACE_TAIL).max(0.), end),
+                    kind,
+                    bounds,
+                );
+            }
+            // Three inner edges turn scattered hexagons into quiet isometric cubes.
+            if cell.cube {
+                for index in 0..3 {
+                    let angle = (index as f32 * 120. - 30.).to_radians();
+                    let distance = size - radius::STANDARD / 3.;
+                    let vertex = point(
+                        center.x + angle.cos() * distance,
+                        center.y + angle.sin() * distance,
+                    );
+                    cubes.stroke_alpha(&trace(&[center, vertex], local), kind, bounds, cell.tone);
+                }
+                dots.dot(center, field_fade(kind, x, y, w, h) * local * cell.tone);
+            }
         }
     }
     let alpha = field_opacity(kind);
-    shadows.paint(window, INK, alpha * timing::FIELD_SHADOW_OPACITY);
     structure.paint(window, LINE, alpha);
-    highlights.paint(window, SURFACE, alpha * timing::FIELD_HIGHLIGHT_OPACITY);
     cubes.paint(window, LINE, alpha * timing::FIELD_CUBE_OPACITY);
     dots.paint(window, DECORATIVE, alpha);
     fronts.paint(
@@ -998,77 +1028,57 @@ mod tests {
     }
     #[test]
     fn activity_pulse_is_bounded_and_loops_with_each_lap() {
-        let mut lowest = f32::MAX;
-        let mut highest = f32::MIN;
-        for step in 0..=1000 {
-            let value = pulse(step as f32 / 1000.);
-            lowest = lowest.min(value);
-            highest = highest.max(value);
-        }
-        assert!((lowest - timing::ACTIVITY_PULSE_FLOOR).abs() < 1e-3);
-        assert!((highest - 1.).abs() < 1e-3);
+        let values = (0..=1000).map(|step| pulse(step as f32 / 1000.));
+        let (low, high) = values.fold((f32::MAX, f32::MIN), |(l, h), v| (l.min(v), h.max(v)));
+        assert!((low - timing::ACTIVITY_PULSE_FLOOR).abs() < 1e-3);
+        assert!((high - 1.).abs() < 1e-3);
         assert!((pulse(0.) - pulse(1.)).abs() < 1e-5);
     }
     #[test]
-    fn ambient_motion_is_small_still_when_disabled_and_wraps_seamlessly() {
-        assert_eq!(drift(None), point(0., 0.));
-        assert_eq!(drift(Some(0.)), point(0., 0.));
-        assert_eq!(shimmer(None, point(40., 90.)), 1.);
-        for period in [
-            timing::DRIFT_PERIOD_X,
-            timing::DRIFT_PERIOD_Y,
-            timing::SHIMMER_PERIOD,
-        ] {
-            assert_eq!((timing::AMBIENT_CYCLE / period).fract(), 0.);
+    fn organic_noise_is_deterministic_and_bounded() {
+        for i in -50..50 {
+            let (x, y) = (i as f32 * 0.37, i as f32 * -0.61 + 3.);
+            assert_eq!(noise(x, y), noise(x, y));
+            assert!((0.0..=1.0).contains(&noise(x, y)));
+            assert!((0.0..1.0).contains(&hash(i, -i * 7)));
         }
-        let end = drift(Some(timing::AMBIENT_CYCLE));
-        assert!(end.x.abs() < 1e-3 && end.y.abs() < 1e-3);
-        for step in 0..=720 {
-            let seconds = step as f32 / 10.;
-            let offset = drift(Some(seconds));
-            assert!(offset.x.hypot(offset.y) <= timing::DRIFT_AMPLITUDE * 1.25 + 1e-4);
-            let light = shimmer(Some(seconds), point(120., 80.));
-            assert!((1. - timing::SHIMMER_DEPTH - 1e-4..=1. + 1e-4).contains(&light));
-        }
-        let almost = timing::AMBIENT_CYCLE - 0.01;
-        let wrapped = advance_ambient(almost, Duration::from_millis(66));
-        assert!((wrapped - 0.056).abs() < 1e-3);
-        // A stalled or long-inactive window resumes with a single small step.
-        assert_eq!(
-            advance_ambient(1., Duration::from_secs(30)),
-            1. + timing::AMBIENT_MAX_STEP
-        );
     }
     #[test]
-    fn window_lattice_is_continuous_across_sidebar_and_workspace() {
-        use gpui::{Bounds, size};
-        let mask = Mask {
-            kind: Field::Window,
-            w: 1120.,
-            h: 820.,
-        };
-        let region = |x: f32, w: f32| Bounds::new(point(px(x), px(0.)), size(px(w), px(820.)));
-        let offset = drift(Some(7.3));
-        let whole = cells(mask, region(0., 1120.), offset).collect::<Vec<_>>();
-        let sidebar = cells(mask, region(0., 248.), offset).collect::<Vec<_>>();
-        let workspace = cells(mask, region(248., 872.), offset).collect::<Vec<_>>();
-        assert!(!whole.is_empty());
-        // Every cell painted by a region is the identical window-anchored cell,
-        // and together the regions cover the whole-window ring.
-        for cell in sidebar.iter().chain(&workspace) {
-            assert!(whole.contains(cell));
+    fn identity_band_is_uneven_and_workspace_is_off_balance() {
+        let (w, h) = (1120., 820.);
+        // The same distance from the top edge is inside the band in some places
+        // and outside it in others: the band is not a symmetric frame.
+        let depths = (0..=28)
+            .map(|i| field_depth(Field::Identity, i as f32 * 40., 180., w, h))
+            .collect::<Vec<_>>();
+        assert!(depths.iter().any(|d| *d < 0.8));
+        assert!(depths.iter().any(|d| *d > 1.));
+        // The upper-right lobe is larger than the lower-left one.
+        let reach = |x: f32, y: f32| field_fade(Field::Workspace, x, y, w, h);
+        assert!(reach(w - 40., 40.) > 0.);
+        assert!(reach(40., h - 40.) > 0.);
+        assert_eq!(reach(w / 2., h / 2.), 0.);
+    }
+    #[test]
+    fn organic_holes_and_arcs_only_appear_away_from_the_core() {
+        let (w, h) = (1120., 820.);
+        for q in -2..40 {
+            for r in -2..30 {
+                let x = q as f32 * 3f32.sqrt() * 32.;
+                let y = r as f32 * 48.;
+                let depth = field_depth(Field::Identity, x, y, w, h);
+                let cell = organic_cell(Field::Identity, q, r, x, y, w, h);
+                if depth <= 0. {
+                    let core = cell.as_ref().expect("core cells are never holes");
+                    assert_eq!(core.coverage, 1.);
+                }
+                if let Some(cell) = cell {
+                    assert!((1. - timing::ORGANIC_TONE..=1.).contains(&cell.tone));
+                    assert!((0.15..=1.).contains(&cell.coverage));
+                    assert!(cell.start < 6);
+                }
+            }
         }
-        for cell in &whole {
-            assert!(sidebar.contains(cell) || workspace.contains(cell));
-        }
-        let shared = sidebar.iter().filter(|c| workspace.contains(c)).count();
-        assert!(shared > 0, "cells straddling the border are drawn by both");
-        // The ring stays thin: no cell sits deep inside the content area.
-        for (_, _, center) in &whole {
-            assert!(mask.edge(*center) <= timing::WINDOW_FIELD_BAND + timing::WINDOW_CELL_RADIUS);
-        }
-        let empty = Bounds::new(point(px(10.), px(10.)), size(px(0.), px(0.)));
-        assert_eq!(cells(mask, empty, offset).count(), 0);
     }
     #[test]
     fn reduced_motion_and_finished_phases_are_static() {

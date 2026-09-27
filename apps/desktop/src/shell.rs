@@ -234,7 +234,6 @@ impl MeApp {
         cx.observe(&filter_input, |this, _, cx| this.filter_changed(cx))
             .detach();
         Self::load_motion_preferences(cx);
-        Self::start_ambient_clock(cx);
         Self::inspect_vault(cx);
         Self {
             focus: cx.focus_handle(),
@@ -906,8 +905,6 @@ impl Focusable for MeApp {
 
 impl Render for MeApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // GPUI redraws on activation changes, so the ambient clock sees them here.
-        self.motion.window_active = window.is_window_active();
         #[cfg(any(debug_assertions, feature = "development-tools"))]
         if self.development.wiping {
             return self.wipe_progress().into_any_element();
@@ -945,14 +942,12 @@ impl Render for MeApp {
                     s.child(motion::field(
                         motion::Field::Identity,
                         self.motion_enabled(),
-                        self.ambient(),
                     ))
                 })
                 .when(self.busy && self.motion.loaded, |s| {
                     s.child(motion::activity(
                         motion::Field::Identity,
                         self.motion_enabled(),
-                        self.ambient(),
                     ))
                 })
                 .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -1069,23 +1064,26 @@ impl Render for MeApp {
                     .flex()
                     .flex_col()
                     // GPUI paints siblings in order: decoration stays below every page.
-                    // A stable id keeps the window ring in step with the sidebar;
-                    // page arrival has its own transition.
                     .child(
                         div()
-                            .id("workspace-decoration")
+                            .id((
+                                "workspace-decoration",
+                                if self.show_settings {
+                                    6
+                                } else {
+                                    self.page as usize
+                                },
+                            ))
                             .absolute()
                             .inset_0()
                             .child(motion::field(
-                                motion::Field::Window,
+                                motion::Field::Workspace,
                                 self.motion_enabled(),
-                                self.ambient(),
                             ))
                             .when(self.workspace_activity(), |s| {
                                 s.child(motion::activity(
-                                    motion::Field::Window,
+                                    motion::Field::Workspace,
                                     self.motion_enabled(),
-                                    self.ambient(),
                                 ))
                             }),
                     )

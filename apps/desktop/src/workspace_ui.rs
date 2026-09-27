@@ -13,27 +13,16 @@ pub(super) enum Page {
 }
 impl MeApp {
     pub(super) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Navigation chrome stays calm: a deeper tone and a crisp divider, with
+        // the honeycomb reserved for the content area.
         div()
             .relative()
-            // The sidebar paints its part of the shared window ring.
-            .child(motion::field(
-                motion::Field::Window,
-                self.motion_enabled(),
-                self.ambient(),
-            ))
-            .when(self.workspace_activity(), |s| {
-                s.child(motion::activity(
-                    motion::Field::Window,
-                    self.motion_enabled(),
-                    self.ambient(),
-                ))
-            })
             .w(px(layout::SIDEBAR_WIDTH))
             .h_full()
             .flex_shrink_0()
             .bg(rgb(SIDEBAR))
             .border_r_1()
-            .border_color(rgb(LINE))
+            .border_color(rgb(SIDEBAR_BORDER))
             .px(px(space::LG))
             .pt(px(space::TITLEBAR))
             .pb(px(space::XXL))

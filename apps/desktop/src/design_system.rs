@@ -5,7 +5,9 @@ use gpui::{FontWeight, Styled, px};
 pub mod color {
     pub const BG: u32 = 0xf8f9fb;
     pub const SURFACE: u32 = 0xffffff;
-    pub const SIDEBAR: u32 = 0xf0f2f5;
+    /// Navigation chrome sits a clear step darker than the content canvas.
+    pub const SIDEBAR: u32 = 0xe9ecf1;
+    pub const SIDEBAR_BORDER: u32 = 0xd6dbe3;
     pub const INK: u32 = 0x20242b;
     pub const MUTED: u32 = 0x758091;
     pub const FAINT: u32 = 0x929cab;
@@ -97,28 +99,27 @@ pub mod motion {
     pub const FINGERPRINT_MIN_WIDTH: f32 = 0.18;
     pub const FINGERPRINT_TILT: f32 = 0.24;
     pub const FINGERPRINT_OPACITY: f32 = 0.85;
-    /// The unlocked window frame: one lattice across sidebar and workspace.
-    pub const WINDOW_FIELD_BAND: f32 = 120.;
-    pub const WINDOW_CELL_RADIUS: f32 = 24.;
-    pub const WINDOW_FIELD_OPACITY: f32 = 0.6;
+    pub const HEADER_FIELD_WIDTH: f32 = 380.;
+    pub const HEADER_FIELD_HEIGHT: f32 = 200.;
+    /// A smaller, lower lobe keeps the workspace honeycomb off-balance.
+    pub const FOOT_FIELD_WIDTH: f32 = 300.;
+    pub const FOOT_FIELD_HEIGHT: f32 = 190.;
     pub const FIELD_OPACITY: f32 = 0.8;
-    /// Embossed lattice: a soft drop line below-right, a light edge above-left.
-    pub const FIELD_SHADOW_OFFSET: f32 = 1.5;
-    pub const FIELD_SHADOW_STROKE: f32 = 2.;
-    pub const FIELD_SHADOW_OPACITY: f32 = 0.09;
-    pub const FIELD_HIGHLIGHT_OFFSET: f32 = 0.75;
-    pub const FIELD_HIGHLIGHT_OPACITY: f32 = 0.95;
-    /// Ambient motion is throttled and pauses while the window is inactive.
-    pub const AMBIENT_FRAME_MS: u64 = 66;
-    pub const AMBIENT_MAX_STEP: f32 = 0.1;
-    /// Every ambient period divides this cycle, so wrapping the clock is seamless.
-    pub const AMBIENT_CYCLE: f32 = 72.;
-    pub const DRIFT_PERIOD_X: f32 = 24.;
-    pub const DRIFT_PERIOD_Y: f32 = 36.;
-    pub const DRIFT_AMPLITUDE: f32 = 2.;
-    pub const SHIMMER_PERIOD: f32 = 12.;
-    pub const SHIMMER_WAVELENGTH: f32 = 720.;
-    pub const SHIMMER_DEPTH: f32 = 0.7;
+    pub const HEADER_FIELD_OPACITY: f32 = 0.55;
+    /// Organic silhouette: deterministic value noise, never random per frame.
+    /// The identity band's reach varies between 30% and 130% along the edges.
+    pub const ORGANIC_REACH_MIN: f32 = 0.3;
+    pub const ORGANIC_REACH_RANGE: f32 = 1.;
+    pub const ORGANIC_REACH_SCALE: f32 = 420.;
+    /// Irregular, lobed fade boundaries.
+    pub const ORGANIC_WARP: f32 = 0.45;
+    pub const ORGANIC_WARP_SCALE: f32 = 150.;
+    /// Share of cells omitted at the outer fringe; the core stays whole.
+    pub const ORGANIC_HOLES: f32 = 0.6;
+    /// Beyond this depth, outlines open into arcs that dissolve inward.
+    pub const ORGANIC_OPEN_FROM: f32 = 0.35;
+    pub const ORGANIC_TONE: f32 = 0.4;
+    pub const ORGANIC_CUBE_SHARE: f32 = 0.22;
     pub const TRACE_OPACITY: f32 = 0.65;
     pub const NAV_TRACE_OPACITY: f32 = 0.4;
     pub const SEAL_OPACITY: f32 = 0.8;

@@ -83,7 +83,8 @@ in `design_system::color`, re-exported by `theme`.
 | --- | --- | --- |
 | `BG` | `#F8F9FB` | App background, inset content |
 | `SURFACE` | `#FFFFFF` | Cards, dialogs, inverse text on primary actions |
-| `SIDEBAR` | `#F0F2F5` | Navigation background |
+| `SIDEBAR` | `#E9ECF1` | Navigation background, a clear step below the canvas |
+| `SIDEBAR_BORDER` | `#D6DBE3` | Divider between navigation and content |
 | `INK` | `#20242B` | Main text and primary action fill |
 | `MUTED` | `#758091` | Secondary labels |
 | `FAINT` | `#929CAB` | Tertiary metadata/placeholders |
@@ -223,33 +224,31 @@ identity for the legacy local-vault/restore view.
 | `CONNECTION_TRACE_MS` | 640 | Selected connections draw along cell borders |
 | `SELECTION_TRACE_MS` | 280 | Selected cell inset draws in place |
 
-Motion geometry is centralized alongside timing: 32 px identity cells, 24 px
-window-ring cells, 1 px structure and 1.5 px drawing fronts.
-The identity field fades from every edge over a 320 px band with a smoothstep
-curve. Its static lines and animated indigo fronts use the same opacity mask;
-there is no hard central cutout. Selected cells have three inner cube edges and
-a 1.5 px filled center dot. Paths are split into at most 8 px segments and grouped
-in 32 alpha batches. The unlocked window uses one continuous ring (`Field::Window`)
-with the same smoothstep fade over a 120 px band from every window edge. Its
-lattice is anchored to the window, not the painting element: the sidebar and the
-workspace each paint their part, and cells continue across the sidebar border.
-Static lines, entrance drawing fronts and busy highlights share the exact same mask.
-
-The lattice is embossed. Each cell has a 2 px `INK` drop line offset 1.5 px
-down-right at 9% of field opacity, and a 1 px `SURFACE` light edge offset 0.75 px
-up-left at 95%. These faint layers use one alpha per cell. While motion is enabled
-and the window is active, a throttled ambient clock (66 ms ticks) drifts the whole
-lattice on a ±2 px Lissajous path (24 s × 36 s) and sweeps a diagonal band of light
-across the light edges every 12 s. The clock wraps at 72 s, which every period
-divides. It stops for inactive or hidden windows and for reduced motion, where the
-lattice is still.
-Paint these decorative layers before page and sidebar content, including during
-loading. Buttons, cards, text and dialogs always draw above them. Page roots use
-the shell background so the decoration stays visible in empty space; opaque
-control and card surfaces cover it. Decoration has no hit targets or input handlers.
-The window ring plays its entrance once and does not replay on page navigation.
-Actual loading work adds the same clockwise, pulsing activity highlight, which
-disappears when that work ends. Reduced motion suppresses it. Field opacity is 80%, window ring 60%;
+Motion geometry is centralized alongside timing: 32 px field cells, 1 px
+structure and 1.5 px drawing fronts.
+The honeycomb is organic rather than symmetric. Its silhouette comes from
+deterministic value noise (never per-frame randomness), so it is identical on
+every render. The identity field fades inward from the window edges, but its reach
+varies slowly between 30% and 130% of a 320 px band (420 px noise scale): deep in
+some places, almost absent in others. A second noise layer (150 px scale, ±45% depth)
+bends every fade boundary into lobes. The workspace field has two off-balance
+lobes: an upper-right 380×200 px ellipse and a smaller lower-left 300×190 px one,
+anchored to their corners so resizing keeps the silhouette.
+Toward the fringe, up to 60% of cells are omitted and, past 35% depth, outlines
+open into arcs that start at varied corners and dissolve inward. Cell weight
+varies by up to 40%, and about 22% of cells carry cube edges and a center dot.
+Core cells always stay whole. Paths are split into at most 8 px segments and
+grouped in 32 alpha batches. Static lines, entrance fronts and busy highlights
+share the same mask and the same holes.
+Paint these decorative layers before page content, including during loading.
+Buttons, cards, text and dialogs always draw above them. Page roots use the shell
+background so the decoration stays visible in empty space; opaque control and
+card surfaces cover it. Decoration has no hit targets or input handlers. The
+sidebar has no honeycomb: it is calm navigation chrome in the deeper `SIDEBAR`
+tone with a `SIDEBAR_BORDER` divider, so it reads as distinct from the content.
+Page navigation replays the short field entrance.
+Actual loading work adds the clockwise, pulsing activity highlight, which
+disappears when that work ends. Reduced motion suppresses it. Field opacity is 80%, workspace 55%;
 animated fronts use 65%, navigation 40%, cube edges 70% of field opacity.
 The drawing tail spans 16% of a cell outline; fronts use 48% of the timeline for
 inward spread, 10% deterministic stagger and 38% per-cell drawing. Page content
@@ -370,8 +369,7 @@ The button pairs an operation label with a spinner. A clockwise light wave trave
 through the existing perimeter honeycombs only while work is active and fades inward
 with the static lattice. `ACCOUNT_ACTIVITY_MS` is 2800 ms with a 28% angular tail;
 its brightness pulses twice per lap between 45% and 100%, and lit cells get a 7%
-`ACCENT` fill. Angles are measured around the window center, so the same wave laps
-the whole unlocked window across sidebar and workspace;
+`ACCENT` fill;
 `SPINNER_MS` is 1000 ms, size 16 px with 2 px inset, 1.5 px stroke, a 20% track and
 70% bright arc. Reduced motion omits the lattice wave and stops the spinner.
 Neither indicator represents a percentage or delays completion.

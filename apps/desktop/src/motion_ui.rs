@@ -10,46 +10,10 @@ pub(super) struct MotionPreferences {
     pub saving: bool,
     pub error: Option<String>,
     pub path: Option<PathBuf>,
-    /// Throttled ambient clock in seconds; advances only while it is running.
-    pub ambient: f32,
-    pub window_active: bool,
 }
 impl MeApp {
     pub(super) fn motion_enabled(&self) -> bool {
         self.motion.loaded && !self.motion.reduced
-    }
-    /// The honeycomb's ambient clock, or `None` when the lattice must hold still.
-    pub(super) fn ambient(&self) -> Option<f32> {
-        self.motion_enabled().then_some(self.motion.ambient)
-    }
-    /// One throttled loop drives subtle lattice drift. It only notifies while
-    /// motion is enabled and the window is active, so hidden, inactive and
-    /// reduced-motion windows request no frames.
-    pub(super) fn start_ambient_clock(cx: &mut Context<Self>) {
-        let executor = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
-            let mut last = Instant::now();
-            loop {
-                executor
-                    .timer(std::time::Duration::from_millis(
-                        crate::design_system::motion::AMBIENT_FRAME_MS,
-                    ))
-                    .await;
-                let now = Instant::now();
-                let elapsed = now.duration_since(last);
-                last = now;
-                let running = this.update(cx, |this, cx| {
-                    if this.motion_enabled() && this.motion.window_active {
-                        this.motion.ambient = motion::advance_ambient(this.motion.ambient, elapsed);
-                        cx.notify();
-                    }
-                });
-                if running.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
     }
     pub(super) fn window_entrance_phase(&self, window: &mut Window, milliseconds: u64) -> f32 {
         let phase = motion::phase(
