@@ -496,6 +496,7 @@ pub fn extract(
             subject_confidence: classification.subject_confidence,
             values,
             models: usage.models.clone(),
+            correction: false,
         },
         missing_required,
         usage,

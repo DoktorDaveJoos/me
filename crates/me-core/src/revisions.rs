@@ -337,6 +337,8 @@ pub(crate) fn remove_for_legacy_fixture(db: &Connection) {
     db.execute_batch("PRAGMA foreign_keys=OFF; DROP INDEX IF EXISTS assertion_property_time; DROP INDEX IF EXISTS document_profile_family; ALTER TABLE document_evaluation DROP COLUMN priority;")
         .unwrap();
     for table in [
+        "read_summary",
+        "document_fact",
         "merge_proposal",
         "household_proposal",
         "person_mention",

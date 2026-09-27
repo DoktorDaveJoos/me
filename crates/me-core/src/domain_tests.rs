@@ -564,7 +564,7 @@ fn migration_from_thirteen_preserves_content_and_bootstraps_once() {
     assert_eq!(
         v.db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        15
+        16
     );
 }
 

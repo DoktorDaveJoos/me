@@ -164,6 +164,7 @@ fn seed(vault: &mut me_core::Vault, parent: &std::path::Path) {
                     date("expires", "2031-04-30"),
                 ],
                 models: vec!["synthetic".into()],
+                correction: false,
             },
         ),
         (
@@ -178,6 +179,7 @@ fn seed(vault: &mut me_core::Vault, parent: &std::path::Path) {
                     date("period_end", "2026-01-31"),
                 ],
                 models: vec!["synthetic".into()],
+                correction: false,
             },
         ),
         (
@@ -191,6 +193,7 @@ fn seed(vault: &mut me_core::Vault, parent: &std::path::Path) {
                     ident("number", CandidateKind::Identifier, "KFZ-4711-0815", 0.66),
                 ],
                 models: vec!["synthetic".into()],
+                correction: false,
             },
         ),
         (
@@ -201,6 +204,7 @@ fn seed(vault: &mut me_core::Vault, parent: &std::path::Path) {
                 subject_confidence: 0.9,
                 values: vec![ident("tax_id", CandidateKind::TaxId, "12345678903", 0.9)],
                 models: vec!["synthetic".into()],
+                correction: false,
             },
         ),
         (
@@ -211,6 +215,7 @@ fn seed(vault: &mut me_core::Vault, parent: &std::path::Path) {
                 subject_confidence: 0.9,
                 values: vec![ident("tax_id", CandidateKind::TaxId, "12345678930", 0.9)],
                 models: vec!["synthetic".into()],
+                correction: false,
             },
         ),
     ];
@@ -225,6 +230,7 @@ fn seed(vault: &mut me_core::Vault, parent: &std::path::Path) {
                     subject_confidence: 0.9,
                     values: vec![text("insurer", CandidateKind::Organization, name)],
                     models: vec!["synthetic".into()],
+                    correction: false,
                 },
             )
             .unwrap();

@@ -16,6 +16,8 @@ pub use doc_types::{
 };
 mod graph;
 pub use graph::*;
+mod reading;
+pub use reading::*;
 mod typing;
 pub use typing::*;
 mod coverage;

@@ -153,6 +153,7 @@ impl Vault {
             tx.execute_batch(include_str!("../migrations/013_native_credentials.sql"))?;
             tx.execute_batch(include_str!("../migrations/014_personal_domain.sql"))?;
             tx.execute_batch(include_str!("../migrations/015_import_graph.sql"))?;
+            tx.execute_batch(include_str!("../migrations/016_document_read.sql"))?;
             let profile = id();
             tx.execute("INSERT INTO entity(id,kind,label,created_at) VALUES(?,'person','Ich',strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [&profile])?;
             tx.execute(
@@ -213,7 +214,7 @@ impl Vault {
         }
         let mut db = database(&root.join("vault.db"), &keys[..32], false)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(1..=15).contains(&version) {
+        if !(1..=16).contains(&version) {
             return Err(Error::Format);
         }
         if version == 1 {
@@ -288,6 +289,11 @@ impl Vault {
             tx.execute_batch(include_str!("../migrations/015_import_graph.sql"))?;
             // Journal the new authoritative tables; existing heads are left untouched.
             crate::revisions::initialize(&tx, true)?;
+            tx.commit()?;
+        }
+        if version < 16 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/016_document_read.sql"))?;
             tx.commit()?;
         }
         let vault_id: String =
@@ -967,7 +973,7 @@ mod recovery_tests {
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            15
+            16
         );
         let graph = vault.knowledge_map().unwrap();
         assert_eq!(graph.nodes.len(), 1);
@@ -993,7 +999,7 @@ mod recovery_tests {
             .db
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         let facts = vault
             .facts_get(&vault.shareable_scope().unwrap(), &["person.tax_id".into()])
             .unwrap();
@@ -1042,7 +1048,7 @@ mod recovery_tests {
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            15
+            16
         );
     }
 

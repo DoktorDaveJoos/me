@@ -428,6 +428,7 @@ fn gap_fill_values_are_verified_before_use() {
             subject_confidence: 0.,
             values: vec![],
             models: vec![],
+            correction: false,
         },
         missing_required: vec!["gross".into()],
         usage: StageUsage::default(),

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Recorded on every automatic decision. Changing resolution rules changes it.
-pub const GRAPH_POLICY: &str = "import-graph-v1";
+pub const GRAPH_POLICY: &str = "import-graph-v2";
 /// Distinct documents naming the same non-anchor person before proposing a member.
 pub const HOUSEHOLD_PROPOSAL_MENTIONS: usize = 3;
 /// Starting threshold below which an automatic value is worth a quick check.
@@ -76,6 +76,10 @@ pub struct DocumentGraph {
     pub values: Vec<SlotValue>,
     /// Model identifiers that produced the decisions, for audit.
     pub models: Vec<String>,
+    /// The document corrects an earlier one (Korrekturabrechnung, amended notice):
+    /// its values replace earlier automatic values of the same period.
+    #[serde(default)]
+    pub correction: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -83,6 +87,10 @@ pub struct GraphOutcome {
     pub entities_created: usize,
     pub assertions: usize,
     pub checks: usize,
+    /// Slot key to the profile assertion that now carries the slot's value.
+    pub slot_assertions: BTreeMap<String, String>,
+    /// Every assertion this document supports, including closed replacements.
+    pub recorded: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -270,6 +278,20 @@ impl Resolved<'_> {
     fn text(&self, slot: &str) -> Option<String> {
         self.values.get(slot).map(|v| display_content(&v.content))
     }
+    /// The first period-typed slot (pay month, tax year), as inclusive dates.
+    fn period(&self) -> Option<(String, String)> {
+        self.kind
+            .slots
+            .iter()
+            .filter(|s| s.value == ValueKind::Period)
+            .find_map(|s| match &self.values.get(s.key)?.content {
+                SlotContent::Candidate(c) => match &c.value {
+                    CandidateValue::Period { start, end } => Some((start.clone(), end.clone())),
+                    _ => None,
+                },
+                SlotContent::Category { .. } => None,
+            })
+    }
     fn validity(&self, rule: SlotValidity) -> Validity {
         match rule {
             SlotValidity::Timeless => Validity::Timeless,
@@ -279,7 +301,13 @@ impl Resolved<'_> {
                         to: next_day(&end),
                         from,
                     },
-                    _ => Validity::Unknown,
+                    _ => match self.period() {
+                        Some((from, end)) if end >= from => Validity::Interval {
+                            to: next_day(&end),
+                            from,
+                        },
+                        _ => Validity::Unknown,
+                    },
                 }
             }
             SlotValidity::From(slot) => {
@@ -337,17 +365,23 @@ fn locator(c: &Candidate) -> Value {
     json!({"kind":"candidate","segment_id":c.segment_id,"start":c.start,"end":c.end,"quote":c.text,"line":c.line})
 }
 
-/// Latest decision on an assertion: (action, actor).
-fn latest_decision(tx: &Transaction<'_>, assertion: &str) -> Result<Option<(String, String)>> {
+/// Policy reason for a value a correcting document replaced.
+const CORRECTED: &str = "corrected_by_newer_document";
+
+/// Latest decision on an assertion: (action, actor, reason).
+fn latest_decision(
+    tx: &Transaction<'_>,
+    assertion: &str,
+) -> Result<Option<(String, String, String)>> {
     Ok(tx
         .query_row(
-            "SELECT action,actor FROM decision WHERE assertion_id=? ORDER BY local_seq DESC LIMIT 1",
+            "SELECT action,actor,reason_code FROM decision WHERE assertion_id=? ORDER BY local_seq DESC LIMIT 1",
             [assertion],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?)
 }
-fn policy_decision(
+pub(crate) fn policy_decision(
     tx: &Transaction<'_>,
     assertion: &str,
     action: &str,
@@ -356,16 +390,28 @@ fn policy_decision(
     tx.execute("INSERT INTO decision(id,assertion_id,action,actor,policy_version,reason_code,recorded_at) VALUES(?,?,?,'policy',?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",params![id(),assertion,action,GRAPH_POLICY,reason])?;
     Ok(())
 }
-/// Accepts an assertion by policy unless a person already decided on it.
+/// Accepts an assertion by policy unless a person already decided on it, or a
+/// correcting document replaced it and its correction still stands.
 fn auto_accept(tx: &Transaction<'_>, assertion: &str) -> Result<bool> {
     match latest_decision(tx, assertion)? {
-        Some((_, actor)) if actor == "user" => Ok(false),
-        Some((action, _)) if action == "accept" => Ok(true),
+        Some((_, actor, _)) if actor == "user" => Ok(false),
+        Some((action, _, _)) if action == "accept" => Ok(true),
+        Some((_, _, reason)) if reason == CORRECTED && correction_stands(tx, assertion)? => {
+            Ok(false)
+        }
         _ => {
             policy_decision(tx, assertion, "accept", "import_auto_accept")?;
             Ok(true)
         }
     }
+}
+/// Another accepted value of the same subject, property and exact period exists.
+fn correction_stands(tx: &Transaction<'_>, assertion: &str) -> Result<bool> {
+    Ok(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assertion o JOIN assertion_state n ON n.subject_id=o.subject_id AND n.property_key=o.property_key AND n.valid_from IS o.valid_from AND n.valid_to IS o.valid_to AND n.id<>o.id AND n.state='accept' WHERE o.id=?)",
+        [assertion],
+        |r| r.get(0),
+    )?)
 }
 fn upsert_review(
     tx: &Transaction<'_>,
@@ -609,7 +655,15 @@ fn overlap(
         }
     }
 }
-/// Flags overlapping incompatible values of a single-valued property. Only pairs
+/// Payment period of a stored money value (`month`, `year`, …); `None` otherwise.
+fn money_period(canonical: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(canonical)
+        .ok()?
+        .get("period")
+        .cloned()
+}
+/// Flags overlapping incompatible values of a single-valued property. Money is
+/// only compared within one payment period: a month and a year never conflict. Only pairs
 /// involving `focus` are compared (all pairs when `focus` is empty): linear per
 /// document instead of quadratic across a large history.
 fn mark_conflicts(
@@ -644,7 +698,7 @@ fn mark_conflicts(
             &rows[..]
         };
         for (b, vb, tb) in others {
-            if a != b && va != vb && overlap(ta, tb) {
+            if a != b && va != vb && money_period(va) == money_period(vb) && overlap(ta, tb) {
                 flagged.insert(a.clone());
                 flagged.insert(b.clone());
             }
@@ -665,6 +719,70 @@ fn mark_conflicts(
         }
     }
     Ok(count)
+}
+
+/// A correcting document replaces earlier automatic values of the same property
+/// and exact period from other sources, instead of conflicting with them. Only
+/// single-valued properties with a period are replaced; user decisions stay.
+fn supersede_corrected(
+    tx: &Transaction<'_>,
+    source: &str,
+    subject: &str,
+    property: &str,
+    assertions: &BTreeSet<String>,
+) -> Result<()> {
+    let one: bool = tx.query_row(
+        "SELECT cardinality='one' FROM property_definition WHERE key=?",
+        [property],
+        |r| r.get(0),
+    )?;
+    if !one {
+        return Ok(());
+    }
+    for assertion in assertions {
+        let (kind, from, to): (String, Option<String>, Option<String>) = tx.query_row(
+            "SELECT time_kind,valid_from,valid_to FROM assertion WHERE id=?",
+            [assertion],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        if kind != "interval" {
+            continue;
+        }
+        let older = tx
+            .prepare("SELECT a.id FROM assertion_state a WHERE a.subject_id=? AND a.property_key=? AND a.state='accept' AND a.id<>? AND a.valid_from IS ? AND a.valid_to IS ? AND NOT EXISTS(SELECT 1 FROM decision d WHERE d.assertion_id=a.id AND d.actor='user') AND NOT EXISTS(SELECT 1 FROM assertion_evidence e WHERE e.assertion_id=a.id AND e.source_id=?)")?
+            .query_map(params![subject, property, assertion, from, to, source], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for old in older {
+            policy_decision(tx, &old, "retract", CORRECTED)?;
+            tx.execute(
+                "UPDATE collection_item SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE current_assertion_id=? AND deleted_at IS NULL",
+                [&old],
+            )?;
+        }
+    }
+    Ok(())
+}
+/// The accepted assertion that carries `assertion`'s value now: itself, or the
+/// closed replacement a newer document's timeline created for it.
+fn current_assertion(tx: &Transaction<'_>, assertion: String) -> Result<String> {
+    let accepted: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assertion_state WHERE id=? AND state='accept')",
+        [&assertion],
+        |r| r.get(0),
+    )?;
+    if accepted {
+        return Ok(assertion);
+    }
+    Ok(tx
+        .query_row(
+            "SELECT a.id FROM assertion a WHERE a.supersedes_id=? AND (SELECT d.action FROM decision d WHERE d.assertion_id=a.id ORDER BY d.local_seq DESC LIMIT 1)='accept' ORDER BY a.rowid DESC LIMIT 1",
+            [&assertion],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(assertion))
 }
 
 pub(crate) fn resolve_document(
@@ -787,11 +905,11 @@ pub(crate) fn resolve_document(
                       check: bool,
                       evidence: Option<&Candidate>,
                       outcome: &mut GraphOutcome|
-     -> Result<()> {
+     -> Result<Option<String>> {
         let assertion = match insert_assertion(tx, &draft, "extraction", Some(&run)) {
             Ok(a) => a,
             // A value that the property cannot hold stays an observation only.
-            Err(Error::Validation(_)) => return Ok(()),
+            Err(Error::Validation(_)) => return Ok(None),
             Err(e) => return Err(e),
         };
         let locator =
@@ -806,7 +924,15 @@ pub(crate) fn resolve_document(
             ],
         )?;
         if !auto_accept(tx, &assertion)? {
-            return Ok(());
+            // A person decided, or a correction replaced it: only a value a person
+            // confirmed still counts as this document's profile value.
+            let confirmed = latest_decision(tx, &assertion)?
+                .is_some_and(|(action, actor, _)| action == "accept" && actor == "user");
+            if !confirmed {
+                return Ok(None);
+            }
+            outcome.recorded.insert(assertion.clone());
+            return Ok(Some(assertion));
         }
         let check = (check || confidence < threshold).then_some("low_confidence");
         upsert_review(
@@ -825,8 +951,9 @@ pub(crate) fn resolve_document(
         touched
             .entry((draft.subject.clone(), draft.property.clone()))
             .or_default()
-            .insert(assertion);
-        Ok(())
+            .insert(assertion.clone());
+        outcome.recorded.insert(assertion.clone());
+        Ok(Some(assertion))
     };
     for slot in doc.kind.slots {
         let (Some(property), Some(value)) = (slot.property, doc.values.get(slot.key)) else {
@@ -854,7 +981,7 @@ pub(crate) fn resolve_document(
         if let Some(c) = &candidate {
             tx.execute("INSERT OR IGNORE INTO observation VALUES(?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",params![id(),source,run,format!("{}:{}",graph.doc_type,slot.key),property,serde_json::to_string(&fact).map_err(|_|Error::Format)?,"",c.line,locator(c).to_string(),"supported"])?;
         }
-        record(
+        let recorded = record(
             tx,
             AssertionDraft {
                 subject,
@@ -869,6 +996,9 @@ pub(crate) fn resolve_document(
             candidate.as_ref(),
             &mut outcome,
         )?;
+        if let Some(a) = recorded {
+            outcome.slot_assertions.insert(slot.key.to_owned(), a);
+        }
     }
     for spec in doc.kind.entities {
         let Some((entity, confidence)) = roles.get(spec.role).cloned() else {
@@ -913,6 +1043,9 @@ pub(crate) fn resolve_document(
         )?;
     }
     for ((subject, property), assertions) in touched {
+        if graph.correction {
+            supersede_corrected(tx, source, &subject, &property, &assertions)?;
+        }
         retimeline(tx, &subject, &property)?;
         // Closed replacements carry the conflict check for the closed assertions.
         let mut focus = assertions;
@@ -927,6 +1060,13 @@ pub(crate) fn resolve_document(
             .collect::<std::result::Result<Vec<_>, _>>()?,
         );
         mark_conflicts(tx, &subject, &property, &focus)?;
+        // A re-read that finds a value closed by a newer document still supports it.
+        outcome.recorded.extend(focus);
+    }
+    let slots = std::mem::take(&mut outcome.slot_assertions);
+    for (slot, assertion) in slots {
+        let current = current_assertion(tx, assertion)?;
+        outcome.slot_assertions.insert(slot, current);
     }
     outcome.checks = tx.query_row("SELECT count(*) FROM assertion_review r JOIN assertion_evidence e ON e.assertion_id=r.assertion_id WHERE e.source_id=? AND r.check_reason IS NOT NULL",[source],|r|r.get::<_,i64>(0))? as usize;
     tx.execute(
