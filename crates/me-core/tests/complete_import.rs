@@ -10,6 +10,7 @@ fn candidate(segment: &str, property: &str, value: &str, period: &str) -> Extrac
         quote: value.into(),
         subject_quote: "Erika Beispiel".into(),
         context_quote: period.into(),
+        slot: String::new(),
     }
 }
 

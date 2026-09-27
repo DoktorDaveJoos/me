@@ -1,4 +1,5 @@
 //! Bounded, text-only Codex App Server client. Auth is managed by Codex itself.
+use crate::guides::ReadingGuide;
 use me_core::{ExtractionInput, ExtractionOutput};
 use me_diagnostics::{Field as F, record};
 use serde_json::{Value, json};
@@ -20,7 +21,7 @@ use std::{
 #[path = "codex_pipeline.rs"]
 mod pipeline;
 use pipeline::Retry;
-pub use pipeline::{Checkpoints, ExtractionReport, LEGACY_PIPELINE, NoCheckpoints, PIPELINE};
+pub use pipeline::{Checkpoints, ExtractionReport, NoCheckpoints, PIPELINE};
 
 #[path = "assistant.rs"]
 mod assistant;
@@ -577,17 +578,33 @@ pub fn output_schema() -> Value {
     let text = json!({"type":"string"});
     json!({"type":"object","additionalProperties":false,"required":["facts"],"properties":{"facts":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["property","value","segment_id","quote","subject_quote","context_quote"],"properties":{"property":text,"value":text,"segment_id":text,"quote":text,"subject_quote":text,"context_quote":text}}}}})
 }
+/// The extraction schema with `slot` limited to the guide's checklist plus `none`.
+pub fn guided_schema(guide: &ReadingGuide, segments: &[String]) -> Value {
+    let mut schema = output_schema();
+    let item = &mut schema["properties"]["facts"]["items"];
+    let mut slots = guide.slot_keys();
+    slots.push("none".into());
+    item["properties"]["slot"] = json!({"type":"string","enum":slots});
+    item["required"]
+        .as_array_mut()
+        .expect("schema")
+        .push(json!("slot"));
+    item["properties"]["segment_id"] = json!({"type":"string","enum":segments});
+    schema
+}
 pub fn extract(
     home: &Path,
     input: &ExtractionInput,
+    guide: &ReadingGuide,
     cancel: Arc<AtomicBool>,
     mut progress: impl FnMut(Progress),
 ) -> Result<ExtractionOutput> {
-    extract_with_binary(home, input, cancel, &mut progress, &executable())
+    extract_with_binary(home, input, guide, cancel, &mut progress, &executable())
 }
 pub fn extract_document(
     home: &Path,
     input: &ExtractionInput,
+    guide: &ReadingGuide,
     cancel: Arc<AtomicBool>,
     mut progress: impl FnMut(Progress),
     checkpoints: &mut impl Checkpoints,
@@ -595,6 +612,31 @@ pub fn extract_document(
     pipeline::run(
         home,
         input,
+        guide,
+        cancel,
+        &mut progress,
+        &executable(),
+        checkpoints,
+    )
+}
+/// One focused reading of values the local omission sweep found uncovered.
+#[allow(clippy::too_many_arguments)]
+pub fn audit_document(
+    home: &Path,
+    input: &ExtractionInput,
+    guide: &ReadingGuide,
+    previous: &ExtractionOutput,
+    uncovered: &[me_core::Uncovered],
+    cancel: Arc<AtomicBool>,
+    mut progress: impl FnMut(Progress),
+    checkpoints: &mut impl Checkpoints,
+) -> Result<ExtractionReport> {
+    pipeline::audit(
+        home,
+        input,
+        guide,
+        previous,
+        uncovered,
         cancel,
         &mut progress,
         &executable(),
@@ -604,6 +646,7 @@ pub fn extract_document(
 fn extract_with_binary(
     home: &Path,
     input: &ExtractionInput,
+    guide: &ReadingGuide,
     cancel: Arc<AtomicBool>,
     progress: &mut impl FnMut(Progress),
     binary: &Path,
@@ -611,6 +654,7 @@ fn extract_with_binary(
     pipeline::run(
         home,
         input,
+        guide,
         cancel,
         progress,
         binary,
@@ -805,6 +849,7 @@ for line in sys.stdin:
   assert p['model']=='gpt-5.6-sol' and p['effort']=='medium'
   assert p['permissions']=='me-inbox' and 'sandboxPolicy' not in p
   assert p['outputSchema']['additionalProperties']==False
+  assert 'slot' in p['outputSchema']['properties']['facts']['items']['required']
   if mode=='tool':
    send({'id':999,'method':'item/tool/call','params':{'tool':'shell'}})
    response=json.loads(sys.stdin.readline());assert 'error' in response
@@ -850,7 +895,7 @@ for line in sys.stdin:
    with open(sys.argv[0]+'.calls','a') as log: log.write(json.dumps([s['segment_id'] for s in source['segments']])+'\n')
 
   if mode=='audit_missing':
-   if stage=='extract': assert source['document_profile']['document_kind']['choice']=='other'
+   if stage=='extract': assert 'document_kind' not in source['document_profile'] and source['guide'].startswith('general|') and source['checklist']==[]
    assert stage in ['extract','audit']
    facts=[]
    if stage=='audit':
@@ -859,6 +904,22 @@ for line in sys.stdin:
      value=f'{index},00 EUR'
      facts.append({'property':f'document.Zulage {index}','value':value,'segment_id':source['segments'][0]['segment_id'],'quote':value,'subject_quote':'Erika Beispiel','context_quote':'August 2026'})
    text=json.dumps({'facts':facts})
+  if mode=='guided':
+   assert stage=='extract' and source['guide'].startswith('employment|payslip|')
+   assert any(c['slot']=='wage_tax' for c in source['checklist'])
+   assert 'wage_tax' in p['outputSchema']['properties']['facts']['items']['properties']['slot']['enum']
+   s=source['segments'][0]
+   value=re.search(r'Steuer-ID: ([0-9]+)',s['text']).group(1)
+   text=json.dumps({'facts':[{'property':'person.tax_id','value':value,'segment_id':s['segment_id'],'quote':value,'subject_quote':'Erika Beispiel','context_quote':'','slot':'wage_tax'}]})
+  if mode=='sweep':
+   assert stage=='sweep_audit' and source['guide'] and source['uncovered']
+   assert sum(len(s['text'].encode('utf-8')) for s in source['segments'])<=12000
+   sent=[s['segment_id'] for s in source['segments']]
+   assert all(u['segment_id'] in sent for u in source['uncovered'])
+   assert all(f['segment_id'] in sent for f in source['previous_facts'])
+   facts=[{'property':'person.tax_id','value':u['text'],'segment_id':u['segment_id'],'quote':u['line'],'subject_quote':'Erika Beispiel','context_quote':'','slot':'none'} for u in source['uncovered']]
+   text=json.dumps({'facts':facts})
+   with open(sys.argv[0]+'.calls','a') as log: log.write(json.dumps(sent)+'\n')
   if mode=='audit_failure' and stage=='audit':
    send({'id':i,'error':{'code':-32600,'message':'synthetic audit failure'}})
    continue
@@ -890,6 +951,7 @@ for line in sys.stdin:
         extract_with_binary(
             &temp.path().join("home"),
             &input,
+            &ReadingGuide::general(),
             Arc::new(AtomicBool::new(false)),
             &mut |_| {},
             &bin,

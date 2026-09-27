@@ -29,7 +29,8 @@ fn pdf_scan_and_jpeg_reach_reviewable_proposals_through_the_real_cli() {
         let input = vault
             .prepare_extraction(item, me_agent::codex::INBOX_MODEL)
             .unwrap();
-        let result = me_agent::codex::extract(&home, &input, cancel, |_| {}).unwrap();
+        let guide = me_agent::guides::ReadingGuide::general();
+        let result = me_agent::codex::extract(&home, &input, &guide, cancel, |_| {}).unwrap();
         assert!(
             vault.finish_extraction(&input, result).unwrap() >= 2,
             "Expected synthetic birth date and tax ID"
@@ -76,7 +77,8 @@ fn long_pdf_finds_facts_beyond_the_former_limit() {
         .prepare_extraction(item, me_agent::codex::INBOX_MODEL)
         .unwrap();
     let mut second_section = false;
-    let output = me_agent::codex::extract(&home, &input, cancel, |event| {
+    let guide = me_agent::guides::ReadingGuide::general();
+    let output = me_agent::codex::extract(&home, &input, &guide, cancel, |event| {
         if let me_agent::codex::Progress::Message(message) = event {
             second_section |= message.contains("Section 2 of");
             println!("{message}");
@@ -159,9 +161,11 @@ fn large_pdf_reaches_page_sixty_and_reuses_verified_sections() {
     let input = v
         .prepare_extraction(item, me_agent::codex::INBOX_MODEL)
         .unwrap();
+    let guide = me_agent::guides::ReadingGuide::general();
     let report = me_agent::codex::extract_document(
         &home,
         &input,
+        &guide,
         cancel.clone(),
         |p| {
             if let me_agent::codex::Progress::Message(s) = p {
@@ -173,7 +177,7 @@ fn large_pdf_reaches_page_sixty_and_reuses_verified_sections() {
     .unwrap();
     assert_eq!(report.rejected.len(), 0);
     let mut resumed = 0;
-    let replay=me_agent::codex::extract_document(&home,&input,cancel,|p|{if matches!(p,me_agent::codex::Progress::Message(ref s) if s.contains("restoring saved results")){resumed+=1;}},&mut Store(&mut v)).unwrap();
+    let replay=me_agent::codex::extract_document(&home,&input,&guide,cancel,|p|{if matches!(p,me_agent::codex::Progress::Message(ref s) if s.contains("restoring saved results")){resumed+=1;}},&mut Store(&mut v)).unwrap();
     assert!(resumed >= 3);
     assert_eq!(report.output.facts.len(), replay.output.facts.len());
     assert!(v.finish_extraction(&input, replay.output).unwrap() >= 2);
@@ -221,9 +225,12 @@ fn payroll_pdf_scan_and_jpeg_extract_full_document() {
         let input = v
             .prepare_extraction(item, me_agent::codex::INBOX_MODEL)
             .unwrap();
+        // Payroll guidance now comes from the classified type, not a section profile.
+        let guide = me_agent::guides::reading_guide("employment", Some("payslip"));
         let report = me_agent::codex::extract_document(
             &home,
             &input,
+            &guide,
             cancel,
             |p| {
                 if let me_agent::codex::Progress::Message(s) = p {

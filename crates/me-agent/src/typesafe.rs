@@ -468,7 +468,12 @@ mod tests {
                 &AtomicBool::new(false),
             )
             .unwrap();
-        assert_eq!(response.answers["document_kind"]["choice"], "invoice");
+        validate_answers(&profile_questions(), &response.answers).unwrap();
+        assert!(
+            response.answers["readable"]["noul"]
+                .as_f64()
+                .is_some_and(|p| p >= 0.5)
+        );
         assert!(response.input_tokens.is_some());
         assert!(response.output_tokens.is_some());
         println!(

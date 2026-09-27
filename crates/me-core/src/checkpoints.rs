@@ -36,12 +36,22 @@ impl Vault {
     ) -> Result<()> {
         self.checkpoint_active(input)?;
         let grounded = crate::ground_extraction(input, output.clone());
-        if !grounded.rejected.is_empty() {
+        // Source-supported values whose only open question is ownership are kept:
+        // restoring them re-derives the same ownership question for the user.
+        if grounded
+            .rejected
+            .iter()
+            .any(|r| r.code != "subject_unknown")
+        {
             return Err(Error::Validation(
                 "Unsupported intermediate results cannot be saved.",
             ));
         }
-        self.db.execute("INSERT INTO extraction_checkpoint VALUES(?,?,?,?) ON CONFLICT(source_id,pipeline,batch_key) DO UPDATE SET output_json=excluded.output_json", params![input.source_id,pipeline,extraction_fingerprint(input),serde_json::to_string(&grounded.output).map_err(|_| Error::Format)?])?;
+        let mut saved = grounded.output;
+        saved
+            .facts
+            .extend(grounded.rejected.into_iter().map(|r| r.fact));
+        self.db.execute("INSERT INTO extraction_checkpoint VALUES(?,?,?,?) ON CONFLICT(source_id,pipeline,batch_key) DO UPDATE SET output_json=excluded.output_json", params![input.source_id,pipeline,extraction_fingerprint(input),serde_json::to_string(&saved).map_err(|_| Error::Format)?])?;
         Ok(())
     }
 }

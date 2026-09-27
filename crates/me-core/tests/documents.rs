@@ -57,6 +57,7 @@ fn extracted_pdf_is_searchable_with_page_provenance_and_reviewable_facts() {
                     quote: "Steuer-ID: 01234567890".into(),
                     subject_quote: "Erika Beispiel".into(),
                     context_quote: String::new(),
+                    slot: String::new(),
                 }],
             },
         )
@@ -180,6 +181,7 @@ fn long_document_has_no_24kb_gate_and_validates_all_sections_atomically() {
             quote: "Steuer-ID: 01234567890".into(),
             subject_quote: "Erika Beispiel".into(),
             context_quote: String::new(),
+            slot: String::new(),
         })
         .collect();
     assert_eq!(facts.len(), 26);

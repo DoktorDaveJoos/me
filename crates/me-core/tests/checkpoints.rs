@@ -21,6 +21,7 @@ fn checkpoints_survive_restart_are_encrypted_and_reject_stale_or_unproven_writes
             quote: "01234567890".into(),
             subject_quote: "Erika Beispiel".into(),
             context_quote: String::new(),
+            slot: String::new(),
         }],
     };
     let mut bad = output.clone();
@@ -58,4 +59,47 @@ fn checkpoints_survive_restart_are_encrypted_and_reject_stale_or_unproven_writes
     let fresh = v.prepare_extraction(item, "synthetic").unwrap();
     assert!(v.extraction_checkpoint(&fresh, "v1").unwrap().is_none());
     assert_eq!(v.proposals(item).unwrap().len(), 1);
+}
+
+#[test]
+fn a_checkpoint_keeps_values_whose_only_open_question_is_ownership() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("source.txt");
+    std::fs::write(&file, "Steuer-ID: 01234567890\nGeburtsdatum: 01.02.1990").unwrap();
+    let mut v = Vault::create(&temp.path().join("vault"), "synthetic-password").unwrap();
+    let item = v
+        .import_document(&file, "synthetic", DocumentClass::Personal)
+        .unwrap();
+    v.set_automatic_evaluation(false).unwrap();
+    assert!(v.begin_evaluation(item, false).unwrap());
+    let input = v.prepare_extraction(item, "synthetic").unwrap();
+    let unowned = ExtractedFact {
+        property: "person.tax_id".into(),
+        value: "01234567890".into(),
+        segment_id: input.segments[0].segment_id.clone(),
+        quote: "Steuer-ID: 01234567890".into(),
+        subject_quote: String::new(),
+        context_quote: String::new(),
+        slot: "tax_id".into(),
+    };
+    let output = ExtractionOutput {
+        facts: vec![unowned.clone()],
+    };
+    v.save_extraction_checkpoint(&input, "v1", &output).unwrap();
+    let saved = v.extraction_checkpoint(&input, "v1").unwrap().unwrap();
+    assert_eq!(saved.facts.len(), 1);
+    assert!(saved.facts[0].subject_quote.is_empty());
+    assert_eq!(saved.facts[0].slot, "tax_id");
+    let restored = me_core::ground_extraction(&input, saved);
+    assert!(restored.output.facts.is_empty());
+    assert_eq!(restored.rejected.len(), 1);
+    assert_eq!(restored.rejected[0].code, "subject_unknown");
+    // Any other open question still keeps the whole section out of the checkpoint.
+    let mut invented = unowned;
+    invented.quote = "Steuer-ID: 99999999999".into();
+    let bad = ExtractionOutput {
+        facts: vec![output.facts[0].clone(), invented],
+    };
+    assert!(v.save_extraction_checkpoint(&input, "v2", &bad).is_err());
+    assert!(v.extraction_checkpoint(&input, "v2").unwrap().is_none());
 }

@@ -73,6 +73,7 @@ fn proposals_require_real_evidence_and_explicit_ownership_confirmation() {
         quote: "Invented 01234567890".into(),
         subject_quote: "SYNTHETIC Musterperson".into(),
         context_quote: String::new(),
+        slot: String::new(),
     };
     assert!(
         v.finish_extraction(

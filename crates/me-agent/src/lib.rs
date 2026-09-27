@@ -24,5 +24,6 @@ pub fn default_vault_path() -> Option<PathBuf> {
 }
 
 pub mod graph_pipeline;
+pub mod guides;
 pub mod typesafe;
 pub mod typesafe_questions;

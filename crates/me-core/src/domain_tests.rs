@@ -230,6 +230,7 @@ fn extracted_observations_keep_evidence_and_reviewed_mapping_does_not_fabricate_
                 quote: input.segments[0].text.clone(),
                 subject_quote: "Synthetic Person".into(),
                 context_quote: "2027-01-01".into(),
+                slot: String::new(),
             }],
         },
     )
@@ -795,6 +796,7 @@ fn extraction_reruns_retain_distinct_observations_without_duplicate_canonical_ma
                     segment_id: input.segments[0].segment_id.clone(),
                     subject_quote: "Synthetic Person".into(),
                     context_quote: String::new(),
+                    slot: String::new(),
                 }],
             },
         )

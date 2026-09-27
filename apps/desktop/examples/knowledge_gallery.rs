@@ -122,6 +122,7 @@ fn main() {
                     subject_quote: "Alex Morgan".into(),
                     context_quote: String::new(),
                     segment_id: input.segments[0].segment_id.clone(),
+                    slot: String::new(),
                 })
                 .collect();
             vault

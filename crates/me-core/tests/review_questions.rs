@@ -27,6 +27,7 @@ fn fact(input: &ExtractionInput) -> ExtractedFact {
         subject_quote: "Erika Beispiel".into(),
         context_quote: String::new(),
         segment_id: input.segments[0].segment_id.clone(),
+        slot: String::new(),
     }
 }
 fn bad(input: &ExtractionInput, value: &str) -> RejectedFact {

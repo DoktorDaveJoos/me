@@ -45,6 +45,7 @@ fn main() {
             quote: value.into(),
             subject_quote: "Erika Beispiel".into(),
             segment_id: input.segments[0].segment_id.clone(),
+            slot: String::new(),
         };
         vault
             .finish_extraction_with_questions(

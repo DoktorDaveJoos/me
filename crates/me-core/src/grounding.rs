@@ -250,8 +250,11 @@ pub fn same_fact(a: &ExtractedFact, b: &ExtractedFact) -> bool {
 
 /// Enrich an otherwise identical source field with evidenced context. Never
 /// merge two explicit periods or different columns that merely share an amount.
-pub fn merge_extracted_fact(facts: &mut Vec<ExtractedFact>, fact: ExtractedFact) {
-    if facts.iter().any(|old| same_fact(old, &fact)) {
+pub fn merge_extracted_fact(facts: &mut Vec<ExtractedFact>, mut fact: ExtractedFact) {
+    if let Some(old) = facts.iter_mut().find(|old| same_fact(old, &fact)) {
+        if (old.slot.is_empty() || old.slot == "none") && !fact.slot.is_empty() {
+            old.slot = fact.slot;
+        }
         return;
     }
     if crate::document_field_label(&fact.property).is_some() {
@@ -266,10 +269,18 @@ pub fn merge_extracted_fact(facts: &mut Vec<ExtractedFact>, fact: ExtractedFact)
                     .eq(fact.subject_quote.split_whitespace())
             {
                 if old.context_quote.is_empty() && !fact.context_quote.is_empty() {
+                    // The richer duplicate replaces the old one; keep a slot
+                    // only the old reading carried.
+                    if (fact.slot.is_empty() || fact.slot == "none") && !old.slot.is_empty() {
+                        fact.slot = std::mem::take(&mut old.slot);
+                    }
                     *old = fact;
                     return;
                 }
                 if !old.context_quote.is_empty() && fact.context_quote.is_empty() {
+                    if (old.slot.is_empty() || old.slot == "none") && !fact.slot.is_empty() {
+                        old.slot = fact.slot;
+                    }
                     return;
                 }
             }
@@ -302,6 +313,7 @@ mod tests {
             segment_id: "s1".into(),
             subject_quote: "Erika Beispiel".into(),
             context_quote: String::new(),
+            slot: String::new(),
         }
     }
     #[test]
@@ -380,5 +392,30 @@ mod tests {
         );
         assert_eq!(result.output.facts.len(), 1);
         assert_eq!(result.rejected.len(), 4);
+    }
+    #[test]
+    fn a_duplicate_reading_contributes_its_slot_without_a_second_fact() {
+        let mut facts = vec![fact("person.tax_id", "01234567890", "01234567890")];
+        facts[0].slot = "none".into();
+        let mut tagged = facts[0].clone();
+        tagged.slot = "tax_id".into();
+        merge_extracted_fact(&mut facts, tagged);
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].slot, "tax_id");
+        let mut other = facts[0].clone();
+        other.slot = "other".into();
+        merge_extracted_fact(&mut facts, other);
+        assert_eq!(facts[0].slot, "tax_id", "a kept slot is never replaced");
+
+        // A duplicate with evidenced context replaces the bare one but keeps its slot.
+        let mut bare = vec![fact("document.Gesamt-Brutto", "4.200,00", "4.200,00")];
+        bare[0].slot = "gross".into();
+        let mut dated = bare[0].clone();
+        dated.slot.clear();
+        dated.context_quote = "August 2026".into();
+        merge_extracted_fact(&mut bare, dated);
+        assert_eq!(bare.len(), 1);
+        assert_eq!(bare[0].context_quote, "August 2026");
+        assert_eq!(bare[0].slot, "gross");
     }
 }

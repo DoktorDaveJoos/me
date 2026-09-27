@@ -158,6 +158,9 @@ pub struct ExtractedFact {
     /// Exact period/account/section wording from this source; empty if unavailable.
     #[serde(default)]
     pub context_quote: String,
+    /// Registry slot the reader proposes for this fact, or `none`/empty.
+    #[serde(default)]
+    pub slot: String,
 }
 /// Overall bound across all bounded model calls for one document.
 pub const MAX_EXTRACTION_FACTS: usize = 1024;

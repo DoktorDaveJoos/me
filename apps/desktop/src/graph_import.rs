@@ -349,6 +349,7 @@ pub(super) fn run_graph_import(
                 let report = me_agent::codex::extract_document(
                     codex_home,
                     &input,
+                    &me_agent::guides::ReadingGuide::general(),
                     cancel.clone(),
                     |event| {
                         if matches!(

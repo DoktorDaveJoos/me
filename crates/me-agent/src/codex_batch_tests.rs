@@ -49,6 +49,7 @@ fn reports_real_section_and_model_phase_boundaries() {
     extract_with_binary(
         &temp.path().join("home"),
         &input,
+        &crate::guides::ReadingGuide::general(),
         Arc::new(AtomicBool::new(false)),
         &mut |event| match event {
             Progress::Stage(stage) => stages.push(stage),
@@ -84,6 +85,7 @@ fn all_sections_are_requested_and_late_failure_discards_earlier_results() {
     let output = extract_with_binary(
         &temp.path().join("home"),
         &input,
+        &crate::guides::ReadingGuide::general(),
         Arc::new(AtomicBool::new(false)),
         &mut |_| {},
         &bin,
@@ -95,6 +97,7 @@ fn all_sections_are_requested_and_late_failure_discards_earlier_results() {
     let result = extract_with_binary(
         &temp.path().join("home"),
         &input,
+        &crate::guides::ReadingGuide::general(),
         Arc::new(AtomicBool::new(false)),
         &mut |_| {},
         &bin,
@@ -110,6 +113,7 @@ fn cancelling_between_sections_does_not_return_partial_results() {
     let result = extract_with_binary(
         &temp.path().join("home"),
         &long_input(),
+        &crate::guides::ReadingGuide::general(),
         cancel.clone(),
         &mut |p| {
             if matches!(p, Progress::Message(ref s) if s.contains("Section 2")) {
@@ -163,6 +167,7 @@ fn resumes_verified_sections_after_cancel_without_resending_them() {
     let result = pipeline::run(
         &temp.path().join("home"),
         &input,
+        &crate::guides::ReadingGuide::general(),
         cancel.clone(),
         &mut |p| {
             if matches!(p,Progress::Message(ref s) if s.contains("Section 2")) {
@@ -178,6 +183,7 @@ fn resumes_verified_sections_after_cancel_without_resending_them() {
     let output = pipeline::run(
         &temp.path().join("home"),
         &input,
+        &crate::guides::ReadingGuide::general(),
         Arc::new(AtomicBool::new(false)),
         &mut |p| {
             resumed |=
@@ -200,6 +206,7 @@ fn small_sections_avoid_large_requests_and_transient_failure_never_auto_retries(
     let result = pipeline::run(
         &temp.path().join("home"),
         &long_input(),
+        &crate::guides::ReadingGuide::general(),
         Arc::new(AtomicBool::new(false)),
         &mut |_| {},
         &bin,
@@ -213,6 +220,7 @@ fn small_sections_avoid_large_requests_and_transient_failure_never_auto_retries(
     let result = pipeline::run(
         &temp.path().join("home"),
         &long_input(),
+        &crate::guides::ReadingGuide::general(),
         Arc::new(AtomicBool::new(false)),
         &mut |event| {
             if let Progress::Failure(f) = event {
@@ -229,6 +237,7 @@ fn small_sections_avoid_large_requests_and_transient_failure_never_auto_retries(
     let result = pipeline::run(
         &temp.path().join("home"),
         &long_input(),
+        &crate::guides::ReadingGuide::general(),
         Arc::new(AtomicBool::new(false)),
         &mut |_| {},
         &bin,
@@ -249,6 +258,7 @@ fn one_audit_repairs_evidence_or_preserves_unverified_candidates_for_review() {
         let result = pipeline::run(
             &temp.path().join("home"),
             &input,
+            &crate::guides::ReadingGuide::general(),
             Arc::new(AtomicBool::new(false)),
             &mut |_| {},
             &bin,
@@ -276,16 +286,18 @@ fn unknown_ownership_becomes_a_question_without_a_paid_audit_or_repeated_calls_o
     input.segments[0].text = "Steuer-ID: 01234567890".into();
     let mut cache = MemoryCheckpoints::default();
     let mut calls = Vec::new();
+    let mut restored = 0;
     for attempt in 0..2 {
         input.run_id = format!("attempt-{attempt}");
         let result = pipeline::run(
             &temp.path().join("home"),
             &input,
+            &crate::guides::ReadingGuide::general(),
             Arc::new(AtomicBool::new(false)),
-            &mut |event| {
-                if let Progress::Request { provider } = event {
-                    calls.push(provider)
-                }
+            &mut |event| match event {
+                Progress::Request { provider } => calls.push(provider),
+                Progress::Message(m) if m.contains("Restoring saved results") => restored += 1,
+                _ => {}
             },
             &bin,
             &mut cache,
@@ -297,6 +309,10 @@ fn unknown_ownership_becomes_a_question_without_a_paid_audit_or_repeated_calls_o
         assert_eq!(result.rejected[0].fact.value, "01234567890");
         assert!(result.rejected[0].fact.subject_quote.is_empty());
     }
+    // Ownership is the only open question: the section is checkpointed and the
+    // restore asks the same question again.
+    assert_eq!(cache.0.len(), 1);
+    assert_eq!(restored, 1);
     assert_eq!(
         calls
             .iter()
@@ -357,6 +373,7 @@ fn supported_value_for_one_person_does_not_hide_an_unsupported_person_claim() {
     let result = pipeline::run(
         &temp.path().join("home"),
         &input,
+        &crate::guides::ReadingGuide::general(),
         Arc::new(AtomicBool::new(false)),
         &mut |_| {},
         &bin,
@@ -384,6 +401,7 @@ fn independent_audit_recovers_more_than_sixteen_missing_fields() {
     let result = pipeline::run_with_decisions(
         &temp.path().join("home"),
         &input,
+        &crate::guides::ReadingGuide::general(),
         Arc::new(AtomicBool::new(false)),
         &mut |_| {},
         &bin,
@@ -403,6 +421,7 @@ fn failed_completeness_audit_does_not_cache_or_report_success() {
     let result = pipeline::run_with_decisions(
         &temp.path().join("home"),
         &long_input(),
+        &crate::guides::ReadingGuide::general(),
         Arc::new(AtomicBool::new(false)),
         &mut |_| {},
         &bin,
@@ -446,6 +465,7 @@ fn failed_audit_resumes_only_missing_step_with_new_attempt_id() {
             pipeline::run_with_decisions(
                 &temp.path().join("home"),
                 input,
+                &crate::guides::ReadingGuide::general(),
                 Arc::new(AtomicBool::new(false)),
                 &mut |_| {},
                 &bin,
@@ -498,6 +518,7 @@ fn cancellation_after_a_decision_keeps_the_paid_answer_for_resume() {
     let result = pipeline::run_with_decisions(
         &temp.path().join("home"),
         &input,
+        &crate::guides::ReadingGuide::general(),
         cancel.clone(),
         &mut |event| {
             if matches!(event, Progress::Usage { .. }) {
@@ -515,6 +536,7 @@ fn cancellation_after_a_decision_keeps_the_paid_answer_for_resume() {
     pipeline::run_with_decisions(
         &temp.path().join("home"),
         &input,
+        &crate::guides::ReadingGuide::general(),
         Arc::new(AtomicBool::new(false)),
         &mut |_| {},
         &bin,
@@ -525,5 +547,117 @@ fn cancellation_after_a_decision_keeps_the_paid_answer_for_resume() {
     assert_eq!(
         decisions.calls, 2,
         "Only verification needs a new TypeSafe request"
+    );
+}
+
+#[test]
+fn the_extraction_schema_offers_only_checklist_slots() {
+    let guide = crate::guides::reading_guide("employment", Some("payslip"));
+    let schema = crate::codex::guided_schema(&guide, &["s1".to_owned()]);
+    let slot = &schema["properties"]["facts"]["items"]["properties"]["slot"]["enum"];
+    let slots: Vec<&str> = slot
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(slots.contains(&"wage_tax") && slots.contains(&"none"));
+    assert!(!slots.contains(&"iban"));
+    let required = schema["properties"]["facts"]["items"]["required"]
+        .as_array()
+        .unwrap();
+    assert!(required.iter().any(|v| v == "slot"));
+}
+
+#[test]
+fn the_reader_gets_the_guide_and_its_slot_tags_survive_grounding() {
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("fake-codex");
+    tests::fake(&bin, "guided");
+    let mut input = long_input();
+    input.segments.truncate(1);
+    let report = pipeline::run(
+        &temp.path().join("home"),
+        &input,
+        &crate::guides::reading_guide("employment", Some("payslip")),
+        Arc::new(AtomicBool::new(false)),
+        &mut |_| {},
+        &bin,
+        &mut MemoryCheckpoints::default(),
+    )
+    .unwrap();
+    assert_eq!(report.output.facts.len(), 1);
+    assert_eq!(report.output.facts[0].slot, "wage_tax");
+}
+
+#[test]
+fn the_sweep_audit_reads_only_bounded_sections_with_uncovered_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("fake-codex");
+    tests::fake(&bin, "sweep");
+    let input = long_input();
+    let uncovered: Vec<me_core::Uncovered> = input
+        .segments
+        .iter()
+        .skip(1)
+        .map(|s| {
+            let line = s.text.lines().nth(1).unwrap().to_owned();
+            me_core::Uncovered {
+                segment_id: s.segment_id.clone(),
+                start: 0,
+                end: 0,
+                kind: me_core::CandidateKind::TaxId,
+                label: Some("Steuer-ID".into()),
+                text: line.trim_start_matches("Steuer-ID: ").to_owned(),
+                line,
+            }
+        })
+        .collect();
+    let previous = ExtractionOutput {
+        facts: vec![me_core::ExtractedFact {
+            property: "person.tax_id".into(),
+            value: "00000000001".into(),
+            segment_id: "segment-1".into(),
+            quote: "00000000001".into(),
+            subject_quote: "Erika Beispiel".into(),
+            context_quote: String::new(),
+            slot: "none".into(),
+        }],
+    };
+    let guide = crate::guides::ReadingGuide::general();
+    let audit = |uncovered: &[me_core::Uncovered]| {
+        pipeline::audit(
+            &temp.path().join("home"),
+            &input,
+            &guide,
+            &previous,
+            uncovered,
+            Arc::new(AtomicBool::new(false)),
+            &mut |_| {},
+            &bin,
+            &mut MemoryCheckpoints::default(),
+        )
+        .unwrap()
+    };
+    let report = audit(&uncovered);
+    let calls = fs::read_to_string(bin.with_extension("calls")).unwrap();
+    let sent: Vec<Vec<String>> = calls
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(sent.len(), 1, "one focused request");
+    assert_eq!(
+        sent[0][0], "segment-2",
+        "sections without uncovered values stay out"
+    );
+    assert!(sent[0].len() < uncovered.len(), "the request is bounded");
+    assert_eq!(report.output.facts.len(), sent[0].len());
+    assert!(report.rejected.is_empty());
+    // Nothing uncovered: no model call.
+    let none = audit(&[]);
+    assert!(none.output.facts.is_empty());
+    assert_eq!(
+        fs::read_to_string(bin.with_extension("requests")).unwrap(),
+        "sweep_audit\n"
     );
 }

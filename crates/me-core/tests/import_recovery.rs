@@ -26,6 +26,7 @@ fn accepted_atomic_facts_never_appear_as_separate_imports() {
                 quote: "01234567890".into(),
                 subject_quote: "Erika Beispiel".into(),
                 context_quote: String::new(),
+                slot: String::new(),
             }],
         },
     )

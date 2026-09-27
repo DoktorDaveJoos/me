@@ -12,25 +12,7 @@ context_quote is an exact short period/account/section quote from supplied segme
 Return fewer than 96 facts per pass. Do not summarize away relevant fields. If there are 96 or more, return 96 to signal that this section requires a smaller source. The app stops visibly instead of silently accepting an incomplete result.
 "#;
 
-// Interpretation guidance is local and reusable: private payroll data never enters
-// a web search. See docs/document-processing.md for the DATEV reference sources.
-const PAYROLL_GUIDE: &str = r#"
-German payslip guide (apply only if the source is a Gehalts-/Lohn-/Entgeltabrechnung or Brutto/Netto-Abrechnung):
-Inspect employee header, employer header, pay period, earnings table, tax/social-insurance calculation, net adjustments, bank footer and cumulative totals. Look for Personal-Nr./Pers.-Nr., Geburtsdatum/Geb.-Datum, Steuer-ID/IdNr, SV-Nr./Versicherungsnummer, Eintritt/Austritt, StKl, Faktor, Ki.Frbtr., Konfession, Freibeträge, Krankenkasse, KV-Zusatzbeitrag, PGRS/BGRS, Beitragsgruppe, Steuer-/SV-Tage, Kostenstelle, Arbeitszeit and Urlaub. Blank cells are not zero. DATEV headers may precede a separate values row; correlate columns carefully and do not shift a value into its neighbor. Geburtsdatum may be DDMMYY, which does not establish a century on its own.
-Read all labeled wage components and quantities (Grundgehalt, Stundenlohn, Zulagen, Zuschläge, Bonus, Sachbezug, VWL). Separate Gesamt-Brutto, Steuer-Brutto and SV-Brutto. Separate Lohnsteuer, Kirchensteuer, Solidaritätszuschlag and the employee's KV/RV/AV/PV deductions from employer contributions. Netto-Verdienst and Auszahlungsbetrag are different fields; preserve both and any Netto-Bezüge/Netto-Abzüge/advance payments. Extract printed IBAN, BIC, bank and account holder. Jahreswerte/Verdienstbescheinigung are cumulative amounts, never monthly salary. This guide supplies meanings, never missing values.
-"#;
-
-// General reading rules are context, never evidence for personal values.
-const CORRESPONDENCE_GUIDE: &str = r#"
-For letters and insurance/health-insurance correspondence, distinguish sender, recipient, insured person, policyholder, provider and payee. A sender's address or bank account is not the recipient's. Preserve policy/member/claim/reference numbers exactly, and distinguish issue date, coverage period, service date, due date and explicitly stated response deadline. Do not calculate relative deadlines, infer coverage, diagnose conditions, or turn generic policy conditions into facts about a person. Preserve negation, conditional language, approval versus rejection, pending versus paid, and requested versus established facts. Extract quoted personal correspondence separately from generic boilerplate.
-For email, use the decoded envelope headers and body together; distinguish authored text, forwarded/quoted history and signatures. A From header is a claimed sender, not proof of authenticity. Do not assign a correspondent's details to the mailbox owner. Dates and facts in quoted replies belong to their original context. Attachments have their own evidence; never claim their content was read if only their names are supplied. Missing, truncated or ambiguous context must stay unknown. Public knowledge can explain terminology but can never supply absent personal facts.
-"#;
-
-pub(super) fn instructions(profile: &Value) -> String {
-    let payroll = profile["document_kind"]["choice"] == "payroll"
-        && profile["document_kind"]["confidence"]
-            .as_f64()
-            .is_some_and(|c| c >= 0.7);
+pub(super) fn instructions(profile: &Value, guide: &crate::guides::ReadingGuide) -> String {
     let layout = if profile["tabular"]["noul"]
         .as_f64()
         .is_some_and(|p| p >= 0.2)
@@ -44,12 +26,21 @@ pub(super) fn instructions(profile: &Value) -> String {
     } else {
         ""
     };
+    let checklist = if guide.checklist.is_empty() {
+        "Set slot to \"none\" for every fact.".to_owned()
+    } else {
+        let items: Vec<String> = guide
+            .checklist
+            .iter()
+            .map(|c| format!("- {}: {} — {}", c.slot, c.label, c.description))
+            .collect();
+        format!(
+            "Checklist. Look for each of these values and set slot to its key on the one fact that states it for this document's own period and person; set slot to \"none\" for every other fact, including cumulative totals and other people's values. Never omit a fact because it has no slot.\n{}",
+            items.join("\n")
+        )
+    };
     format!(
-        "{layout}\n{mixed}\n{SAFETY}\n{EXTRACTION}\n{CORRESPONDENCE_GUIDE}\n{}",
-        if payroll {
-            PAYROLL_GUIDE
-        } else {
-            "Keep document labels, printed periods and source layout. Do not assume a document type or country."
-        }
+        "{layout}\n{mixed}\n{SAFETY}\n{EXTRACTION}\n{}\n{checklist}",
+        guide.text
     )
 }

@@ -34,15 +34,12 @@ impl me_agent::codex::Checkpoints for VaultCheckpoints {
         &mut self,
         input: &me_core::ExtractionInput,
     ) -> Result<Option<me_core::ExtractionOutput>, String> {
-        let guard = self.session.lock().map_err(|_| "Vault unavailable.")?;
-        let v = guard.as_ref().ok_or("Vault locked.")?;
-        let cached = v
+        self.session
+            .lock()
+            .map_err(|_| "Vault unavailable.")?
+            .as_ref()
+            .ok_or("Vault locked.")?
             .extraction_checkpoint(input, me_agent::codex::PIPELINE)
-            .map_err(core_error)?;
-        if cached.is_some() {
-            return Ok(cached);
-        }
-        v.extraction_checkpoint(input, me_agent::codex::LEGACY_PIPELINE)
             .map_err(core_error)
     }
 
@@ -570,6 +567,7 @@ impl MeApp {
                     let result = me_agent::codex::extract_document(
                         &home,
                         &input,
+                        &me_agent::guides::ReadingGuide::general(),
                         cancel.clone(),
                         |event| {
                             use me_agent::codex::Progress;

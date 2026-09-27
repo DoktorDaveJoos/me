@@ -1,4 +1,5 @@
 use super::*;
+use crate::guides::ReadingGuide;
 use crate::typesafe::{self, Decisions};
 use me_core::{
     ExtractedFact, ImportErrorKind as Kind, ImportFailure, ImportProvider as Provider,
@@ -31,10 +32,9 @@ impl Checkpoints for NoCheckpoints {
         Ok(())
     }
 }
-// Candidate capture can become more inclusive without invalidating paid source
-// checkpoints. Existing results remain reusable; unfinished steps use the new guidance.
-pub const PIPELINE: &str = "document-v5-typesafe-jev-small-sections-sol-v1";
-pub const LEGACY_PIPELINE: &str = "document-v4-gpt-5.6-sol-medium-context-audit-v1";
+// Guided reading tags checklist slots, so results of earlier pipelines are not
+// reused. Step caches also carry the guide key, so a new guide rereads a section.
+pub const PIPELINE: &str = "document-v6-guided-v1";
 pub struct ExtractionReport {
     pub output: ExtractionOutput,
     pub rejected: Vec<me_core::RejectedFact>,
@@ -51,6 +51,7 @@ pub(super) enum Retry {
 pub(super) fn run(
     home: &Path,
     input: &ExtractionInput,
+    guide: &ReadingGuide,
     cancel: Arc<AtomicBool>,
     progress: &mut impl FnMut(Progress),
     binary: &Path,
@@ -63,6 +64,7 @@ pub(super) fn run(
     run_with_decisions(
         home,
         input,
+        guide,
         cancel,
         progress,
         binary,
@@ -71,9 +73,11 @@ pub(super) fn run(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_with_decisions(
     home: &Path,
     input: &ExtractionInput,
+    guide: &ReadingGuide,
     cancel: Arc<AtomicBool>,
     progress: &mut impl FnMut(Progress),
     binary: &Path,
@@ -85,7 +89,7 @@ pub(super) fn run_with_decisions(
     let mut batches = Vec::new();
     for parent in extraction_batches(input)? {
         if let Some(saved) = checkpoints.load(&parent)?
-            && ground_extraction(&parent, saved).rejected.is_empty()
+            && owner_only(&ground_extraction(&parent, saved).rejected)
         {
             batches.push(parent);
             continue;
@@ -124,6 +128,7 @@ pub(super) fn run_with_decisions(
         decisions,
         session: None,
         calls: 0,
+        guide,
     };
     let total = batches.len() as u32;
     for stage in [
@@ -172,6 +177,25 @@ struct Runner<'a, P, C, D> {
     decisions: &'a mut D,
     session: Option<Session>,
     calls: u32,
+    guide: &'a ReadingGuide,
+}
+/// Ownership is decided later (by TypeSafe or the user), so a section whose only
+/// open question is ownership is complete enough to checkpoint and restore.
+fn owner_only(rejected: &[me_core::RejectedFact]) -> bool {
+    rejected.iter().all(|q| q.code == "subject_unknown")
+}
+/// Grounded facts plus the source-supported facts that only lack an owner. A
+/// restore grounds them again and re-derives the same ownership questions.
+fn checkpoint_output(checked: &me_core::GroundedExtraction) -> ExtractionOutput {
+    let mut output = checked.output.clone();
+    output.facts.extend(
+        checked
+            .rejected
+            .iter()
+            .filter(|r| r.code == "subject_unknown")
+            .map(|r| r.fact.clone()),
+    );
+    output
 }
 fn merge(target: &mut ExtractionOutput, output: ExtractionOutput) {
     for fact in output.facts {
@@ -366,8 +390,14 @@ impl<P: FnMut(Progress), C: Checkpoints, D: Decisions> Runner<'_, P, C, D> {
         let session = self.session.as_mut().ok_or(FAILURE)?;
         session.call_id = Some(call);
         session.failure = None;
-        let mut schema = output_schema();
-        schema["properties"]["facts"]["items"]["properties"]["segment_id"] = json!({"type":"string","enum":input.segments.iter().map(|s|&s.segment_id).collect::<Vec<_>>()});
+        let schema = guided_schema(
+            self.guide,
+            &input
+                .segments
+                .iter()
+                .map(|s| s.segment_id.clone())
+                .collect::<Vec<_>>(),
+        );
         let result = request_model(
             session,
             self.scratch,
@@ -414,7 +444,7 @@ impl<P: FnMut(Progress), C: Checkpoints, D: Decisions> Runner<'_, P, C, D> {
         self.cancelled()?;
         if let Some(cached) = self.checkpoints.load(input)? {
             let checked = ground_extraction(input, cached);
-            if checked.rejected.is_empty() {
+            if owner_only(&checked.rejected) {
                 (self.progress)(Progress::Message(
                     "Restoring saved results; no model calls needed.".into(),
                 ));
@@ -428,7 +458,7 @@ impl<P: FnMut(Progress), C: Checkpoints, D: Decisions> Runner<'_, P, C, D> {
                 }
                 return Ok(ExtractionReport {
                     output: checked.output,
-                    rejected: Vec::new(),
+                    rejected: checked.rejected,
                     repaired: checked.repaired,
                 });
             }
@@ -449,12 +479,15 @@ impl<P: FnMut(Progress), C: Checkpoints, D: Decisions> Runner<'_, P, C, D> {
         self.done(Stage::Interpreting, current, total);
         self.start(Stage::Context, current, total);
         // Uncertain profiles select general guidance; they never invent facts.
-        let instructions = document::instructions(&profile);
+        let instructions = document::instructions(&profile, self.guide);
         self.done(Stage::Context, current, total);
         self.start(Stage::Extracting, current, total);
         let mut request = serde_json::to_value(input).map_err(failed)?;
         request["stage"] = json!("extract");
         request["document_profile"] = profile;
+        // The guide is part of the step fingerprint: a new guide rereads the section.
+        request["guide"] = json!(self.guide.key);
+        request["checklist"] = json!(self.guide.checklist);
         let output = self.model(input, "extract", request, &instructions)?;
         self.done(Stage::Extracting, current, total);
         self.start(Stage::Verifying, current, total);
@@ -490,8 +523,9 @@ impl<P: FnMut(Progress), C: Checkpoints, D: Decisions> Runner<'_, P, C, D> {
             checked.repaired += audit.repaired;
         }
         // Rejected candidates are retained for review, never silently accepted.
-        if checked.rejected.is_empty() {
-            self.checkpoints.save(input, &checked.output)?;
+        // Unowned values are saved with the section so a restore asks again.
+        if owner_only(&checked.rejected) {
+            self.checkpoints.save(input, &checkpoint_output(&checked))?;
         }
         self.done(Stage::Verifying, current, total);
         Ok(ExtractionReport {
@@ -500,6 +534,95 @@ impl<P: FnMut(Progress), C: Checkpoints, D: Decisions> Runner<'_, P, C, D> {
             repaired: checked.repaired,
         })
     }
+}
+/// One focused pass over lines the local sweep found uncovered. Its facts are
+/// grounded like any other section. Only sections holding an uncovered value are
+/// sent, bounded like one extraction batch.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn audit(
+    home: &Path,
+    input: &ExtractionInput,
+    guide: &ReadingGuide,
+    previous: &ExtractionOutput,
+    uncovered: &[me_core::Uncovered],
+    cancel: Arc<AtomicBool>,
+    progress: &mut impl FnMut(Progress),
+    binary: &Path,
+    checkpoints: &mut impl Checkpoints,
+) -> Result<ExtractionReport> {
+    let wanted: std::collections::BTreeSet<&str> =
+        uncovered.iter().map(|u| u.segment_id.as_str()).collect();
+    let mut part = input.with_segments(
+        input
+            .segments
+            .iter()
+            .filter(|s| wanted.contains(s.segment_id.as_str()))
+            .cloned()
+            .collect(),
+    );
+    let mut bytes = 0;
+    part.segments.retain(|s| {
+        bytes += s.text.len();
+        bytes <= BATCH_TEXT_BYTES
+    });
+    if part.segments.is_empty() {
+        return Ok(ExtractionReport {
+            output: ExtractionOutput { facts: Vec::new() },
+            rejected: Vec::new(),
+            repaired: 0,
+        });
+    }
+    // Uncovered lines and earlier facts of segments trimmed away are not sent:
+    // their values could not be quoted from this request.
+    let sent: std::collections::BTreeSet<String> =
+        part.segments.iter().map(|s| s.segment_id.clone()).collect();
+    let lines: Vec<Value> = uncovered
+        .iter()
+        .filter(|u| sent.contains(&u.segment_id))
+        .map(|u| json!({"segment_id":u.segment_id,"label":u.label,"text":u.text,"line":u.line}))
+        .collect();
+    let scratch = tempfile::Builder::new()
+        .prefix("me-inbox-")
+        .tempdir()
+        .map_err(failed)?;
+    #[cfg(test)]
+    let mut decisions = typesafe::FakeDecisions;
+    #[cfg(not(test))]
+    let mut decisions = typesafe::LazyDecisions::default();
+    let mut runner = Runner {
+        home,
+        binary,
+        scratch: scratch.path(),
+        cancel,
+        progress,
+        checkpoints,
+        decisions: &mut decisions,
+        session: None,
+        calls: 0,
+        guide,
+    };
+    let mut request = serde_json::to_value(&part).map_err(failed)?;
+    request["stage"] = json!("sweep_audit");
+    request["previous_facts"] = json!(
+        previous
+            .facts
+            .iter()
+            .filter(|f| sent.contains(&f.segment_id))
+            .collect::<Vec<_>>()
+    );
+    request["uncovered"] = json!(lines);
+    request["guide"] = json!(guide.key);
+    let instructions = format!(
+        "{} Local checks found these printed values in `uncovered` that previous_facts do not quote. Re-read the source and return a fact for each one that is a real documented value, with its exact printed label. Return facts: [] for any that are not. Never infer unprinted values.",
+        document::instructions(&json!({}), guide)
+    );
+    let output = runner.model(&part, "sweep_audit", request, &instructions)?;
+    let checked = ground_extraction(&part, output);
+    Ok(ExtractionReport {
+        output: checked.output,
+        rejected: checked.rejected,
+        repaired: checked.repaired,
+    })
 }
 fn fingerprint(value: &Value) -> String {
     // Attempt IDs change on resume; immutable source content and all decisions

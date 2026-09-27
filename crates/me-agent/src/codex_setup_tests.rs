@@ -233,6 +233,7 @@ fn extraction_requests_setup_instead_of_starting_an_embedded_login() {
         extract_with_binary(
             &temp.path().join("home"),
             &input,
+            &crate::guides::ReadingGuide::general(),
             Arc::new(AtomicBool::new(false)),
             &mut |e| {
                 match e {
