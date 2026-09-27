@@ -13,8 +13,9 @@
 //! read from (`text == segment.text[start..end]`) and a normalized value that is
 //! derived only from that span. Recall matters, but values stay strictly typed:
 //! dates are complete `YYYY-MM-DD` values (two-digit years are never expanded,
-//! except MRZ dates, which follow the ICAO century rules below), money always
-//! needs an explicit currency, and `checksum` is only set when a real
+//! except MRZ dates, which follow the ICAO century rules below), money needs
+//! an explicit currency; bare two-decimal amounts become `Amount` candidates
+//! whose currency is resolved later, and `checksum` is only set when a real
 //! check-digit algorithm validated the value.
 //!
 //! Every scanner works line by line in linear or locally bounded time, only
@@ -32,7 +33,9 @@ pub enum CandidateKind {
     TaxId,
     SocialInsuranceNumber,
     Date,
+    Period,
     Money,
+    Amount,
     Identifier,
     PersonName,
     Plate,
@@ -60,6 +63,14 @@ pub enum CandidateValue {
     Money {
         amount: String,
         currency: String,
+    },
+    /// Exact decimal amount printed without a currency marker (`-1234.56`). The
+    /// currency is resolved later from the document or its type, never here.
+    Amount(String),
+    /// A month or year the document names, as its first and last day (inclusive).
+    Period {
+        start: String,
+        end: String,
     },
     Mrz(MrzData),
 }
@@ -196,6 +207,8 @@ fn kind_priority(kind: CandidateKind) -> u8 {
         Identifier => 6,
         Date => 7,
         Money => 8,
+        Period => 7,
+        Amount => 8,
         PersonName => 9,
         Bic => 10,
         Email => 11,
@@ -244,7 +257,9 @@ fn scan_document(doc: &Doc<'_>, names: &NameMatcher, reference_year: i32) -> Vec
             scan_tax_id(&ctx, &mut out);
             scan_social_insurance(&ctx, &mut out);
             scan_dates(&ctx, &mut out);
+            scan_periods(&ctx, &mut out);
             scan_money(&ctx, &mut out);
+            scan_amounts(&ctx, &mut out);
             scan_identifiers(&ctx, &mut out);
             scan_plates(&ctx, &mut out);
             scan_vin(&ctx, &mut out);
@@ -322,6 +337,8 @@ struct Doc<'a> {
     /// Line content ranges without the line break (`\n` or `\r\n`).
     lines: Vec<(usize, usize)>,
     prev_nonempty: Vec<Option<usize>>,
+    /// Whether any line carries an `EUR`/`Ct` table header (see [`has_euro_cent_columns`]).
+    euro_cent: bool,
 }
 
 impl<'a> Doc<'a> {
@@ -349,10 +366,12 @@ impl<'a> Doc<'a> {
                 last = Some(i);
             }
         }
+        let euro_cent = has_euro_cent_columns(text);
         Self {
             text,
             lines,
             prev_nonempty,
+            euro_cent,
         }
     }
 
@@ -1552,6 +1571,108 @@ fn scan_dates(ctx: &LineCtx<'_>, out: &mut Vec<Raw>) {
     }
 }
 
+const YEAR_KEYWORDS: &[&str] = &[
+    "veranlagungszeitraum",
+    "kalenderjahr",
+    "steuerjahr",
+    "jahr",
+    "für",
+    "fuer",
+    "tax year",
+];
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap(year) => 29,
+        2 => 28,
+        _ => 31,
+    }
+}
+fn month_period(year: i32, month: u32) -> Option<(String, String)> {
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    Some((
+        iso_date(year, month, 1)?,
+        iso_date(year, month, days_in_month(year, month))?,
+    ))
+}
+/// "15. Januar 2026" is a date, not a month.
+fn day_before(s: &str, i: usize) -> bool {
+    let head = s[..i].trim_end();
+    let head = head.strip_suffix('.').unwrap_or(head).trim_end();
+    head.as_bytes().last().is_some_and(u8::is_ascii_digit)
+}
+/// `01/2026`, `01.2026` or `2026-01`, never part of a longer date.
+fn numeric_month(s: &str, i: usize) -> Option<(usize, (String, String))> {
+    let b = s.as_bytes();
+    let (first, j) = read_digits(b, i, 1, 4)?;
+    let sep = *b.get(j)?;
+    if j - i == 4 {
+        if sep != b'-' {
+            return None;
+        }
+        let (month, end) = read_digits(b, j + 1, 2, 2)?;
+        return number_end(s, end)
+            .then(|| month_period(first as i32, month))
+            .flatten()
+            .map(|p| (end, p));
+    }
+    if !matches!(sep, b'/' | b'.') || j - i > 2 {
+        return None;
+    }
+    let (year, end) = read_year(s, j + 1)?;
+    month_period(year, first).map(|p| (end, p))
+}
+/// A four-digit year directly after a period keyword ("Veranlagungszeitraum 2025").
+fn year_period(s: &str, i: usize) -> Option<(usize, (String, String))> {
+    let (year, end) = read_year(s, i)?;
+    let from = floor_boundary(s, i.saturating_sub(24));
+    let before = s[from..i].to_lowercase();
+    let before = before.trim_end().trim_end_matches(':').trim_end();
+    YEAR_KEYWORDS.iter().any(|k| before.ends_with(k)).then(|| {
+        (
+            end,
+            (format!("{year:04}-01-01"), format!("{year:04}-12-31")),
+        )
+    })
+}
+fn scan_periods(ctx: &LineCtx<'_>, out: &mut Vec<Raw>) {
+    let s = ctx.text;
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let parsed = if b[i].is_ascii_alphabetic() && word_start(s, i) && !day_before(s, i) {
+            read_month(s, i).and_then(|(month, j)| {
+                let (year, end) = read_year(s, skip_spaces(b, j, 3))?;
+                month_period(year, month).map(|p| (end, p))
+            })
+        } else if b[i].is_ascii_digit() && number_start(s, i) {
+            numeric_month(s, i).or_else(|| year_period(s, i))
+        } else {
+            None
+        };
+        match parsed {
+            Some((end, (start, last))) => {
+                out.push(ctx.raw(
+                    CandidateKind::Period,
+                    i,
+                    end,
+                    CandidateValue::Period { start, end: last },
+                ));
+                i = end;
+            }
+            None if b[i].is_ascii_alphanumeric() => {
+                while i < b.len() && b[i].is_ascii_alphanumeric() {
+                    i += 1;
+                }
+            }
+            None => i += 1,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Money (explicit currency marker required)
 // ---------------------------------------------------------------------------
@@ -1756,6 +1877,123 @@ fn scan_money(ctx: &LineCtx<'_>, out: &mut Vec<Raw>) {
                     currency: currency.to_string(),
                 },
             ));
+        }
+        i = end.max(i + 1);
+    }
+}
+
+/// A table header with separate `EUR` and `Ct` columns (official forms such as
+/// the Lohnsteuerbescheinigung print euros and cents in two cells).
+pub(crate) fn has_euro_cent_columns(text: &str) -> bool {
+    text.lines().any(|line| {
+        let words: Vec<String> = line
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        words.iter().any(|w| w == "eur") && words.iter().any(|w| w == "ct")
+    })
+}
+
+/// Every explicit currency marker in `text` (symbols, ISO codes, "Euro").
+/// Reserved for a later task's currency resolution (document marker, else type
+/// default); only tested here.
+#[allow(dead_code)]
+pub(crate) fn currencies_in(text: &str) -> std::collections::BTreeSet<&'static str> {
+    let mut found = std::collections::BTreeSet::new();
+    for (i, _) in text.char_indices() {
+        if let Some((code, _)) = currency_at(text, i) {
+            found.insert(code);
+        }
+    }
+    found
+}
+
+/// `52.345` followed by a separate two-digit cents cell that ends the row.
+fn euro_cent_pair(s: &str, end: usize, amount: &str) -> Option<(usize, String)> {
+    if amount.contains('.') {
+        return None;
+    }
+    let b = s.as_bytes();
+    let mut j = end;
+    while j < b.len() && matches!(b[j], b' ' | b'\t') {
+        j += 1;
+    }
+    if j == end || j + 2 > b.len() || !b[j].is_ascii_digit() || !b[j + 1].is_ascii_digit() {
+        return None;
+    }
+    let stop = j + 2;
+    s[stop..]
+        .trim()
+        .is_empty()
+        .then(|| (stop, format!("{amount}.{}", &s[j..stop])))
+}
+
+/// A complete amount without a currency: two decimals, a whole number when
+/// `allow_whole`, or a joined EUR/Ct cell pair when `euro_cent`.
+pub fn parse_bare_amount(text: &str, euro_cent: bool, allow_whole: bool) -> Option<String> {
+    let t = text.trim();
+    let (end, amount) = parse_amount(t, 0)?;
+    if end == t.len() {
+        let decimals = amount.rsplit_once('.').map(|(_, f)| f.len());
+        return match decimals {
+            Some(2) => Some(amount),
+            None if allow_whole => Some(amount),
+            _ => None,
+        };
+    }
+    if euro_cent {
+        return euro_cent_pair(t, end, &amount)
+            .filter(|(stop, _)| *stop == t.len())
+            .map(|(_, a)| a);
+    }
+    None
+}
+
+/// Bare amounts: exactly two decimals and no adjacent currency marker or `%`.
+fn scan_amounts(ctx: &LineCtx<'_>, out: &mut Vec<Raw>) {
+    let s = ctx.text;
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let signed = matches!(b[i], b'-' | b'+')
+            && b.get(i + 1).is_some_and(u8::is_ascii_digit)
+            && prev_char(s, i).is_none_or(|c| !c.is_alphanumeric());
+        if !(signed || (b[i].is_ascii_digit() && number_start(s, i))) {
+            i += 1;
+            continue;
+        }
+        let Some((end, amount)) = parse_amount(s, i) else {
+            i += 1;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            continue;
+        };
+        let after = skip_gap_forward(s, end);
+        let marked = currency_at(s, after).is_some()
+            || currency_before(s, skip_gap_backward(s, i)).is_some()
+            || next_char(s, after) == Some('%');
+        let two_decimals = amount.rsplit_once('.').is_some_and(|(_, f)| f.len() == 2);
+        if !marked && two_decimals && number_end(s, end) {
+            out.push(ctx.raw(
+                CandidateKind::Amount,
+                i,
+                end,
+                CandidateValue::Amount(amount),
+            ));
+        } else if !marked
+            && ctx.doc.euro_cent
+            && let Some((stop, joined)) = euro_cent_pair(s, end, &amount)
+        {
+            out.push(ctx.raw(
+                CandidateKind::Amount,
+                i,
+                stop,
+                CandidateValue::Amount(joined),
+            ));
+            i = stop;
+            continue;
         }
         i = end.max(i + 1);
     }
@@ -2823,6 +3061,12 @@ mod tests {
                         currency.len() == 3 && currency.bytes().all(|b| b.is_ascii_uppercase())
                     );
                 }
+                CandidateValue::Amount(amount) => assert!(is_decimal(amount), "{amount}"),
+                CandidateValue::Period { start, end } => {
+                    assert!(is_iso_date(start), "{start}");
+                    assert!(is_iso_date(end), "{end}");
+                    assert!(start <= end, "{start} / {end}");
+                }
                 // Plates keep their canonical "B-MX 1988" form.
                 CandidateValue::Identifier(id) if c.kind != CandidateKind::Plate => {
                     assert!(!id.contains(' '), "{id}")
@@ -2870,6 +3114,8 @@ mod tests {
                 v.clone()
             }
             CandidateValue::Money { amount, currency } => format!("{amount} {currency}"),
+            CandidateValue::Amount(a) => a.clone(),
+            CandidateValue::Period { start, end } => format!("{start} – {end}"),
             CandidateValue::Mrz(m) => m.document_number.clone(),
         }
     }
@@ -3306,7 +3552,11 @@ mod tests {
         assert!(of_kind(&scan(text), CandidateKind::Date).is_empty());
         let found = scan("Gültig bis: März 2024");
         assert!(of_kind(&found, CandidateKind::Date).is_empty());
-        assert_eq!(values(&found, CandidateKind::LabelValue), ["März 2024"]);
+        // "März 2024" is now a complete month period, not a generic label/value pair.
+        assert!(of_kind(&found, CandidateKind::LabelValue).is_empty());
+        let periods = of_kind(&found, CandidateKind::Period);
+        assert_eq!(value_str(periods[0]), "2024-03-01 – 2024-03-31");
+        assert_eq!(periods[0].label.as_deref(), Some("Gültig bis"));
     }
 
     // --- Money --------------------------------------------------------------
@@ -3343,6 +3593,149 @@ mod tests {
     fn amounts_without_currency_are_not_money() {
         let found = scan("Summe 1.234,56\nZins 12,5 %\nDatum 01.02.2024 EUR-Konto\n10-20 €");
         assert!(of_kind(&found, CandidateKind::Money).is_empty());
+    }
+
+    // --- Bare amounts and periods --------------------------------------------
+
+    fn labeled_amount(found: &[Candidate], label: &str) -> Option<String> {
+        found
+            .iter()
+            .find(|c| c.kind == CandidateKind::Amount && c.label.as_deref() == Some(label))
+            .map(|c| match &c.value {
+                CandidateValue::Amount(a) => a.clone(),
+                other => panic!("unexpected {other:?}"),
+            })
+    }
+
+    #[test]
+    fn bare_payroll_amounts_become_labeled_amounts() {
+        let found = scan(include_str!("../fixtures/documents/payslip_datev_rows.txt"));
+        assert_eq!(
+            labeled_amount(&found, "Gesamt-Brutto").as_deref(),
+            Some("5340.00")
+        );
+        assert_eq!(
+            labeled_amount(&found, "Lohnsteuer").as_deref(),
+            Some("1032.58")
+        );
+        assert_eq!(
+            labeled_amount(&found, "Netto-Verdienst").as_deref(),
+            Some("3210.05")
+        );
+        assert_eq!(
+            labeled_amount(&found, "Solidaritätszuschlag").as_deref(),
+            Some("0.00")
+        );
+        // A currency beside the value stays money and is never duplicated as an amount.
+        assert!(
+            found
+                .iter()
+                .any(|c| c.kind == CandidateKind::Money && c.text == "3.210,05 EUR")
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|c| c.kind == CandidateKind::Amount && c.text.contains("EUR"))
+        );
+        // Percentages and three-decimal factors are not amounts.
+        assert!(
+            !found
+                .iter()
+                .any(|c| c.kind == CandidateKind::Amount && c.text == "2,50")
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|c| c.kind == CandidateKind::Amount && c.text == "0,950")
+        );
+        // The label/value catch-all at the same span hands its label over.
+        assert!(
+            !found
+                .iter()
+                .any(|c| c.kind == CandidateKind::LabelValue && c.text == "1.032,58")
+        );
+    }
+
+    #[test]
+    fn euro_and_cent_cells_join_only_under_an_eur_ct_header() {
+        let found = scan(include_str!("../fixtures/documents/lstb_2026.txt"));
+        let amounts: Vec<(&str, &CandidateValue)> = found
+            .iter()
+            .filter(|c| c.kind == CandidateKind::Amount)
+            .map(|c| (c.text.as_str(), &c.value))
+            .collect();
+        assert!(amounts.contains(&("64.080   00", &CandidateValue::Amount("64080.00".into()))));
+        assert!(amounts.contains(&("12.390   96", &CandidateValue::Amount("12390.96".into()))));
+        assert!(amounts.contains(&("833   04", &CandidateValue::Amount("833.04".into()))));
+        // Without the header, two separate numbers stay separate.
+        let plain = scan("Kostenstelle   4711   12\n");
+        assert!(!plain.iter().any(|c| c.kind == CandidateKind::Amount));
+    }
+
+    #[test]
+    fn month_and_year_periods_are_complete_and_never_part_of_a_date() {
+        let period = |text: &str| -> Vec<(String, String)> {
+            scan(text)
+                .into_iter()
+                .filter_map(|c| match c.value {
+                    CandidateValue::Period { start, end } => Some((start, end)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let jan = vec![("2026-01-01".to_owned(), "2026-01-31".to_owned())];
+        assert_eq!(period("Abrechnungsmonat Januar 2026\n"), jan);
+        assert_eq!(period("Monat: Jan. 2026\n"), jan);
+        assert_eq!(period("Zeitraum 01/2026\n"), jan);
+        assert_eq!(period("Zeitraum 01.2026\n"), jan);
+        assert_eq!(
+            period("Periode 2024-02\n"),
+            vec![("2024-02-01".to_owned(), "2024-02-29".to_owned())]
+        );
+        assert_eq!(
+            period("Veranlagungszeitraum 2025\n"),
+            vec![("2025-01-01".to_owned(), "2025-12-31".to_owned())]
+        );
+        assert_eq!(
+            period("Lohnsteuerbescheinigung für 2026\n"),
+            vec![("2026-01-01".to_owned(), "2026-12-31".to_owned())]
+        );
+        assert!(period("Datum 15. Januar 2026\n").is_empty());
+        assert!(period("Datum 31.01.2026\n").is_empty());
+        assert!(period("Datum 2026-01-15\n").is_empty());
+        assert!(period("Monat 13/2026\n").is_empty());
+    }
+
+    #[test]
+    fn parse_bare_amount_accepts_only_complete_amounts() {
+        assert_eq!(
+            parse_bare_amount(" 1.032,58 ", false, false).as_deref(),
+            Some("1032.58")
+        );
+        assert_eq!(parse_bare_amount("4.200", false, false), None);
+        assert_eq!(
+            parse_bare_amount("4.200", false, true).as_deref(),
+            Some("4200")
+        );
+        assert_eq!(
+            parse_bare_amount("64.080   00", true, false).as_deref(),
+            Some("64080.00")
+        );
+        assert_eq!(parse_bare_amount("64.080   00", false, false), None);
+        assert_eq!(parse_bare_amount("1.032,58 Euro", false, true), None);
+        assert_eq!(
+            parse_bare_amount("-12,50", false, false).as_deref(),
+            Some("-12.50")
+        );
+    }
+
+    #[test]
+    fn currencies_in_finds_every_explicit_marker_once() {
+        assert_eq!(
+            currencies_in("1.234,56 € and 12,50 USD and 500 Euro, again in EUR"),
+            std::collections::BTreeSet::from(["EUR", "USD"])
+        );
+        assert!(currencies_in("Summe 1.234,56").is_empty());
     }
 
     // --- Identifiers --------------------------------------------------------
@@ -3486,14 +3879,15 @@ mod tests {
             .into_iter()
             .map(|c| (value_str(c), c.label.clone()))
             .collect();
-        let expected = [
-            ("Musterstadt", "Geburtsort"),
-            ("03/2024", "Gültig bis"),
-            ("x", "Wert"),
-        ]
-        .map(|(v, l)| (v.to_string(), Some(l.to_string())));
+        let expected = [("Musterstadt", "Geburtsort"), ("x", "Wert")]
+            .map(|(v, l)| (v.to_string(), Some(l.to_string())));
         assert_eq!(pairs, expected);
         assert_eq!(values(&found, CandidateKind::Date), ["1988-03-14"]);
+        // "03/2024" is now a complete month period, which hands over the label
+        // that would otherwise have made it a label/value pair.
+        let periods = of_kind(&found, CandidateKind::Period);
+        assert_eq!(value_str(periods[0]), "2024-03-01 – 2024-03-31");
+        assert_eq!(periods[0].label.as_deref(), Some("Gültig bis"));
     }
 
     #[test]

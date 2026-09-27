@@ -299,6 +299,8 @@ fn display_content(content: &SlotContent) -> String {
                 s.clone()
             }
             CandidateValue::Money { amount, currency } => format!("{amount} {currency}"),
+            CandidateValue::Amount(a) => a.clone(),
+            CandidateValue::Period { start, end } => format!("{start} – {end}"),
             CandidateValue::Mrz(m) => m.document_number.clone(),
         },
     }

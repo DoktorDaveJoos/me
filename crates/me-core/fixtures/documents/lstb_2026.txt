@@ -1,0 +1,17 @@
+Ausdruck der elektronischen Lohnsteuerbescheinigung für 2026
+Nachstehende Daten wurden maschinell an die Finanzverwaltung übermittelt.
+Identifikationsnummer:   65929970489
+Personalnummer:   00042
+Steuerklasse/Faktor   1
+1. Bescheinigungszeitraum   01.01.2026 - 31.12.2026
+EUR   Ct
+3. Bruttoarbeitslohn einschl. Sachbezüge   64.080   00
+4. Einbehaltene Lohnsteuer von 3.   12.390   96
+5. Einbehaltener Solidaritätszuschlag von 3.   0   00
+6. Einbehaltene Kirchensteuer des Arbeitnehmers von 3.   0   00
+22. a) Arbeitgeberanteil zur gesetzlichen Rentenversicherung   5.959   44
+23. a) Arbeitnehmeranteil zur gesetzlichen Rentenversicherung   5.959   44
+25. Arbeitnehmerbeiträge zur gesetzlichen Krankenversicherung   5.222   52
+26. Arbeitnehmerbeiträge zur sozialen Pflegeversicherung   1.153   44
+27. Arbeitnehmerbeiträge zur Arbeitslosenversicherung   833   04
+Anschrift und Steuernummer des Arbeitgebers:   Muster Software GmbH   Musterweg 1   80331 München

@@ -170,7 +170,8 @@ fn field(slot: &Slot) -> Value {
 fn kind_name(kind: CandidateKind) -> &'static str {
     match kind {
         CandidateKind::Date => "date",
-        CandidateKind::Money => "amount",
+        CandidateKind::Money | CandidateKind::Amount => "amount",
+        CandidateKind::Period => "period",
         CandidateKind::PersonName => "name",
         CandidateKind::Organization => "organization",
         _ => "value",
