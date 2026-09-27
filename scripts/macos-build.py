@@ -77,8 +77,7 @@ def verify_manifest(bundle, manifest):
         verify_identity(bundle if name == "app" else bundle / "Contents/MacOS" / name, expected)
 
 
-def snapshot(root):
-    result = {}
+def account_paths(root):
     for name in DATA_NAMES:
         source = root / name
         if source.is_symlink():
@@ -93,12 +92,18 @@ def snapshot(root):
                     continue  # Provider caches, skills and temporary executable links regenerate.
             if path.is_symlink():
                 raise ValueError("Migration refuses symbolic links in account data")
-            if path.is_file():
-                with path.open("rb") as stream:
-                    digest = hashlib.sha256()
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                result[str(path.relative_to(root))] = digest.hexdigest()
+            yield path, relative
+
+
+def snapshot(root):
+    result = {}
+    for path, relative in account_paths(root):
+        if path.is_file():
+            with path.open("rb") as stream:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            result[str(relative)] = digest.hexdigest()
     return result
 
 
@@ -112,6 +117,10 @@ def migrate_data(source, destination):
     with tempfile.TemporaryDirectory(prefix=".me-migration-", dir=destination.parent) as temporary:
         staged = Path(temporary) / "data"
         staged.mkdir(mode=0o700)
+        # Empty folders are vault structure too (a wiped vault's objects folder).
+        for path, relative in account_paths(source):
+            if path.is_dir():
+                (staged / relative).mkdir(parents=True, exist_ok=True, mode=0o700)
         for relative in before:
             old, new = source / relative, staged / relative
             new.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

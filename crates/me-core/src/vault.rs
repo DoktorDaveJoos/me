@@ -201,6 +201,16 @@ impl Vault {
             ));
         }
         let keys = header.unlock(password)?;
+        // File-only copies drop an empty objects folder; restore it after
+        // authentication. Anything other than a real folder stays an error.
+        match fs::symlink_metadata(root.join("objects")) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => return Err(Error::Format),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                private_dir(&root.join("objects"))?
+            }
+            Err(err) => return Err(err.into()),
+        }
         let mut db = database(&root.join("vault.db"), &keys[..32], false)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if !(1..=15).contains(&version) {
@@ -890,6 +900,29 @@ mod recovery_tests {
             .unwrap();
         assert_eq!(state, "done");
         assert_eq!(vault.collection("", false).unwrap().total, 1);
+    }
+    #[test]
+    fn unlock_restores_a_missing_empty_object_folder() {
+        // Copy tools that transfer only files drop a wiped vault's empty folder.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("vault");
+        drop(Vault::create(&root, "synthetic-passphrase-2026").unwrap());
+        fs::remove_dir(root.join("objects")).unwrap();
+        assert!(Vault::unlock(&root, "wrong-synthetic-passphrase").is_err());
+        assert!(!root.join("objects").exists());
+        let mut vault = Vault::unlock(&root, "synthetic-passphrase-2026").unwrap();
+        let file = temp.path().join("Gehaltsabrechnung.txt");
+        fs::write(&file, "SYNTHETIC Abrechnung").unwrap();
+        vault
+            .import_document(&file, "restored-objects", DocumentClass::Unclassified)
+            .unwrap();
+        drop(vault);
+        fs::remove_dir_all(root.join("objects")).unwrap();
+        fs::write(root.join("objects"), "not a folder").unwrap();
+        assert!(matches!(
+            Vault::unlock(&root, "synthetic-passphrase-2026"),
+            Err(Error::Format)
+        ));
     }
     #[test]
     fn failed_transaction_has_no_partial_note_or_change_event() {

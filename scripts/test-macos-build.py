@@ -43,11 +43,15 @@ class DevelopmentChannel(unittest.TestCase):
             cache=source/"codex-inbox/tmp";cache.mkdir()
             (cache/"generated-link").symlink_to(root)
             (source/"codex-inbox/models_cache.json").write_text("regenerated")
+            # A wiped vault keeps an empty objects folder; imports need it.
+            for empty in ("vault/objects", "accounts/slot/vault/objects"): (source/empty).mkdir()
             before=build.snapshot(source)
             self.assertEqual(build.migrate_data(source,destination),5)
             self.assertEqual(build.snapshot(destination),before)
             self.assertEqual(build.snapshot(source),before)
             self.assertFalse((destination/"api.log").exists())
+            for empty in ("vault/objects", "accounts/slot/vault/objects"): self.assertTrue((destination/empty).is_dir())
+            self.assertFalse((destination/"codex-inbox/tmp").exists())
             with self.assertRaises(ValueError): build.migrate_data(source,destination)
 
     def test_migration_refuses_links_and_empty_sources(self):
