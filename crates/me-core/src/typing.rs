@@ -59,22 +59,15 @@ pub fn locate(
     let quote_start = text.find(quote)?;
     let offset = quote.find(value)?;
     let start = quote_start + offset;
-    let line_start = text[..quote_start].rfind('\n').map_or(0, |i| i + 1);
+    let end = start + value.len();
     let quote_end = quote_start + quote.len();
-    let line_end = text[quote_end..]
-        .find('\n')
-        .map_or(text.len(), |i| quote_end + i);
     Some(Located {
         segment_id: segment_id.to_owned(),
         start,
-        end: start + value.len(),
+        end,
         quote_start,
         quote_end,
-        line: text[line_start..line_end]
-            .trim()
-            .chars()
-            .take(240)
-            .collect(),
+        line: candidates::line_window_for(text, start, end),
     })
 }
 
@@ -216,7 +209,7 @@ pub fn type_value(
         start: at.start,
         end: at.end,
         line: at.line.clone(),
-        label: Some(label.chars().take(80).collect()),
+        label: Some(candidates::truncate_bytes(label, candidates::LABEL_MAX).to_owned()),
         checksum,
     })
 }
@@ -378,6 +371,54 @@ mod tests {
             V::Period {
                 start: "2026-01-01".into(),
                 end: "2026-01-31".into()
+            }
+        );
+    }
+
+    #[test]
+    fn locate_windows_a_long_multi_byte_line_by_bytes_around_the_value() {
+        let text = format!(
+            "{} Lohnsteuer   1.032,58 {}",
+            "ü".repeat(500),
+            "ü".repeat(500)
+        );
+        let segments = seg(&text);
+        let at = locate(&segments, "s0", "Lohnsteuer   1.032,58", "1.032,58").unwrap();
+        assert!(at.line.len() <= 240, "line was {} bytes", at.line.len());
+        assert!(at.line.contains("1.032,58"));
+    }
+
+    #[test]
+    fn type_value_truncates_a_long_multi_byte_label_by_bytes() {
+        let segments = seg(PAYSLIP);
+        let ctx = TypingContext::new(&segments, Some("payslip"), 2026);
+        let at = locate(&segments, "s0", "Lohnsteuer   1.032,58", "1.032,58").unwrap();
+        let label = "ä".repeat(200);
+        let c = type_value(
+            &ctx,
+            &at,
+            &label,
+            "1.032,58",
+            ValueKind::Money(Some(Period::Month)),
+        )
+        .unwrap();
+        let got = c.label.unwrap();
+        assert!(got.len() <= 80, "label was {} bytes", got.len());
+        assert!(label.starts_with(&got));
+    }
+
+    #[test]
+    fn a_values_own_printed_currency_beats_the_types_default() {
+        let text = "Betrag 12,00 CHF\n";
+        let segments = seg(text);
+        let ctx = TypingContext::new(&segments, Some("payslip"), 2026);
+        let at = locate(&segments, "s0", "Betrag 12,00 CHF", "12,00 CHF").unwrap();
+        let c = type_value(&ctx, &at, "Betrag", "12,00 CHF", ValueKind::Money(None)).unwrap();
+        assert_eq!(
+            c.value,
+            V::Money {
+                amount: "12.00".into(),
+                currency: "CHF".into()
             }
         );
     }

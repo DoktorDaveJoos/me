@@ -121,7 +121,7 @@ pub struct SourceSegment<'a> {
 pub const MAX_CANDIDATES: usize = 200;
 
 const LINE_MAX: usize = 240;
-const LABEL_MAX: usize = 80;
+pub(crate) const LABEL_MAX: usize = 80;
 /// How far before a candidate a same-line `Label:` is searched (bounds work on huge lines).
 const LABEL_SCAN: usize = 256;
 const PREV_LABEL_MAX: usize = 40;
@@ -441,6 +441,13 @@ impl<'a> Doc<'a> {
     }
 }
 
+/// The trimmed line(s) of `text` containing the value span `start..end`, windowed
+/// to [`LINE_MAX`] bytes around the value (same rule as [`Doc::line_window`], for
+/// callers that only have a segment's text and a value span, not a `Doc`).
+pub(crate) fn line_window_for(text: &str, start: usize, end: usize) -> String {
+    Doc::new(text).line_window(start, end)
+}
+
 /// `Label:` before `pos` on the same line (searched within [`LABEL_SCAN`] bytes).
 fn same_line_label(text: &str, line_start: usize, pos: usize) -> Option<(usize, usize)> {
     let from = ceil_boundary(text, pos.saturating_sub(LABEL_SCAN).max(line_start));
@@ -599,7 +606,7 @@ fn ceil_boundary(s: &str, i: usize) -> usize {
     i
 }
 
-fn truncate_bytes(s: &str, max: usize) -> &str {
+pub(crate) fn truncate_bytes(s: &str, max: usize) -> &str {
     s[..floor_boundary(s, max)].trim_end()
 }
 
