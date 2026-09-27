@@ -218,7 +218,18 @@ pub fn ground_extraction(input: &ExtractionInput, output: ExtractionOutput) -> G
                             code: "subject_unknown",
                         });
                     }
-                } else if !result.output.facts.iter().any(|old| same_fact(old, &fact)) {
+                } else if let Some(old) = result
+                    .output
+                    .facts
+                    .iter_mut()
+                    .find(|old| same_fact(old, &fact))
+                {
+                    // A later duplicate reading may carry the slot tag the first
+                    // pass missed; never let it overwrite one already kept.
+                    if (old.slot.is_empty() || old.slot == "none") && !fact.slot.is_empty() {
+                        old.slot = fact.slot;
+                    }
+                } else {
                     result.output.facts.push(fact);
                 }
             }
@@ -417,5 +428,22 @@ mod tests {
         assert_eq!(bare.len(), 1);
         assert_eq!(bare[0].context_quote, "August 2026");
         assert_eq!(bare[0].slot, "gross");
+    }
+
+    #[test]
+    fn a_later_duplicate_within_one_ground_extraction_pass_contributes_its_slot() {
+        let mut first = fact("person.tax_id", "01234567890", "Steuer-ID: 01234567890");
+        first.slot = "none".into();
+        let mut second = first.clone();
+        second.slot = "tax_id".into();
+        let result = ground_extraction(
+            &input(),
+            ExtractionOutput {
+                facts: vec![first, second],
+            },
+        );
+        assert!(result.rejected.is_empty());
+        assert_eq!(result.output.facts.len(), 1);
+        assert_eq!(result.output.facts[0].slot, "tax_id");
     }
 }

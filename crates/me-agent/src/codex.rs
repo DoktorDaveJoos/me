@@ -899,6 +899,7 @@ for line in sys.stdin:
    assert stage in ['extract','audit']
    facts=[]
    if stage=='audit':
+    assert source['guide'].startswith('general|')
     assert source['previous_facts']['facts']==[]
     for index in range(24):
      value=f'{index},00 EUR'

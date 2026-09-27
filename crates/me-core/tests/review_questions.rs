@@ -459,3 +459,43 @@ fn approved_document_details_are_explicit_in_chat_context() {
     );
     assert_eq!(context["confirmed_details"][0]["state"], "accepted");
 }
+
+#[test]
+fn organization_input_carries_the_classify_family_for_filing() {
+    let (_temp, mut vault, item, input) = setup();
+    vault
+        .finish_extraction_with_questions(&input, ExtractionOutput { facts: vec![] }, vec![])
+        .unwrap();
+    vault.finish_evaluation(item, None).unwrap();
+    vault
+        .save_document_profile(
+            &input.source_id,
+            "employment",
+            0.9,
+            Some("payslip"),
+            Some(0.9),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let organization = vault.organization_input().unwrap();
+    let docs = organization["documents"].as_array().unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0]["item"], item);
+    assert_eq!(docs[0]["family"], "employment");
+}
+
+#[test]
+fn organization_input_leaves_family_absent_without_a_classify_profile() {
+    let (_temp, mut vault, item, input) = setup();
+    vault
+        .finish_extraction_with_questions(&input, ExtractionOutput { facts: vec![] }, vec![])
+        .unwrap();
+    vault.finish_evaluation(item, None).unwrap();
+    let organization = vault.organization_input().unwrap();
+    let docs = organization["documents"].as_array().unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0]["item"], item);
+    assert!(docs[0]["family"].is_null());
+}

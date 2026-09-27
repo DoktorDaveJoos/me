@@ -33,7 +33,9 @@ impl Checkpoints for NoCheckpoints {
     }
 }
 // Guided reading tags checklist slots, so results of earlier pipelines are not
-// reused. Step caches also carry the guide key, so a new guide rereads a section.
+// reused. A section checkpoint is keyed by its section text and this pipeline
+// version only, never by guide: a caller that reuses checkpoints across guides
+// must namespace them by guide itself (the desktop does this in a later task).
 pub const PIPELINE: &str = "document-v6-guided-v1";
 pub struct ExtractionReport {
     pub output: ExtractionOutput,
@@ -507,6 +509,9 @@ impl<P: FnMut(Progress), C: Checkpoints, D: Decisions> Runner<'_, P, C, D> {
             request["stage"] = json!("audit");
             request["previous_facts"] = json!(output);
             request["decision"] = decision;
+            // The guide is part of the step fingerprint here too: a cached audit
+            // from another guide must never be reused.
+            request["guide"] = json!(self.guide.key);
             request["evidence_issues"] = json!(
                 checked
                     .rejected

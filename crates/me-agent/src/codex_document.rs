@@ -44,3 +44,22 @@ pub(super) fn instructions(profile: &Value, guide: &crate::guides::ReadingGuide)
         guide.text
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn payslip_instructions_carry_the_payroll_guide_and_its_checklist() {
+        let guide = crate::guides::reading_guide("employment", Some("payslip"));
+        let text = instructions(&json!({}), &guide);
+        assert!(text.contains("Jahreswerte"), "missing payroll guide text");
+        assert!(text.contains("Checklist."), "missing checklist header");
+        assert!(
+            text.lines()
+                .any(|l| l.trim_start().starts_with("- wage_tax:")),
+            "missing wage_tax checklist line: {text}"
+        );
+    }
+}

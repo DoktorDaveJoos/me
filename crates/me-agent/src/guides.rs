@@ -23,7 +23,7 @@ impl ReadingGuide {
     pub fn general() -> Self {
         Self {
             key: format!("general|{}", doc_types::REGISTRY_VERSION),
-            text: GENERAL.to_owned(),
+            text: format!("{GENERAL}\n{CORRESPONDENCE_GUIDE}"),
             checklist: Vec::new(),
         }
     }
@@ -74,7 +74,7 @@ fn family_text(family: &str) -> &'static str {
         "banking" => BANKING_GUIDE,
         "invoice" => INVOICE_GUIDE,
         "insurance" | "housing" | "contract" | "vehicle" => CONTRACT_GUIDE,
-        "correspondence" | "health" => "",
+        "correspondence" | "health" | "tax" => "",
         _ => GENERAL,
     }
 }
@@ -154,6 +154,18 @@ mod tests {
         for needle in ["line 23", "line 22", "EUR and Ct", "Korrektur", "unbesetzt"] {
             assert!(g.text.contains(needle), "missing {needle}");
         }
+        assert!(!g.text.contains("Do not assume a document type"));
+    }
+
+    #[test]
+    fn the_general_guide_keeps_the_correspondence_and_email_rules() {
+        let general = ReadingGuide::general();
+        assert!(
+            general.text.contains("claimed sender"),
+            "general guide lost the correspondence/email rules: {}",
+            general.text
+        );
+        assert_eq!(reading_guide("other", None), general);
     }
 
     #[test]

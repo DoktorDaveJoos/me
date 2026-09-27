@@ -104,8 +104,9 @@ fn answer_with_binary(
     Ok(answer)
 }
 
-/// Local filing reuses already-paid TypeSafe decisions. Unknown or mixed
-/// classifications stay in Unsorted; folder labels never contain personal data.
+/// Local filing reuses the family Classify already stored for the document.
+/// Unknown or missing classifications stay in Unsorted; folder labels never
+/// contain personal data.
 pub fn organize_documents(
     input: Value,
     cancel: Arc<AtomicBool>,
@@ -120,33 +121,11 @@ pub fn organize_documents(
             return Err("Cancelled.".into());
         }
         let item = document["item"].as_u64().ok_or(FAILURE)?;
-        let kinds = document["profiles"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|profile| {
-                let kind = &profile["document_kind"];
-                if kind["confidence"].as_f64().is_some_and(|c| c >= 0.7)
-                    && profile["mixed"]["noul"].as_f64().is_some_and(|c| c < 0.2)
-                {
-                    kind["choice"].as_str().unwrap_or("other")
-                } else {
-                    "other"
-                }
-            })
-            .collect::<Vec<_>>();
-        let first = kinds.first().copied().unwrap_or("other");
-        let kind = if kinds.iter().all(|k| *k == first) {
-            first
-        } else {
-            "other"
-        };
-        let path = match kind {
-            "payroll" => "Employment",
+        let path = match document["family"].as_str().unwrap_or("") {
+            "employment" => "Employment",
             "insurance" => "Insurance",
-            "letter" => "Correspondence",
-            "email" => "Correspondence",
             "invoice" => "Invoices",
+            "correspondence" => "Correspondence",
             _ => "Unsorted",
         };
         folders.push(me_core::FolderAssignment {
@@ -162,17 +141,29 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     #[test]
-    fn filing_reuses_typed_categories_without_provider_access() {
-        let profile = |kind: &str, confidence: f64| json!({"document_kind":{"choice":kind,"confidence":confidence},"mixed":{"noul":0.0}});
+    fn filing_maps_the_classify_family_to_existing_folders_and_defaults_to_unsorted() {
+        let doc = |item: u64, family: Option<&str>| {
+            let mut v = json!({"item": item});
+            if let Some(family) = family {
+                v["family"] = json!(family);
+            }
+            v
+        };
         let input = json!({"documents":[
-            {"item":1,"profiles":[profile("payroll",0.9),profile("payroll",0.95)]},
-            {"item":2,"profiles":[profile("insurance",0.4)]},
-            {"item":3,"profiles":[profile("insurance",0.9),profile("invoice",0.9)]},
-            {"item":4,"profiles":[]}
+            doc(1, Some("employment")),
+            doc(2, Some("insurance")),
+            doc(3, Some("invoice")),
+            doc(4, Some("correspondence")),
+            doc(5, Some("identity")),
+            doc(6, None),
         ]});
         let folders = organize_documents(input, Arc::new(AtomicBool::new(false))).unwrap();
         assert_eq!(folders[0].path, vec!["Employment"]);
-        assert!(folders[1..].iter().all(|f| f.path == vec!["Unsorted"]));
+        assert_eq!(folders[1].path, vec!["Insurance"]);
+        assert_eq!(folders[2].path, vec!["Invoices"]);
+        assert_eq!(folders[3].path, vec!["Correspondence"]);
+        assert_eq!(folders[4].path, vec!["Unsorted"], "unmapped family");
+        assert_eq!(folders[5].path, vec!["Unsorted"], "missing family");
     }
     #[test]
     fn chat_retrieves_confirmed_german_data_and_filters_invented_citations() {
