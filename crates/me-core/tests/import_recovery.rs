@@ -73,6 +73,13 @@ fn reservations_and_step_results_survive_restart_without_resetting_allowance() {
         &json!({"untrusted":"01234567890"}),
     )
     .unwrap();
+    // The omission sweep's focused audit is a resumable step too.
+    v.save_import_step_cache(&first, "test-v1", "sweep_audit", &json!({"facts":[]}))
+        .unwrap();
+    assert!(
+        v.save_import_step_cache(&first, "test-v1", "unknown", &json!({}))
+            .is_err()
+    );
     v.update_import_progress(item, "first", ImportStage::Extracting, 2, 4)
         .unwrap();
     assert!(v.proposals(item).unwrap().is_empty());
@@ -95,6 +102,11 @@ fn reservations_and_step_results_survive_restart_without_resetting_allowance() {
             .unwrap()
             .unwrap()["untrusted"],
         "01234567890"
+    );
+    assert!(
+        v.import_step_cache(&second, "test-v1", "sweep_audit")
+            .unwrap()
+            .is_some()
     );
     assert!(
         v.reserve_import_request(&second, ImportProvider::OpenAi)

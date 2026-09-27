@@ -339,7 +339,14 @@ impl Vault {
         self.checkpoint_active(input)?;
         let json = serde_json::to_string(output).map_err(|_| Error::Format)?;
         if json.len() > 512 * 1024
-            || !["interpret", "extract", "verify_decision", "audit"].contains(&step)
+            || ![
+                "interpret",
+                "extract",
+                "verify_decision",
+                "audit",
+                "sweep_audit",
+            ]
+            .contains(&step)
         {
             return Err(Error::Validation("Invalid import checkpoint."));
         }

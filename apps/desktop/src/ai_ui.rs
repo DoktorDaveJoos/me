@@ -23,11 +23,14 @@ struct DocumentResult {
     proposals: Vec<me_core::Proposal>,
     fact_count: Option<usize>,
     warning: Option<String>,
-    graph: Option<super::graph_import::GraphRun>,
+    graph: Option<super::read_import::ReadRun>,
 }
 
-struct VaultCheckpoints {
-    session: Arc<Mutex<Option<Vault>>>,
+/// Durable reader checkpoints and step results. `pipeline` namespaces them by
+/// reader version and guide, so a section read with another guide is read again.
+pub(super) struct VaultCheckpoints {
+    pub(super) session: Arc<Mutex<Option<Vault>>>,
+    pub(super) pipeline: String,
 }
 impl me_agent::codex::Checkpoints for VaultCheckpoints {
     fn load(
@@ -39,7 +42,7 @@ impl me_agent::codex::Checkpoints for VaultCheckpoints {
             .map_err(|_| "Vault unavailable.")?
             .as_ref()
             .ok_or("Vault locked.")?
-            .extraction_checkpoint(input, me_agent::codex::PIPELINE)
+            .extraction_checkpoint(input, &self.pipeline)
             .map_err(core_error)
     }
 
@@ -53,7 +56,7 @@ impl me_agent::codex::Checkpoints for VaultCheckpoints {
             .map_err(|_| "Vault unavailable.")?
             .as_mut()
             .ok_or("Vault locked.")?
-            .save_extraction_checkpoint(input, me_agent::codex::PIPELINE, output)
+            .save_extraction_checkpoint(input, &self.pipeline, output)
             .map_err(core_error)
     }
     fn load_step(
@@ -66,7 +69,7 @@ impl me_agent::codex::Checkpoints for VaultCheckpoints {
             .map_err(|_| "Vault unavailable.")?
             .as_ref()
             .ok_or("Vault locked.")?
-            .import_step_cache(input, me_agent::codex::PIPELINE, step)
+            .import_step_cache(input, &self.pipeline, step)
             .map_err(core_error)
     }
     fn save_step(
@@ -80,7 +83,7 @@ impl me_agent::codex::Checkpoints for VaultCheckpoints {
             .map_err(|_| "Vault unavailable.")?
             .as_mut()
             .ok_or("Vault locked.")?
-            .save_import_step_cache(input, me_agent::codex::PIPELINE, step, output)
+            .save_import_step_cache(input, &self.pipeline, step, output)
             .map_err(core_error)
     }
     fn reserve(
@@ -373,7 +376,6 @@ impl MeApp {
         self.error = None;
         let session = self.session.clone();
         let generation = self.generation;
-        let codex_ready = self.codex_ready;
         let (tx, rx) = std::sync::mpsc::channel();
         let run = uuid::Uuid::new_v4().to_string();
         let task = cx.background_executor().spawn(async move {
@@ -505,205 +507,34 @@ impl MeApp {
                         current: 1,
                         total: 1,
                     });
-                    if automatic {
-                        // Tiered pipeline: classify every file, extract eager types only.
-                        stage = "graph.pipeline";
-                        record(stage, &[F::Count("item", item)]);
-                        let graph = super::graph_import::run_graph_import(
-                            &session,
-                            item,
-                            &run,
-                            &cancel,
-                            &tx,
-                            &home,
-                            codex_ready,
-                        );
-                        let mut guard = session.lock().map_err(|_| "Vault unavailable.")?;
-                        let v = guard.as_mut().ok_or("Vault locked.")?;
-                        return match graph {
-                            Ok(graph) => Ok(DocumentResult {
-                                collection: v.collection("", false).map_err(core_error)?,
-                                proposals: v.proposals(item).map_err(core_error)?,
-                                fact_count: Some(graph.assertions),
-                                warning: (graph.checks > 0).then(|| {
-                                    format!(
-                                        "{} worth a quick look in Review.",
-                                        if graph.checks == 1 {
-                                            "1 value is".to_owned()
-                                        } else {
-                                            format!("{} values are", graph.checks)
-                                        }
-                                    )
-                                }),
-                                graph: Some(graph),
-                            }),
-                            Err(e) => {
-                                let failure = me_core::ImportFailure::new(
-                                    me_core::ImportProvider::Local,
-                                    if cancel.load(Ordering::SeqCst) {
-                                        me_core::ImportErrorKind::Cancelled
-                                    } else {
-                                        me_core::ImportErrorKind::Storage
-                                    },
-                                    e.clone(),
-                                );
-                                let _ = v.record_import_failure(item, &run, &failure);
-                                Err(e)
-                            }
-                        };
-                    }
-                    stage = "ai.prepare";
-                    record(stage, &[F::Count("item", item)]);
-                    let input = {
-                        let mut guard = session.lock().map_err(|_| "Vault unavailable.")?;
-                        let v = guard.as_mut().ok_or("Vault locked.")?;
-                        v.prepare_extraction(item, me_agent::codex::INBOX_MODEL)
-                            .map_err(core_error)?
-                    };
-                    stage = "ai.provider";
-                    record(stage, &[F::Count("item", item)]);
-                    let mut progress_error = None;
-                    let mut provider_failure = None;
-                    let result = me_agent::codex::extract_document(
-                        &home,
-                        &input,
-                        &me_agent::guides::ReadingGuide::general(),
-                        cancel.clone(),
-                        |event| {
-                            use me_agent::codex::Progress;
-                            let saved = (|| -> Result<(), String> {
-                                match &event {
-                                    Progress::Step {
-                                        stage,
-                                        current,
-                                        total,
-                                    } => {
-                                        let changed = session
-                                            .lock()
-                                            .map_err(|_| "Vault unavailable.")?
-                                            .as_mut()
-                                            .ok_or("Vault locked.")?
-                                            .update_import_progress(
-                                                item, &run, *stage, *current, *total,
-                                            )
-                                            .map_err(core_error)?;
-                                        if !changed {
-                                            return Err(
-                                                "This import attempt is no longer active.".into()
-                                            );
-                                        }
-                                    }
-                                    Progress::Failure(failure) => {
-                                        provider_failure = Some(failure.clone());
-                                        session
-                                            .lock()
-                                            .map_err(|_| "Vault unavailable.")?
-                                            .as_mut()
-                                            .ok_or("Vault locked.")?
-                                            .record_import_failure(item, &run, failure)
-                                            .map_err(core_error)?;
-                                    }
-                                    Progress::Usage {
-                                        call,
-                                        input_tokens,
-                                        output_tokens,
-                                    } => {
-                                        let mut guard =
-                                            session.lock().map_err(|_| "Vault unavailable.")?;
-                                        let v = guard.as_mut().ok_or("Vault locked.")?;
-                                        if !v
-                                            .record_import_usage(
-                                                item,
-                                                &run,
-                                                call,
-                                                *input_tokens,
-                                                *output_tokens,
-                                            )
-                                            .map_err(core_error)?
-                                        {
-                                            return Err(
-                                                "This import attempt is no longer active.".into()
-                                            );
-                                        }
-                                        // Let an already-paid response finish and reach its
-                                        // checkpoint. The durable reservation gate blocks
-                                        // the next request when the token cap is reached.
-                                    }
-                                    _ => {}
-                                }
-                                Ok(())
-                            })();
-                            if let Err(error) = saved {
-                                progress_error = Some(error);
-                                cancel.store(true, Ordering::SeqCst);
-                            }
-                            let _ = tx.send(event);
-                        },
-                        &mut VaultCheckpoints {
-                            session: session.clone(),
-                        },
+                    // One pipeline for automatic and manual runs: classify, read the
+                    // whole document with its guide, sweep, type, verify, resolve.
+                    stage = "read.pipeline";
+                    record(
+                        stage,
+                        &[F::Count("item", item), F::Flag("automatic", automatic)],
                     );
-                    let mut warning = None;
-                    let mut guard = session.lock().map_err(|_| "Vault unavailable.")?;
-                    let v = guard.as_mut().ok_or("Vault locked.")?;
-                    let outcome = if let Some(error) = progress_error {
-                        Err(error)
-                    } else if cancel.load(Ordering::SeqCst) {
-                        Err(
-                            "Analysis stopped. Completed sections are saved; retry to continue."
-                                .into(),
-                        )
-                    } else {
-                        result.and_then(|report| {
-                            let out = report.output;
-                            stage = "ai.validate_and_save";
-                            record(
-                                stage,
-                                &[
-                                    F::Count("item", item),
-                                    F::Count("facts", out.facts.len() as u64),
-                                ],
-                            );
-                            let _ = tx.send(me_agent::codex::Progress::Stage(
-                                me_core::ImportStage::Verifying,
-                            ));
-                            let count = v
-                                .finish_extraction_with_questions(&input, out, report.rejected)
-                                .map_err(core_error)?;
-                            warning = me_core::question_warning(
-                                v.review_questions(item).map_err(core_error)?.len(),
-                            );
-                            Ok(count)
-                        })
-                    };
-                    match outcome {
-                        Ok(_) => {
-                            let proposals = v.proposals(item).map_err(core_error)?;
-                            Ok(DocumentResult {
-                                collection: v.collection("", false).map_err(core_error)?,
-                                fact_count: Some(proposals.len()),
-                                proposals,
-                                warning,
-                                graph: None,
-                            })
-                        }
-                        Err(e) => {
-                            if provider_failure.is_none() {
-                                let failure = me_core::ImportFailure::new(
-                                    me_core::ImportProvider::Local,
-                                    if cancel.load(Ordering::SeqCst) {
-                                        me_core::ImportErrorKind::Cancelled
-                                    } else {
-                                        me_core::ImportErrorKind::Storage
-                                    },
-                                    e.clone(),
-                                );
-                                let _ = v.record_import_failure(item, &run, &failure);
-                            }
-                            let _ = v.fail_extraction(&input.run_id);
-                            Err(e)
-                        }
-                    }
+                    // A failure is already recorded: the provider's own, or a local one.
+                    let read =
+                        super::read_import::run_read(&session, item, &run, &cancel, &tx, &home)?;
+                    let guard = session.lock().map_err(|_| "Vault unavailable.")?;
+                    let v = guard.as_ref().ok_or("Vault locked.")?;
+                    Ok(DocumentResult {
+                        collection: v.collection("", false).map_err(core_error)?,
+                        proposals: v.proposals(item).map_err(core_error)?,
+                        fact_count: Some(read.outcome.values),
+                        warning: (read.outcome.checks > 0).then(|| {
+                            format!(
+                                "{} worth a quick look in Review.",
+                                if read.outcome.checks == 1 {
+                                    "1 value is".to_owned()
+                                } else {
+                                    format!("{} values are", read.outcome.checks)
+                                }
+                            )
+                        }),
+                        graph: Some(read),
+                    })
                 })();
                 if with_ai
                     && let Ok(mut guard) = session.lock()
@@ -762,26 +593,49 @@ impl MeApp {
                             return;
                         }
                         match progress {
-                            me_agent::codex::Progress::Step {stage,current,total} => {
-                                if let Some(active)=this.active_imports.get_mut(&item) && let Some(index)=stage.index() {active.steps[index]=me_core::StepProgress{current,total};}
+                            me_agent::codex::Progress::Step {
+                                stage,
+                                current,
+                                total,
+                            } => {
+                                if let Some(active) = this.active_imports.get_mut(&item)
+                                    && let Some(index) = stage.index()
+                                {
+                                    active.steps[index] = me_core::StepProgress { current, total };
+                                }
                             }
                             me_agent::codex::Progress::Failure(failure) => {
                                 if failure.kind.pauses_queue() {
-                                    this.import_pause=Some(failure.message.clone());
-                                    for (other,active) in &this.active_imports {if *other!=item {active.cancel.store(true,Ordering::SeqCst);}}
+                                    this.import_pause = Some(failure.message.clone());
+                                    for (other, active) in &this.active_imports {
+                                        if *other != item {
+                                            active.cancel.store(true, Ordering::SeqCst);
+                                        }
+                                    }
                                 }
                             }
-                            me_agent::codex::Progress::Request {..} | me_agent::codex::Progress::Usage {..} => this.refresh_imports(cx),
+                            me_agent::codex::Progress::Request { .. }
+                            | me_agent::codex::Progress::Usage { .. } => this.refresh_imports(cx),
                             me_agent::codex::Progress::Stage(stage) => {
-                                if let Some(active) = this.active_imports.get_mut(&item) { active.stage = stage; }
+                                if let Some(active) = this.active_imports.get_mut(&item) {
+                                    active.stage = stage;
+                                }
                             }
-                            me_agent::codex::Progress::Units {current,total} => {
-                                if let Some(active) = this.active_imports.get_mut(&item) { active.current = current; active.total = total; active.steps[0]=me_core::StepProgress{current,total}; }
+                            me_agent::codex::Progress::Units { current, total } => {
+                                if let Some(active) = this.active_imports.get_mut(&item) {
+                                    active.current = current;
+                                    active.total = total;
+                                    active.steps[0] = me_core::StepProgress { current, total };
+                                }
                             }
                             me_agent::codex::Progress::Message(s) => {
-                                if let Some(active) = this.active_imports.get_mut(&item) { active.message = s.clone(); }
-                                if this.ai_item == Some(item) { this.ai_message = Some(s); }
-                            },
+                                if let Some(active) = this.active_imports.get_mut(&item) {
+                                    active.message = s.clone();
+                                }
+                                if this.ai_item == Some(item) {
+                                    this.ai_message = Some(s);
+                                }
+                            }
                             me_agent::codex::Progress::SetupRequired(issue) => {
                                 this.require_codex_setup(issue, cx)
                             }
@@ -798,7 +652,11 @@ impl MeApp {
                     break;
                 }
                 if heartbeat.elapsed() >= std::time::Duration::from_secs(1) {
-                    let _ = this.update(cx, |this,cx| {if this.generation == generation {cx.notify();}});
+                    let _ = this.update(cx, |this, cx| {
+                        if this.generation == generation {
+                            cx.notify();
+                        }
+                    });
                     heartbeat = std::time::Instant::now();
                 }
                 executor.timer(std::time::Duration::from_millis(150)).await;
@@ -822,14 +680,12 @@ impl MeApp {
                             this.collection = collection;
                         }
                         this.ai_message = Some(match (&graph, count) {
-                            (Some(g), _) if !g.eager => format!(
-                                "Filed under {}. Details are read when you need them.",
-                                me_core::doc_types::family(&g.family).map_or("Other", |f| f.label)
+                            (Some(r), _) => format!(
+                                "{} values read · {} in your profile",
+                                r.outcome.values, r.outcome.in_profile
                             ),
-                            (Some(g), _) => format!("{} details added to ME.", g.assertions),
                             (None, None) => "File is searchable. Ready for AI analysis.".into(),
-                            (None, Some(0)) => "No supported details found. Check the original if you expected more.".into(),
-                            (None, Some(count)) => format!("{count} details ready for review."),
+                            (None, Some(_)) => "Analysis complete.".into(),
                         });
                         if graph.is_some() {
                             this.refresh_graph(cx);

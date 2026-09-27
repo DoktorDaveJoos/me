@@ -1,15 +1,14 @@
 //! Import stages that ask TypeSafe typed questions: Classify (one request per
-//! document), Extract (select instead of generate: one request per eager document),
-//! verification of values proposed by another model, and the reduce-side checks
-//! (value equivalence, organization alignment, on-demand search). Code owns control
-//! flow, dates and arithmetic; TypeSafe answers narrow semantic questions.
+//! document) and the reduce-side checks (value equivalence, organization
+//! alignment, on-demand search). Reader facts are verified in `fact_verification`.
+//! Code owns control flow, dates and arithmetic; TypeSafe answers narrow semantic
+//! questions.
 use crate::typesafe::{Decisions, Result};
 use crate::typesafe_questions as q;
 use me_core::{
-    Candidate, CandidateKind, CandidateValue, ConfidenceSource, DocType, DocumentGraph,
-    IdentityAnchors, ImportErrorKind as Kind, ImportFailure, ImportProvider, MergeCandidate,
-    Period, SlotContent, SlotValue, SourceSegment, ValueConflict, ValueKind,
-    doc_types::{self, MrzField, REGISTRY_VERSION},
+    Candidate, CandidateKind, CandidateValue, DocType, IdentityAnchors, ImportErrorKind as Kind,
+    ImportFailure, ImportProvider, MergeCandidate, SourceSegment, ValueConflict,
+    doc_types::{self, REGISTRY_VERSION},
     normalize_name,
 };
 use serde::{Deserialize, Serialize};
@@ -17,7 +16,6 @@ use serde_json::{Map, Value, json};
 use std::sync::atomic::AtomicBool;
 
 pub const CLASSIFY_STAGE: &str = "classify";
-pub const EXTRACT_STAGE: &str = "extract";
 /// Bytes of the first and the last page sent for classification.
 const CLASSIFY_PAGE_BYTES: usize = 6_000;
 /// Bytes of document excerpts per on-demand search request.
@@ -81,13 +79,6 @@ pub fn classify_version(anchors: &IdentityAnchors) -> String {
         fingerprint(&names.join("|"))
     )
 }
-pub fn extract_version(doc_type: &str, subject: Option<&str>) -> String {
-    format!(
-        "extract-v1|{REGISTRY_VERSION}|{}|{doc_type}|{}",
-        q::MODEL,
-        subject.unwrap_or("-")
-    )
-}
 fn fingerprint(s: &str) -> String {
     // Stable, non-cryptographic cache discriminator (FNV-1a); never a secret.
     let mut h: u64 = 0xcbf29ce484222325;
@@ -114,7 +105,8 @@ pub struct Classification {
     pub usage: StageUsage,
 }
 impl Classification {
-    /// The eager type to extract, if classification was confident enough.
+    /// The eager registry type whose values fill the profile, if classification
+    /// was confident enough.
     pub fn eager_type(&self) -> Option<&'static DocType> {
         self.doc_type
             .as_deref()
@@ -291,308 +283,6 @@ pub fn classify(
         mixed,
         usage,
     })
-}
-
-/// Lines of the document with their segment and byte range.
-struct Line<'a> {
-    segment: &'a str,
-    start: usize,
-    end: usize,
-    text: &'a str,
-}
-fn lines<'a>(segments: &'a [SourceSegment<'a>]) -> Vec<Line<'a>> {
-    let mut out = Vec::new();
-    for s in segments {
-        let mut start = 0;
-        for part in s.text.split_inclusive('\n') {
-            let text = part.trim_end_matches(['\n', '\r']);
-            out.push(Line {
-                segment: s.id,
-                start,
-                end: start + part.len(),
-                text,
-            });
-            start += part.len();
-        }
-    }
-    out
-}
-/// The first lines (letterhead) plus each candidate line with one line of context.
-fn extract_state(
-    title: &str,
-    label: &str,
-    segments: &[SourceSegment<'_>],
-    used: &[&Candidate],
-) -> Value {
-    let all = lines(segments);
-    let mut keep = std::collections::BTreeSet::new();
-    for i in 0..all.len().min(12) {
-        keep.insert(i);
-    }
-    for c in used {
-        if let Some(i) = all.iter().position(|l| {
-            l.segment == c.segment_id && l.start <= c.start && c.start < l.end.max(l.start + 1)
-        }) {
-            keep.extend(i.saturating_sub(1)..=(i + 1).min(all.len().saturating_sub(1)));
-        }
-    }
-    let mut bytes = 0;
-    let mut out = Vec::new();
-    for i in keep {
-        let line = format!("L{i:03}| {}", all[i].text.trim());
-        bytes += line.len();
-        if bytes > q::MAX_EXTRACT_STATE {
-            break;
-        }
-        out.push(line);
-    }
-    json!({"document":{"file_name":title,"type":label,"lines":out}})
-}
-
-fn mrz_value(c: &Candidate, field: MrzField) -> Option<Candidate> {
-    let CandidateValue::Mrz(m) = &c.value else {
-        return None;
-    };
-    if !m.check_digits_valid {
-        return None;
-    }
-    let value = match field {
-        MrzField::DocumentNumber => CandidateValue::Identifier(m.document_number.clone()),
-        MrzField::BirthDate => CandidateValue::Date(m.birth_date.clone()?),
-        MrzField::ExpiryDate => CandidateValue::Date(m.expiry_date.clone()?),
-        MrzField::Nationality => CandidateValue::Identifier(m.nationality.clone()),
-    };
-    Some(Candidate { value, ..c.clone() })
-}
-fn period(key: &str) -> Option<Period> {
-    Some(match key {
-        "month" => Period::Month,
-        "quarter" => Period::Quarter,
-        "half_year" => Period::HalfYear,
-        "year" => Period::Year,
-        _ => return None,
-    })
-}
-
-/// Result of Extract: the graph to resolve and required slots still missing.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Extraction {
-    pub graph: DocumentGraph,
-    pub missing_required: Vec<String>,
-    pub usage: StageUsage,
-}
-
-/// Select slot values from local candidates with one request per document.
-/// `threshold` is the vault's current quick-check threshold.
-pub fn extract(
-    doc: Document<'_>,
-    kind: &'static DocType,
-    classification: &Classification,
-    candidates: &[Candidate],
-    threshold: f64,
-    decisions: &mut impl Decisions,
-    cancel: &AtomicBool,
-) -> Result<Extraction> {
-    let mut values = Vec::new();
-    let mut usage = StageUsage::default();
-    // Machine-readable zones: position defines meaning, check digits validate value.
-    let mrz = candidates
-        .iter()
-        .find(|c| matches!(&c.value, CandidateValue::Mrz(m) if m.check_digits_valid));
-    let mut local = Vec::new();
-    for slot in kind.slots {
-        if let (Some(field), Some(c)) = (slot.mrz, mrz)
-            && let Some(value) = mrz_value(c, field)
-        {
-            local.push(slot.key);
-            values.push(SlotValue {
-                slot: slot.key.into(),
-                content: SlotContent::Candidate(Box::new(value)),
-                period: None,
-                confidence: 1.,
-                source: ConfidenceSource::Checksum,
-                value_checked: true,
-                check: false,
-            });
-        }
-    }
-    let (questions, offered) = q::extract_questions(kind, candidates, &local);
-    if questions.as_object().is_some_and(|q| !q.is_empty()) {
-        let used: Vec<&Candidate> = offered
-            .iter()
-            .flat_map(|(_, ids)| ids.iter())
-            .filter_map(|id| candidates.iter().find(|c| &c.id == id))
-            .collect();
-        let response = decisions.evaluate(
-            extract_state(doc.title, kind.label, doc.segments, &used),
-            questions,
-            cancel,
-        )?;
-        usage.add(&response);
-        let a = &response.answers;
-        for (slot_key, ids) in &offered {
-            let slot = kind.slot(slot_key).ok_or_else(invalid)?;
-            let (choice, confidence) = chosen(answer(a, &format!("slot_{slot_key}"))?)?;
-            if confidence < q::SLOT_FLOOR || choice == "none" {
-                continue;
-            }
-            if let ValueKind::Category(_) = slot.value {
-                if choice != "other" {
-                    values.push(SlotValue {
-                        slot: slot_key.clone(),
-                        content: SlotContent::Category { key: choice.into() },
-                        period: None,
-                        confidence,
-                        source: ConfidenceSource::Typesafe,
-                        value_checked: false,
-                        check: confidence < threshold,
-                    });
-                }
-                continue;
-            }
-            if !ids.iter().any(|id| id == choice) {
-                return Err(invalid());
-            }
-            let present = noul(answer(a, &format!("present_{slot_key}"))?)?;
-            if present < q::PRESENT_ABSENT {
-                continue;
-            }
-            let candidate = candidates
-                .iter()
-                .find(|c| c.id == choice)
-                .ok_or_else(invalid)?;
-            let period = match a.get(format!("period_{slot_key}")) {
-                Some(p) => {
-                    let (key, c) = chosen(p)?;
-                    if c >= q::SLOT_FLOOR {
-                        period(key)
-                    } else {
-                        None
-                    }
-                }
-                None => None,
-            };
-            values.push(SlotValue {
-                slot: slot_key.clone(),
-                content: SlotContent::Candidate(Box::new(candidate.clone())),
-                period,
-                confidence,
-                source: ConfidenceSource::Typesafe,
-                value_checked: candidate.checksum,
-                check: confidence < threshold || present < q::PRESENT_FOUND,
-            });
-        }
-    }
-    let missing_required = kind
-        .slots
-        .iter()
-        .filter(|s| s.required && !values.iter().any(|v| v.slot == s.key))
-        .map(|s| s.key.to_owned())
-        .collect();
-    Ok(Extraction {
-        graph: DocumentGraph {
-            doc_type: kind.key.into(),
-            subject: classification.subject.clone(),
-            subject_confidence: classification.subject_confidence,
-            values,
-            models: usage.models.clone(),
-            correction: false,
-        },
-        missing_required,
-        usage,
-    })
-}
-
-/// Gap fill: another model proposes values for missing required slots. They are
-/// offered to the same slot Choice as new candidates, then verified with the
-/// SDE-cascade heads. Any head above the fire threshold rejects the value.
-pub fn verify_gap_fill(
-    doc: Document<'_>,
-    kind: &'static DocType,
-    proposed: &[Candidate],
-    extraction: &mut Extraction,
-    threshold: f64,
-    decisions: &mut impl Decisions,
-    cancel: &AtomicBool,
-) -> Result<()> {
-    if extraction.missing_required.is_empty() || proposed.is_empty() {
-        return Ok(());
-    }
-    let missing: Vec<&str> = extraction
-        .missing_required
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let skip: Vec<&str> = kind
-        .slots
-        .iter()
-        .map(|s| s.key)
-        .filter(|k| !missing.contains(k))
-        .collect();
-    let (questions, offered) = q::extract_questions(kind, proposed, &skip);
-    if questions.as_object().is_none_or(|q| q.is_empty()) {
-        return Ok(());
-    }
-    let used: Vec<&Candidate> = proposed.iter().collect();
-    let state = extract_state(doc.title, kind.label, doc.segments, &used);
-    let response = decisions.evaluate(state.clone(), questions, cancel)?;
-    extraction.usage.add(&response);
-    let mut picked = Vec::new();
-    for (slot_key, ids) in &offered {
-        let (choice, confidence) = chosen(answer(&response.answers, &format!("slot_{slot_key}"))?)?;
-        if choice == "none" || confidence < q::SLOT_FLOOR || !ids.iter().any(|i| i == choice) {
-            continue;
-        }
-        let slot = kind.slot(slot_key).ok_or_else(invalid)?;
-        let candidate = proposed
-            .iter()
-            .find(|c| c.id == choice)
-            .ok_or_else(invalid)?;
-        picked.push((slot, candidate, confidence));
-    }
-    if picked.is_empty() {
-        return Ok(());
-    }
-    let fields: Vec<(String, Value, String)> = picked
-        .iter()
-        .map(|(slot, c, _)| {
-            (
-                slot.key.to_owned(),
-                json!({"name":slot.label,"description":slot.description}),
-                c.text.clone(),
-            )
-        })
-        .collect();
-    let verdict = decisions.evaluate(state, q::verify_questions(&fields), cancel)?;
-    extraction.usage.add(&verdict);
-    for (slot, candidate, confidence) in picked {
-        let prefix = format!("{}::", slot.key);
-        let worst = verdict
-            .answers
-            .as_object()
-            .ok_or_else(invalid)?
-            .iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(_, v)| noul(v))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .fold(0., f64::max);
-        if worst > q::VERIFY_FIRE {
-            continue;
-        }
-        extraction.graph.values.push(SlotValue {
-            slot: slot.key.into(),
-            content: SlotContent::Candidate(Box::new(candidate.clone())),
-            period: None,
-            confidence,
-            source: ConfidenceSource::OpenaiGrounded,
-            value_checked: candidate.checksum,
-            check: confidence < threshold || worst > 1. - q::VERIFY_FIRE,
-        });
-        extraction.missing_required.retain(|m| m != slot.key);
-    }
-    extraction.graph.models = extraction.usage.models.clone();
-    Ok(())
 }
 
 /// Reduce: which flagged value conflicts are only different spellings.

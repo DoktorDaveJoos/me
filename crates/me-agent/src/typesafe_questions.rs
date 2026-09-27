@@ -2,10 +2,7 @@
 //! they can be reviewed together. Thresholds are conservative starting values, not
 //! measured accuracy; tune them on labeled vault outcomes, never on model claims.
 //! Instructions are English (Jev's primary language); German text stays in state.
-use me_core::{
-    Candidate, CandidateKind, DocType, IdentityAnchors, Slot, ValueKind, doc_types::FAMILIES,
-    family_types, normalize_name,
-};
+use me_core::{IdentityAnchors, ValueKind, doc_types::FAMILIES, family_types, normalize_name};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 
@@ -23,17 +20,14 @@ pub const SUBJECT_CONFIDENT: f64 = 0.6;
 /// Legibility below this skips extraction; the original stays searchable.
 pub const READABLE_FLOOR: f64 = 0.35;
 
-// Slot selection (select, don't generate).
-/// Choice confidence floor for asserting a value at all.
+// Slot mapping of reader facts.
+/// Confidence floor for asserting a value at all.
 pub const SLOT_FLOOR: f64 = 0.6;
-/// Existence Noul: found at or above, absent below `PRESENT_ABSENT`.
+/// Existence Noul: a stated property (such as a correction marker) at or above.
 pub const PRESENT_FOUND: f64 = 0.7;
-pub const PRESENT_ABSENT: f64 = 0.35;
-/// Options offered per slot: candidates in Extract, competing facts in fact
-/// verification. The Choice limit is 255.
+/// Competing facts offered per slot Choice in fact verification. The Choice
+/// limit is 255.
 pub const MAX_SLOT_OPTIONS: usize = 60;
-/// Bytes of source lines sent with an extraction request.
-pub const MAX_EXTRACT_STATE: usize = 24_000;
 
 // Universal verification (SDE-cascade heads: true means wrong).
 pub const VERIFY_FIRE: f64 = 0.7;
@@ -44,9 +38,7 @@ pub const ALIGN_PROPOSE: f64 = 0.5;
 // On-demand search over lazy documents.
 pub const SEARCH_FOUND: f64 = 0.7;
 // Bands must stay ordered when a value is tuned.
-const _: () = assert!(
-    FAMILY_FLOOR < TYPE_CONFIDENT && PRESENT_ABSENT < PRESENT_FOUND && SLOT_FLOOR < TYPE_CONFIDENT
-);
+const _: () = assert!(FAMILY_FLOOR < TYPE_CONFIDENT && SLOT_FLOOR < TYPE_CONFIDENT);
 
 fn choice(instructions: Value, criteria: Map<String, Value>) -> Value {
     json!({"type":"choice","instructions":instructions,"criteria":criteria})
@@ -170,139 +162,6 @@ pub fn classify_questions(subjects: &SubjectOptions) -> Value {
         "mixed".into(),
         noul(json!("Does `document` contain several unrelated documents, for example letters from different senders?")),
     );
-    json!(questions)
-}
-
-fn field(slot: &Slot) -> Value {
-    json!({"name":slot.label,"description":slot.description})
-}
-fn kind_name(kind: CandidateKind) -> &'static str {
-    match kind {
-        CandidateKind::Date => "date",
-        CandidateKind::Money | CandidateKind::Amount => "amount",
-        CandidateKind::Period => "period",
-        CandidateKind::PersonName => "name",
-        CandidateKind::Organization => "organization",
-        _ => "value",
-    }
-}
-
-/// Slot questions for one document type. Returns the questions and, per slot, the
-/// candidate IDs offered (so code can map an answer back to a verbatim candidate).
-pub fn extract_questions(
-    kind: &DocType,
-    candidates: &[Candidate],
-    skip: &[&str],
-) -> (Value, Vec<(String, Vec<String>)>) {
-    let mut questions = Map::new();
-    let mut offered = Vec::new();
-    for slot in kind.slots {
-        if skip.contains(&slot.key) {
-            continue;
-        }
-        if let ValueKind::Category(options) = slot.value {
-            let criteria = options
-                .iter()
-                .map(|(k, d)| ((*k).to_owned(), json!(d)))
-                .collect();
-            questions.insert(
-                format!("slot_{}", slot.key),
-                choice(
-                    json!({"field":field(slot),"question":"Which option describes the `field` for `document`?"}),
-                    criteria,
-                ),
-            );
-            offered.push((slot.key.to_owned(), Vec::new()));
-            continue;
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        let options: Vec<&Candidate> = candidates
-            .iter()
-            .filter(|c| slot.accepts.contains(&c.kind))
-            // Identical text is one option; the first occurrence carries the evidence.
-            .filter(|c| seen.insert(c.text.trim().to_lowercase()))
-            .take(MAX_SLOT_OPTIONS)
-            .collect();
-        if options.is_empty() {
-            continue;
-        }
-        let mut criteria: Map<String, Value> = options
-            .iter()
-            .map(|c| {
-                let mut option = json!({"value":c.text,"line":c.line});
-                if let Some(label) = &c.label {
-                    option["label"] = json!(label);
-                }
-                option["kind"] = json!(kind_name(c.kind));
-                (c.id.clone(), option)
-            })
-            .collect();
-        criteria.insert(
-            "none".into(),
-            json!("None of these is the requested value, or `document` does not state it"),
-        );
-        questions.insert(
-            format!("slot_{}", slot.key),
-            choice(
-                json!({"field":field(slot),"question":"Which option is the value of `field` in `document`?"}),
-                criteria,
-            ),
-        );
-        questions.insert(
-            format!("present_{}", slot.key),
-            noul(json!({"field":field(slot),"question":"Does `document` state the `field`?"})),
-        );
-        if matches!(slot.value, ValueKind::Money(None)) {
-            let periods = me_core::PAYMENT_PERIODS
-                .iter()
-                .map(|(k, d)| ((*k).to_owned(), json!(d)))
-                .collect();
-            questions.insert(
-                format!("period_{}", slot.key),
-                choice(
-                    json!({"field":field(slot),"question":"If `document` states the `field`, how often is it paid?"}),
-                    periods,
-                ),
-            );
-        }
-        offered.push((
-            slot.key.to_owned(),
-            options.iter().map(|c| c.id.clone()).collect(),
-        ));
-    }
-    (json!(questions), offered)
-}
-
-/// SDE-cascade verification of values proposed by another model. Each head is
-/// phrased so that true means the value is wrong; any head above `VERIFY_FIRE` rejects.
-pub fn verify_questions(fields: &[(String, Value, String)]) -> Value {
-    let mut questions = Map::new();
-    for (key, spec, value) in fields {
-        let heads = [
-            (
-                "hallucinated",
-                "Is `extracted` unsupported by, or absent from, `document`?",
-            ),
-            (
-                "off_target",
-                "Does `document` fail to state the thing `field` describes, so that `extracted` was taken from unrelated text?",
-            ),
-            (
-                "wrong_person",
-                "Does `extracted` belong to a different person or organization than the one `field` asks about?",
-            ),
-            (
-                "format_violation",
-                "Is `extracted` not a plausible value of the kind `field` describes, for example a date where a name is expected?",
-            ),
-        ];
-        for (head, question) in heads {
-            questions.insert(
-                format!("{key}::{head}"),
-                json!({"type":"noul","instructions":{"field":spec,"extracted":value,"question":question},"criteria":{"true":"The extracted value is wrong in this way","false":"The extracted value is fine in this respect"}}),
-            );
-        }
-    }
     json!(questions)
 }
 

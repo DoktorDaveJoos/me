@@ -19,10 +19,10 @@ mod motion_ui;
 use motion_ui::MotionPreferences;
 #[path = "ai_ui.rs"]
 mod ai_ui;
-#[path = "graph_import.rs"]
-mod graph_import;
 #[path = "graph_ui.rs"]
 mod graph_ui;
+#[path = "read_import.rs"]
+mod read_import;
 use graph_ui::GraphState;
 #[path = "import_ui.rs"]
 mod import_ui;
