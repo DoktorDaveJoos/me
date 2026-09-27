@@ -23,7 +23,7 @@ const CLASSIFY_PAGE_BYTES: usize = 6_000;
 /// Bytes of document excerpts per on-demand search request.
 const SEARCH_STATE_BYTES: usize = 20_000;
 
-fn invalid() -> ImportFailure {
+pub(crate) fn invalid() -> ImportFailure {
     ImportFailure::new(
         ImportProvider::TypeSafe,
         Kind::InvalidOutput,
@@ -57,7 +57,7 @@ pub struct StageUsage {
     pub models: Vec<String>,
 }
 impl StageUsage {
-    fn add(&mut self, r: &crate::typesafe::DecisionResponse) {
+    pub(crate) fn add(&mut self, r: &crate::typesafe::DecisionResponse) {
         self.requests += 1;
         self.input_tokens += r.input_tokens.unwrap_or(0);
         if let Some(m) = &r.model

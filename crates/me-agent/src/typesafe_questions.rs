@@ -52,6 +52,13 @@ fn choice(instructions: Value, criteria: Map<String, Value>) -> Value {
 fn noul(instructions: Value) -> Value {
     json!({"type":"noul","instructions":instructions})
 }
+/// Choice criteria from (option key, description) pairs.
+fn criteria(pairs: &[(&str, &str)]) -> Map<String, Value> {
+    pairs
+        .iter()
+        .map(|(k, d)| ((*k).to_owned(), json!(d)))
+        .collect()
+}
 
 /// Subject option keys mapped to the anchor entity they stand for.
 pub struct SubjectOptions {
@@ -295,6 +302,154 @@ pub fn verify_questions(fields: &[(String, Value, String)]) -> Value {
         }
     }
     json!(questions)
+}
+
+// Verification of reader facts. Every reader assumption is asked; code combines
+// the answers into one confidence (the weakest head) and a band.
+/// Facts per verification request.
+pub const FACT_BATCH: usize = 20;
+
+/// Owner options: the anchors, people named in the document, an organization, unclear.
+pub fn owner_options(anchors: &IdentityAnchors, named: &[String]) -> SubjectOptions {
+    let mut options = subject_options(anchors, named);
+    options.criteria.remove("none");
+    options.criteria.insert(
+        "organization".into(),
+        json!("An organization's own detail (employer, insurer, bank, authority), not a private person's"),
+    );
+    options.criteria.insert(
+        "unclear".into(),
+        json!("The document does not say whose detail this is"),
+    );
+    options
+}
+
+/// One request's questions for a batch of reader facts, keyed `f{i}::{head}`. Every
+/// fact gets the two failure heads (true means wrong) and the owner Choice; amounts
+/// get the period Choice; tagged slots get the mapping Noul plus the direction,
+/// payment-period or category Choice their value type needs.
+pub fn fact_questions(
+    batch: &[(usize, &crate::fact_verification::FactInput)],
+    owners: &SubjectOptions,
+    ask_correction: bool,
+) -> Value {
+    let mut q = Map::new();
+    let heads = [
+        (
+            "hallucinated",
+            "Is `facts.{f}.value` unsupported by `facts.{f}.quote`, or not printed in `document` as the value of `facts.{f}.label`?",
+        ),
+        (
+            "off_target",
+            "Does `facts.{f}.label` fail to describe what `facts.{f}.value` is in `document`: for example a year-to-date total taken as a monthly amount, an employer share taken as the employee's, or a value from a different row or column?",
+        ),
+    ];
+    for (i, fact) in batch {
+        let f = format!("f{i}");
+        for (head, text) in heads {
+            q.insert(
+                format!("{f}::{head}"),
+                json!({"type":"noul","instructions":text.replace("{f}", &f),"criteria":{"true":"The fact is wrong in this way","false":"The fact is fine in this respect"}}),
+            );
+        }
+        q.insert(
+            format!("{f}::owner"),
+            choice(
+                json!(format!(
+                    "Whose detail is `facts.{f}` according to `document`?"
+                )),
+                owners.criteria.clone(),
+            ),
+        );
+        if fact.money {
+            q.insert(
+                format!("{f}::period"),
+                choice(
+                    json!(format!("Which period does the amount `facts.{f}` cover?")),
+                    criteria(&[
+                        (
+                            "document",
+                            "The period this document is for, such as this payslip's month or this certificate's year",
+                        ),
+                        ("cumulative", "A cumulative or year-to-date total"),
+                        (
+                            "other",
+                            "Another stated period: a correction month, a previous year or a future instalment",
+                        ),
+                        (
+                            "not_periodic",
+                            "Not a periodic amount: a one-off amount, a balance or a limit",
+                        ),
+                    ]),
+                ),
+            );
+        }
+        if let Some(slot) = fact.slot {
+            q.insert(
+                format!("{f}::mapping"),
+                noul(json!(format!(
+                    "Is `facts.{f}` the `slots.{}` of `document`?",
+                    slot.key
+                ))),
+            );
+            match slot.value {
+                ValueKind::Balance => {
+                    q.insert(
+                        format!("{f}::direction"),
+                        choice(
+                            json!(format!(
+                                "Does `facts.{f}` state money paid back to the taxpayer or money the taxpayer must pay?"
+                            )),
+                            criteria(&[
+                                ("refund", "Paid back to the taxpayer (Erstattung, Guthaben)"),
+                                (
+                                    "payment",
+                                    "The taxpayer must pay it (Nachzahlung, zu zahlen)",
+                                ),
+                                ("unclear", "The document does not say"),
+                            ]),
+                        ),
+                    );
+                }
+                ValueKind::Money(None) => {
+                    q.insert(
+                        format!("{f}::payment_period"),
+                        choice(
+                            json!(format!("How often is `facts.{f}` paid?")),
+                            criteria(me_core::PAYMENT_PERIODS),
+                        ),
+                    );
+                }
+                ValueKind::Category(options) if fact.category_unmapped => {
+                    q.insert(
+                        format!("{f}::category"),
+                        choice(
+                            json!(format!("Which option describes `facts.{f}`?")),
+                            criteria(options),
+                        ),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    if ask_correction {
+        q.insert(
+            "document::correction".into(),
+            noul(json!("Does `document` state that it corrects, replaces or cancels an earlier document of the same kind (Korrektur, Berichtigung, Stornierung, Nachberechnung, geändert)?")),
+        );
+    }
+    json!(q)
+}
+
+/// Several facts claim one slot: which one is it?
+pub fn competing_questions(slot: &str, facts: &[usize]) -> Value {
+    let mut options: Map<String, Value> = facts
+        .iter()
+        .map(|i| (format!("f{i}"), json!(format!("`facts.f{i}`"))))
+        .collect();
+    options.insert("none".into(), json!("None of these is the value"));
+    json!({format!("slot_{slot}"): choice(json!(format!("Which fact is the `slots.{slot}` of `document`?")), options)})
 }
 
 /// Whether two differently written values of one property mean the same thing.
