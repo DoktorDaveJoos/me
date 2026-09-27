@@ -77,7 +77,7 @@ pub struct DocumentGraph {
     /// Model identifiers that produced the decisions, for audit.
     pub models: Vec<String>,
     /// The document corrects an earlier one (Korrekturabrechnung, amended notice):
-    /// its values replace earlier automatic values of the same period.
+    /// its values replace earlier automatic values of the same employer and period.
     #[serde(default)]
     pub correction: bool,
 }
@@ -86,6 +86,7 @@ pub struct DocumentGraph {
 pub struct GraphOutcome {
     pub entities_created: usize,
     pub assertions: usize,
+    /// Accepted automatic values of this document suggested for a check.
     pub checks: usize,
     /// Slot key to the profile assertion that now carries the slot's value.
     pub slot_assertions: BTreeMap<String, String>,
@@ -367,6 +368,11 @@ fn locator(c: &Candidate) -> Value {
 
 /// Policy reason for a value a correcting document replaced.
 const CORRECTED: &str = "corrected_by_newer_document";
+/// Policy reason for a value a re-read of its only source no longer finds.
+const NOT_FOUND_ON_REREAD: &str = "not_found_on_reread";
+/// Document role and link that scope a correction to one employer.
+const EMPLOYER_ROLE: &str = "employer";
+const EMPLOYER_LINK: &str = "person.employer";
 
 /// Latest decision on an assertion: (action, actor, reason).
 fn latest_decision(
@@ -381,7 +387,7 @@ fn latest_decision(
         )
         .optional()?)
 }
-pub(crate) fn policy_decision(
+fn policy_decision(
     tx: &Transaction<'_>,
     assertion: &str,
     action: &str,
@@ -389,6 +395,50 @@ pub(crate) fn policy_decision(
 ) -> Result<()> {
     tx.execute("INSERT INTO decision(id,assertion_id,action,actor,policy_version,reason_code,recorded_at) VALUES(?,?,?,'policy',?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",params![id(),assertion,action,GRAPH_POLICY,reason])?;
     Ok(())
+}
+/// Retracts an automatic value by policy; its note leaves the collection.
+fn policy_retract(tx: &Transaction<'_>, assertion: &str, reason: &str) -> Result<()> {
+    policy_decision(tx, assertion, "retract", reason)?;
+    tx.execute(
+        "UPDATE collection_item SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE current_assertion_id=? AND kind='note' AND deleted_at IS NULL",
+        [assertion],
+    )?;
+    Ok(())
+}
+/// Whether a property holds one value at a time.
+fn single_valued(tx: &Transaction<'_>, property: &str) -> Result<bool> {
+    Ok(tx.query_row(
+        "SELECT cardinality='one' FROM property_definition WHERE key=?",
+        [property],
+        |r| r.get(0),
+    )?)
+}
+/// Employers that every source of an assertion links the assertion's subject to
+/// (accepted `person.employer` links); empty when a source names none.
+fn source_employers(tx: &Transaction<'_>, assertion: &str) -> Result<BTreeSet<String>> {
+    let sources = tx
+        .prepare("SELECT DISTINCT source_id FROM assertion_evidence WHERE assertion_id=?")?
+        .query_map([assertion], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut common: Option<BTreeSet<String>> = None;
+    for source in sources {
+        let linked = tx
+            .prepare("SELECT DISTINCT l.object_entity_id FROM assertion_evidence e JOIN assertion_state l ON l.id=e.assertion_id WHERE e.source_id=?1 AND l.property_key=?2 AND l.state='accept' AND l.subject_id=(SELECT subject_id FROM assertion WHERE id=?3)")?
+            .query_map(params![source, EMPLOYER_LINK, assertion], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // A merged employer counts as the entity it was merged into.
+        let linked: BTreeSet<String> = linked
+            .iter()
+            .filter_map(|e| canonical_entity(tx, e).ok())
+            .collect();
+        common = Some(match common {
+            None => linked,
+            Some(c) => c.intersection(&linked).cloned().collect(),
+        });
+    }
+    Ok(common.unwrap_or_default())
 }
 /// Accepts an assertion by policy unless a person already decided on it, or a
 /// correcting document replaced it and its correction still stands.
@@ -405,13 +455,23 @@ fn auto_accept(tx: &Transaction<'_>, assertion: &str) -> Result<bool> {
         }
     }
 }
-/// Another accepted value of the same subject, property and exact period exists.
+/// Another accepted value of the same subject, property, employer and exact period
+/// exists: the correction that replaced `assertion` still stands.
 fn correction_stands(tx: &Transaction<'_>, assertion: &str) -> Result<bool> {
-    Ok(tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM assertion o JOIN assertion_state n ON n.subject_id=o.subject_id AND n.property_key=o.property_key AND n.valid_from IS o.valid_from AND n.valid_to IS o.valid_to AND n.id<>o.id AND n.state='accept' WHERE o.id=?)",
-        [assertion],
-        |r| r.get(0),
-    )?)
+    let employers = source_employers(tx, assertion)?;
+    if employers.is_empty() {
+        return Ok(false);
+    }
+    let others = tx
+        .prepare("SELECT n.id FROM assertion o JOIN assertion_state n ON n.subject_id=o.subject_id AND n.property_key=o.property_key AND n.valid_from IS o.valid_from AND n.valid_to IS o.valid_to AND n.id<>o.id AND n.state='accept' WHERE o.id=?")?
+        .query_map([assertion], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for other in others {
+        if !source_employers(tx, &other)?.is_disjoint(&employers) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 fn upsert_review(
     tx: &Transaction<'_>,
@@ -534,12 +594,7 @@ fn list_assertion(
 /// Closes open-ended automatic intervals at the next start of a different value,
 /// so a newer document supersedes an older one regardless of import order.
 fn retimeline(tx: &Transaction<'_>, subject: &str, property: &str) -> Result<()> {
-    let one: bool = tx.query_row(
-        "SELECT cardinality='one' FROM property_definition WHERE key=?",
-        [property],
-        |r| r.get(0),
-    )?;
-    if !one {
+    if !single_valued(tx, property)? {
         return Ok(());
     }
     let rows = tx
@@ -672,12 +727,7 @@ fn mark_conflicts(
     property: &str,
     focus: &BTreeSet<String>,
 ) -> Result<usize> {
-    let one: bool = tx.query_row(
-        "SELECT cardinality='one' FROM property_definition WHERE key=?",
-        [property],
-        |r| r.get(0),
-    )?;
-    if !one {
+    if !single_valued(tx, property)? {
         return Ok(0);
     }
     type Row = (String, String, (String, Option<String>, Option<String>));
@@ -721,22 +771,55 @@ fn mark_conflicts(
     Ok(count)
 }
 
-/// A correcting document replaces earlier automatic values of the same property
-/// and exact period from other sources, instead of conflicting with them. Only
-/// single-valued properties with a period are replaced; user decisions stay.
+/// Conflict flags of one subject's property from its accepted values only: a flag
+/// whose other side is gone is cleared (a low confidence check stays), then `focus`
+/// and the values that were flagged are compared again. User decisions stay.
+fn recheck_conflicts(
+    tx: &Transaction<'_>,
+    subject: &str,
+    property: &str,
+    focus: &BTreeSet<String>,
+) -> Result<()> {
+    if !single_valued(tx, property)? {
+        return Ok(());
+    }
+    let flagged = tx
+        .prepare("SELECT a.id FROM assertion_state a JOIN assertion_review r ON r.assertion_id=a.id WHERE a.subject_id=? AND a.property_key=? AND a.state='accept' AND r.check_reason='conflict' AND NOT EXISTS(SELECT 1 FROM decision d WHERE d.assertion_id=a.id AND d.actor='user')")?
+        .query_map(params![subject, property], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    // An empty focus would compare every pair; nothing changed that could conflict.
+    if focus.is_empty() && flagged.is_empty() {
+        return Ok(());
+    }
+    if !flagged.is_empty() {
+        let threshold = check_threshold(tx)?;
+        for assertion in &flagged {
+            tx.execute(
+                "UPDATE assertion_review SET check_reason=CASE WHEN confidence<? THEN 'low_confidence' END WHERE assertion_id=?",
+                params![threshold, assertion],
+            )?;
+        }
+    }
+    let mut focus = focus.clone();
+    focus.extend(flagged);
+    mark_conflicts(tx, subject, property, &focus)?;
+    Ok(())
+}
+
+/// A correcting document replaces earlier automatic values of the same property,
+/// employer and exact period from other sources, instead of conflicting with them.
+/// Only single-valued interval values are replaced, and only when every source of
+/// the earlier value links its subject to the correcting document's employer.
+/// User decisions stay.
 fn supersede_corrected(
     tx: &Transaction<'_>,
     source: &str,
     subject: &str,
     property: &str,
     assertions: &BTreeSet<String>,
+    employer: &str,
 ) -> Result<()> {
-    let one: bool = tx.query_row(
-        "SELECT cardinality='one' FROM property_definition WHERE key=?",
-        [property],
-        |r| r.get(0),
-    )?;
-    if !one {
+    if !single_valued(tx, property)? {
         return Ok(());
     }
     for assertion in assertions {
@@ -755,14 +838,61 @@ fn supersede_corrected(
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         for old in older {
-            policy_decision(tx, &old, "retract", CORRECTED)?;
-            tx.execute(
-                "UPDATE collection_item SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE current_assertion_id=? AND deleted_at IS NULL",
-                [&old],
-            )?;
+            if source_employers(tx, &old)?.contains(employer) {
+                policy_retract(tx, &old, CORRECTED)?;
+            }
         }
     }
     Ok(())
+}
+/// Withdraws this source's support from the automatic values it no longer states.
+/// A value another source still supports only loses this source's evidence; any
+/// other value is retracted and keeps its evidence for the audit trail. Closed
+/// replacements of stated values stay, and values a person decided on are never
+/// touched. Returns the subject/property pairs that lost a value.
+fn withdraw_unstated(
+    tx: &Transaction<'_>,
+    source: &str,
+    stated: &BTreeSet<String>,
+) -> Result<BTreeSet<(String, String)>> {
+    let stated = serde_json::to_string(stated).map_err(|_| Error::Format)?;
+    let unstated = tx
+        .prepare("SELECT DISTINCT a.id,a.subject_id,a.property_key FROM assertion_state a JOIN assertion_evidence e ON e.assertion_id=a.id WHERE e.source_id=?1 AND a.origin='extraction' AND a.state='accept' AND NOT EXISTS(SELECT 1 FROM decision d WHERE d.assertion_id=a.id AND d.actor='user') AND a.id NOT IN (SELECT value FROM json_each(?2)) AND coalesce(a.supersedes_id,'') NOT IN (SELECT value FROM json_each(?2)) ORDER BY a.id")?
+        .query_map(params![source, stated], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut changed = BTreeSet::new();
+    for (assertion, subject, property) in unstated {
+        let shared: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assertion_evidence WHERE assertion_id=? AND source_id<>?)",
+            params![assertion, source],
+            |r| r.get(0),
+        )?;
+        if shared {
+            tx.execute(
+                "DELETE FROM assertion_evidence WHERE assertion_id=? AND source_id=?",
+                params![assertion, source],
+            )?;
+        } else {
+            policy_retract(tx, &assertion, NOT_FOUND_ON_REREAD)?;
+            changed.insert((subject, property));
+        }
+    }
+    Ok(changed)
+}
+/// Accepted automatic values of this source that are suggested for a check.
+fn source_checks(tx: &Transaction<'_>, source: &str) -> Result<usize> {
+    let checks: i64 = tx.query_row(
+        "SELECT count(DISTINCT a.id) FROM assertion_evidence e JOIN assertion_state a ON a.id=e.assertion_id JOIN assertion_review r ON r.assertion_id=a.id WHERE e.source_id=? AND a.state='accept' AND r.check_reason IS NOT NULL AND (SELECT d.actor FROM decision d WHERE d.assertion_id=a.id ORDER BY d.local_seq DESC LIMIT 1)='policy'",
+        [source],
+        |r| r.get(0),
+    )?;
+    Ok(checks as usize)
 }
 /// The accepted assertion that carries `assertion`'s value now: itself, or the
 /// closed replacement a newer document's timeline created for it.
@@ -785,18 +915,96 @@ fn current_assertion(tx: &Transaction<'_>, assertion: String) -> Result<String> 
         .unwrap_or(assertion))
 }
 
+/// Assertions a document recorded by subject and property; a pair that lost a
+/// value on a re-read is present with no assertions.
+type Touched = BTreeMap<(String, String), BTreeSet<String>>;
+
 pub(crate) fn resolve_document(
     tx: &Transaction<'_>,
     source: &str,
     graph: &DocumentGraph,
 ) -> Result<GraphOutcome> {
+    resolve(tx, source, Some(graph), false)
+}
+/// Resolve for a read of a source: what the read states replaces the source's
+/// earlier automatic values, also when the read found no profile values at all.
+pub(crate) fn resolve_read(
+    tx: &Transaction<'_>,
+    source: &str,
+    graph: Option<&DocumentGraph>,
+) -> Result<GraphOutcome> {
+    resolve(tx, source, graph, true)
+}
+fn resolve(
+    tx: &Transaction<'_>,
+    source: &str,
+    graph: Option<&DocumentGraph>,
+    replace: bool,
+) -> Result<GraphOutcome> {
+    let mut outcome = GraphOutcome::default();
+    let mut touched = Touched::new();
+    let employer = match graph {
+        Some(graph) => record_graph(tx, source, graph, &mut outcome, &mut touched)?,
+        None => None,
+    };
+    if replace {
+        // Before the timeline is rebuilt: values the read replaces neither close nor
+        // conflict with what it states now.
+        for pair in withdraw_unstated(tx, source, &outcome.recorded)? {
+            touched.entry(pair).or_default();
+        }
+    }
+    let correcting = graph.is_some_and(|g| g.correction);
+    for ((subject, property), assertions) in touched {
+        if correcting && let Some(employer) = &employer {
+            supersede_corrected(tx, source, &subject, &property, &assertions, employer)?;
+        }
+        retimeline(tx, &subject, &property)?;
+        // Closed replacements carry the conflict check for the closed assertions.
+        let mut focus = assertions;
+        focus.extend(
+            tx.prepare(
+                "SELECT id FROM assertion WHERE supersedes_id IN (SELECT value FROM json_each(?))",
+            )?
+            .query_map(
+                [serde_json::to_string(&focus).map_err(|_| Error::Format)?],
+                |r| r.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        );
+        recheck_conflicts(tx, &subject, &property, &focus)?;
+        // A re-read that finds a value closed by a newer document still supports it.
+        outcome.recorded.extend(focus);
+    }
+    let slots = std::mem::take(&mut outcome.slot_assertions);
+    for (slot, assertion) in slots {
+        let current = current_assertion(tx, assertion)?;
+        outcome.slot_assertions.insert(slot, current);
+    }
+    outcome.checks = source_checks(tx, source)?;
+    if graph.is_some() {
+        tx.execute(
+            "UPDATE document_profile SET graph_state='resolved' WHERE source_id=?",
+            [source],
+        )?;
+    }
+    Ok(outcome)
+}
+/// Records a document's entities, values and links. Returns the document's
+/// employer, which scopes a correction.
+fn record_graph(
+    tx: &Transaction<'_>,
+    source: &str,
+    graph: &DocumentGraph,
+    outcome: &mut GraphOutcome,
+    touched: &mut Touched,
+) -> Result<Option<String>> {
     let kind =
         doc_types::doc_type(&graph.doc_type).ok_or(Error::Validation("Unknown document type."))?;
     let doc = Resolved {
         kind,
         values: graph.values.iter().map(|v| (v.slot.as_str(), v)).collect(),
     };
-    let mut outcome = GraphOutcome::default();
     let threshold = check_threshold(tx)?;
     let model = graph.models.join(",");
     let model = (!model.is_empty()).then_some(model);
@@ -896,7 +1104,6 @@ pub(crate) fn resolve_document(
             Target::Role(r) => roles.get(r).cloned(),
         }
     };
-    let mut touched: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     let mut record = |tx: &Transaction<'_>,
                       draft: AssertionDraft,
                       confidence: f64,
@@ -994,7 +1201,7 @@ pub(crate) fn resolve_document(
             value.value_checked,
             value.check,
             candidate.as_ref(),
-            &mut outcome,
+            outcome,
         )?;
         if let Some(a) = recorded {
             outcome.slot_assertions.insert(slot.key.to_owned(), a);
@@ -1018,7 +1225,7 @@ pub(crate) fn resolve_document(
                 false,
                 false,
                 None,
-                &mut outcome,
+                outcome,
             )?;
         }
     }
@@ -1039,41 +1246,10 @@ pub(crate) fn resolve_document(
             false,
             false,
             None,
-            &mut outcome,
+            outcome,
         )?;
     }
-    for ((subject, property), assertions) in touched {
-        if graph.correction {
-            supersede_corrected(tx, source, &subject, &property, &assertions)?;
-        }
-        retimeline(tx, &subject, &property)?;
-        // Closed replacements carry the conflict check for the closed assertions.
-        let mut focus = assertions;
-        focus.extend(
-            tx.prepare(
-                "SELECT id FROM assertion WHERE supersedes_id IN (SELECT value FROM json_each(?))",
-            )?
-            .query_map(
-                [serde_json::to_string(&focus).map_err(|_| Error::Format)?],
-                |r| r.get::<_, String>(0),
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?,
-        );
-        mark_conflicts(tx, &subject, &property, &focus)?;
-        // A re-read that finds a value closed by a newer document still supports it.
-        outcome.recorded.extend(focus);
-    }
-    let slots = std::mem::take(&mut outcome.slot_assertions);
-    for (slot, assertion) in slots {
-        let current = current_assertion(tx, assertion)?;
-        outcome.slot_assertions.insert(slot, current);
-    }
-    outcome.checks = tx.query_row("SELECT count(*) FROM assertion_review r JOIN assertion_evidence e ON e.assertion_id=r.assertion_id WHERE e.source_id=? AND r.check_reason IS NOT NULL",[source],|r|r.get::<_,i64>(0))? as usize;
-    tx.execute(
-        "UPDATE document_profile SET graph_state='resolved' WHERE source_id=?",
-        [source],
-    )?;
-    Ok(outcome)
+    Ok(roles.get(EMPLOYER_ROLE).map(|(entity, _)| entity.clone()))
 }
 
 fn subject_is_self(db: &rusqlite::Connection, label: &str, profile: &str) -> bool {

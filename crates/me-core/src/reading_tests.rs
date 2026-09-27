@@ -176,6 +176,36 @@ fn fact(label: &str, value: &str, slot: Option<&str>) -> ReadFact {
         confidence: Some(0.95),
     }
 }
+fn employer(name: &str) -> SlotValue {
+    SlotValue {
+        slot: "employer".into(),
+        ..candidate_value(
+            CandidateKind::Organization,
+            name,
+            CandidateValue::Text(name.into()),
+        )
+    }
+}
+fn tax_id(number: &str) -> SlotValue {
+    SlotValue {
+        slot: "tax_id".into(),
+        ..candidate_value(
+            CandidateKind::TaxId,
+            number,
+            CandidateValue::Identifier(number.into()),
+        )
+    }
+}
+fn january() -> SlotValue {
+    month("2026-01-01", "2026-01-31")
+}
+fn read(run: &str, graph: DocumentGraph) -> DocumentRead {
+    DocumentRead {
+        run_id: run.into(),
+        graph: Some(graph),
+        ..Default::default()
+    }
+}
 fn count(vault: &Vault, sql: &str) -> i64 {
     vault.db.query_row(sql, [], |r| r.get(0)).unwrap()
 }
@@ -184,6 +214,28 @@ fn conflicts(vault: &Vault) -> i64 {
         vault,
         "SELECT count(*) FROM assertion_review WHERE check_reason='conflict'",
     )
+}
+/// Stored values of a property that are accepted now.
+fn accepted(vault: &Vault, property: &str) -> Vec<String> {
+    vault
+        .db
+        .prepare("SELECT value_json FROM assertion_state WHERE property_key=? AND state='accept' ORDER BY value_json")
+        .unwrap()
+        .query_map([property], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap()
+}
+/// Accepted values of a property flagged as conflicting.
+fn flagged(vault: &Vault, property: &str) -> i64 {
+    vault
+        .db
+        .query_row(
+            "SELECT count(*) FROM assertion_state a JOIN assertion_review r ON r.assertion_id=a.id WHERE a.property_key=? AND a.state='accept' AND r.check_reason='conflict'",
+            [property],
+            |r| r.get(0),
+        )
+        .unwrap()
 }
 
 #[test]
@@ -636,6 +688,7 @@ fn a_correction_supersedes_the_earlier_value_for_the_same_period() {
         graph: Some(payslip(
             &me,
             vec![
+                employer("Acme GmbH"),
                 money("wage_tax", "1032.58", 10),
                 month("2026-01-01", "2026-01-31"),
             ],
@@ -647,6 +700,7 @@ fn a_correction_supersedes_the_earlier_value_for_the_same_period() {
     let mut graph = payslip(
         &me,
         vec![
+            employer("Acme GmbH"),
             money("wage_tax", "1040.00", 10),
             month("2026-01-01", "2026-01-31"),
         ],
@@ -742,28 +796,436 @@ fn completing_a_read_run_finishes_its_run_and_job() {
 
 #[test]
 fn migration_sixteen_requeues_documents_read_by_the_tiered_reader() {
-    let (vault, source, root) = synthetic_vault_on_disk();
+    let (mut vault, source, root) = synthetic_vault_on_disk();
+    // Read deeply already (a finished read job), and never classified: both stay done.
+    let deep = add_synthetic_source(&mut vault, "payslip-deep.txt");
+    let unclassified = add_synthetic_source(&mut vault, "notes.txt");
     // A version 15 vault: the legacy-fixture helper is not used because it removes
     // the version 15 tables (document_profile, priority) that this migration reads.
     vault.db.execute_batch(&format!(
-        "INSERT INTO document_profile(source_id,family,doc_type,family_confidence,type_confidence,tier,graph_state,classified_at) VALUES('{source}','employment','payslip',0.9,0.9,'eager','resolved','2026-09-27');
-         UPDATE document_evaluation SET state='done' WHERE source_id='{source}';
+        "INSERT INTO document_profile(source_id,family,doc_type,family_confidence,type_confidence,tier,graph_state,classified_at) VALUES('{source}','employment','payslip',0.9,0.9,'eager','resolved','2026-09-27'),('{deep}','employment','payslip',0.9,0.9,'eager','resolved','2026-09-27');
+         INSERT INTO job(id,source_id,kind,dedup_key,state) VALUES('job-deep','{deep}','extract_facts','extract:deep','done');
+         UPDATE document_evaluation SET state='done';
          DROP TABLE document_fact; DROP TABLE read_summary; PRAGMA user_version=15;")).unwrap();
     drop(vault);
     let vault = crate::Vault::unlock(&root, SYNTHETIC_PASSWORD).unwrap();
-    let (state, priority): (String, i64) = vault
-        .db
-        .query_row(
-            "SELECT state,priority FROM document_evaluation WHERE source_id=?",
-            [&source],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap();
+    let evaluation = |source: &str| -> (String, i64) {
+        vault
+            .db
+            .query_row(
+                "SELECT state,priority FROM document_evaluation WHERE source_id=?",
+                [source],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
+    let (state, priority) = evaluation(&source);
     assert_eq!((state.as_str(), priority), ("queued", 0));
+    assert_eq!(evaluation(&deep).0, "done");
+    assert_eq!(evaluation(&unclassified).0, "done");
     let version: i64 = vault
         .db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
     assert_eq!(version, 16);
     assert_eq!(count(&vault, "SELECT count(*) FROM document_fact"), 0);
+}
+
+#[test]
+fn a_reread_with_a_changed_amount_leaves_no_conflict() {
+    let (mut vault, source) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    let slip = |amount: &str| payslip(&me, vec![money("wage_tax", amount, 10), january()]);
+    vault
+        .apply_read(&source, &read("a", slip("1032.58")))
+        .unwrap();
+    let outcome = vault
+        .apply_read(&source, &read("b", slip("1035.00")))
+        .unwrap();
+    let values = accepted(&vault, "person.wage_tax");
+    assert_eq!(values.len(), 1);
+    assert!(values[0].contains(r#""amount":"1035""#));
+    assert_eq!(flagged(&vault, "person.wage_tax"), 0);
+    assert_eq!(outcome.checks, 0);
+}
+
+#[test]
+fn a_reread_with_a_changed_start_leaves_no_stale_interval() {
+    let (mut vault, source) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    let notice = |run: &str, number: &str, day: &str| {
+        let mut graph = payslip(
+            &me,
+            vec![
+                SlotValue {
+                    slot: "tax_number".into(),
+                    ..candidate_value(
+                        CandidateKind::Identifier,
+                        number,
+                        CandidateValue::Identifier(number.into()),
+                    )
+                },
+                SlotValue {
+                    slot: "document_date".into(),
+                    ..date_value(day)
+                },
+            ],
+        );
+        graph.doc_type = "tax_assessment".into();
+        read(run, graph)
+    };
+    let intervals = |vault: &Vault| -> Vec<(String, String, Option<String>)> {
+        vault
+            .db
+            .prepare("SELECT value_json,valid_from,valid_to FROM assertion_state WHERE property_key='person.tax_number' AND state='accept'")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    };
+    vault
+        .apply_read(&source, &notice("a", "21/815/08150", "2020-03-01"))
+        .unwrap();
+    // A later start: the earlier value of this same document is not kept as a closed interval.
+    vault
+        .apply_read(&source, &notice("b", "21/815/08151", "2020-03-05"))
+        .unwrap();
+    let rows = intervals(&vault);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].0.contains("08151"));
+    assert_eq!(
+        (rows[0].1.as_str(), rows[0].2.as_deref()),
+        ("2020-03-05", None)
+    );
+    // An earlier start: the value it replaces does not close the new value.
+    vault
+        .apply_read(&source, &notice("c", "21/815/08152", "2020-02-01"))
+        .unwrap();
+    let rows = intervals(&vault);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].0.contains("08152"));
+    assert_eq!(
+        (rows[0].1.as_str(), rows[0].2.as_deref()),
+        ("2020-02-01", None)
+    );
+    assert_eq!(conflicts(&vault), 0);
+}
+
+#[test]
+fn a_reread_keeps_values_other_sources_still_support() {
+    let (mut vault, first) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    let certificate = |run: &str, with_id: bool| {
+        let mut values = vec![
+            money("wage_tax", "12390.96", 10),
+            SlotValue {
+                slot: "period_start".into(),
+                ..date_value("2026-01-01")
+            },
+            SlotValue {
+                slot: "period_end".into(),
+                ..date_value("2026-12-31")
+            },
+        ];
+        if with_id {
+            values.push(tax_id("12345678903"));
+        }
+        let mut graph = payslip(&me, values);
+        graph.doc_type = "wage_tax_certificate".into();
+        read(run, graph)
+    };
+    vault.apply_read(&first, &certificate("a", true)).unwrap();
+    let second = add_synthetic_source(&mut vault, "lstb-copy");
+    vault.apply_read(&second, &certificate("b", true)).unwrap();
+    // The first certificate no longer states the tax ID; the second still does.
+    vault.apply_read(&first, &certificate("c", false)).unwrap();
+    assert_eq!(accepted(&vault, "person.tax_id").len(), 1);
+    let sources: Vec<String> = vault
+        .db
+        .prepare("SELECT e.source_id FROM assertion_evidence e JOIN assertion_state a ON a.id=e.assertion_id WHERE a.property_key='person.tax_id' AND a.state='accept'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(sources, vec![second.clone()]);
+    // Once no source states it, it is retracted.
+    vault.apply_read(&second, &certificate("d", false)).unwrap();
+    assert!(accepted(&vault, "person.tax_id").is_empty());
+    assert_eq!(accepted(&vault, "person.wage_tax").len(), 1);
+}
+
+#[test]
+fn payslips_first_read_without_a_month_end_without_conflicts_after_rereads() {
+    let (mut vault, _) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    // Read without a month first: every amount has an unknown validity and conflicts.
+    let mut sources = vec![];
+    for m in 1..=12u32 {
+        let source = add_synthetic_source(&mut vault, &format!("payslip-{m}"));
+        let amount = format!("{}.00", 1000 + m);
+        vault
+            .apply_read(
+                &source,
+                &read(
+                    &format!("v1-{m}"),
+                    payslip(&me, vec![money("wage_tax", &amount, 10)]),
+                ),
+            )
+            .unwrap();
+        sources.push(source);
+    }
+    assert!(flagged(&vault, "person.wage_tax") > 0);
+    // Migration 16 reads them again in queue order, now with the pay month.
+    for (i, source) in sources.iter().enumerate() {
+        let m = i as u32 + 1;
+        let last = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][i];
+        let amount = format!("{}.00", 1000 + m);
+        vault
+            .apply_read(
+                source,
+                &read(
+                    &format!("v2-{m}"),
+                    payslip(
+                        &me,
+                        vec![
+                            money("wage_tax", &amount, 10),
+                            month(&format!("2026-{m:02}-01"), &format!("2026-{m:02}-{last}")),
+                        ],
+                    ),
+                ),
+            )
+            .unwrap();
+    }
+    assert_eq!(accepted(&vault, "person.wage_tax").len(), 12);
+    assert_eq!(flagged(&vault, "person.wage_tax"), 0);
+}
+
+#[test]
+fn a_correction_replaces_only_the_value_of_its_own_employer() {
+    let (mut vault, acme) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    let slip = |name: &str, values: Vec<SlotValue>| {
+        let mut all = vec![employer(name), january()];
+        all.extend(values);
+        payslip(&me, all)
+    };
+    vault
+        .apply_read(
+            &acme,
+            &read(
+                "x",
+                slip("Acme GmbH", vec![money("wage_tax", "500.00", 10)]),
+            ),
+        )
+        .unwrap();
+    let beispiel = add_synthetic_source(&mut vault, "payslip-beispiel");
+    vault
+        .apply_read(
+            &beispiel,
+            &read(
+                "y",
+                slip("Beispiel AG", vec![money("wage_tax", "300.00", 10)]),
+            ),
+        )
+        .unwrap();
+    let fixed = add_synthetic_source(&mut vault, "correction-acme");
+    let mut correction = slip("Acme GmbH", vec![money("wage_tax", "520.00", 10)]);
+    correction.correction = true;
+    vault.apply_read(&fixed, &read("c", correction)).unwrap();
+    let values = accepted(&vault, "person.wage_tax");
+    assert_eq!(values.len(), 2);
+    assert!(values.iter().any(|v| v.contains(r#""amount":"300""#)));
+    assert!(values.iter().any(|v| v.contains(r#""amount":"520""#)));
+    assert_eq!(accepted(&vault, "person.employer").len(), 2);
+    // A re-read of the correction no longer finds its amount: the other employer's
+    // value does not keep the correction standing, so the original comes back.
+    let mut without = slip("Acme GmbH", vec![]);
+    without.correction = true;
+    vault.apply_read(&fixed, &read("c2", without)).unwrap();
+    vault
+        .apply_read(
+            &acme,
+            &read(
+                "x2",
+                slip("Acme GmbH", vec![money("wage_tax", "500.00", 10)]),
+            ),
+        )
+        .unwrap();
+    let values = accepted(&vault, "person.wage_tax");
+    assert_eq!(values.len(), 2);
+    assert!(values.iter().any(|v| v.contains(r#""amount":"300""#)));
+    assert!(values.iter().any(|v| v.contains(r#""amount":"500""#)));
+}
+
+#[test]
+fn a_correction_without_an_employer_leaves_a_conflict_to_check() {
+    let (mut vault, source) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    vault
+        .apply_read(
+            &source,
+            &read(
+                "o",
+                payslip(&me, vec![money("wage_tax", "1032.58", 10), january()]),
+            ),
+        )
+        .unwrap();
+    let fixed = add_synthetic_source(&mut vault, "correction");
+    let mut correction = payslip(&me, vec![money("wage_tax", "1040.00", 10), january()]);
+    correction.correction = true;
+    vault.apply_read(&fixed, &read("c", correction)).unwrap();
+    assert_eq!(accepted(&vault, "person.wage_tax").len(), 2);
+    assert_eq!(flagged(&vault, "person.wage_tax"), 2);
+}
+
+#[test]
+fn a_correction_replaces_only_single_valued_period_values() {
+    let (mut vault, earlier) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    vault
+        .apply_read(
+            &earlier,
+            &read(
+                "e",
+                payslip(
+                    &me,
+                    vec![
+                        employer("Acme GmbH"),
+                        money("wage_tax", "500.00", 10),
+                        tax_id("12345678903"),
+                        january(),
+                    ],
+                ),
+            ),
+        )
+        .unwrap();
+    // The earlier payslip also names a second employer for January (an additive
+    // graph): a many-valued value of a source from the correcting employer.
+    vault
+        .apply_document_graph(
+            &earlier,
+            &payslip(&me, vec![employer("Beispiel AG"), january()]),
+        )
+        .unwrap();
+    assert_eq!(accepted(&vault, "person.employer").len(), 2);
+    let fixed = add_synthetic_source(&mut vault, "correction");
+    let mut correction = payslip(
+        &me,
+        vec![
+            employer("Acme GmbH"),
+            money("wage_tax", "520.00", 10),
+            tax_id("98765432106"),
+            january(),
+        ],
+    );
+    correction.correction = true;
+    vault.apply_read(&fixed, &read("c", correction)).unwrap();
+    let wage = accepted(&vault, "person.wage_tax");
+    assert_eq!(wage.len(), 1);
+    assert!(wage[0].contains(r#""amount":"520""#));
+    // Links to several employers and timeless identifiers are not replaced.
+    assert_eq!(accepted(&vault, "person.employer").len(), 2);
+    assert_eq!(accepted(&vault, "person.tax_id").len(), 2);
+    assert_eq!(flagged(&vault, "person.tax_id"), 2);
+}
+
+#[test]
+fn a_correction_leaves_a_value_the_user_confirmed() {
+    let (mut vault, source) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    vault
+        .apply_read(
+            &source,
+            &read(
+                "o",
+                payslip(
+                    &me,
+                    vec![
+                        employer("Acme GmbH"),
+                        money("wage_tax", "1032.58", 10),
+                        january(),
+                    ],
+                ),
+            ),
+        )
+        .unwrap();
+    let confirmed: String = vault
+        .db
+        .query_row(
+            "SELECT id FROM assertion_state WHERE property_key='person.wage_tax' AND state='accept'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    vault.confirm_assertion(&confirmed).unwrap();
+    let fixed = add_synthetic_source(&mut vault, "correction");
+    let mut correction = payslip(
+        &me,
+        vec![
+            employer("Acme GmbH"),
+            money("wage_tax", "1040.00", 10),
+            january(),
+        ],
+    );
+    correction.correction = true;
+    vault.apply_read(&fixed, &read("c", correction)).unwrap();
+    assert_eq!(accepted(&vault, "person.wage_tax").len(), 2);
+    assert_eq!(
+        vault.review_state(&confirmed).unwrap(),
+        crate::ReviewState::Reviewed
+    );
+    let state: String = vault
+        .db
+        .query_row(
+            "SELECT state FROM assertion_state WHERE id=?",
+            [&confirmed],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "accept");
+}
+
+#[test]
+fn read_checks_count_only_accepted_values_of_this_source() {
+    let (mut vault, source) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    let mut unsure = money("wage_tax", "1032.58", 10);
+    unsure.confidence = 0.75;
+    let first = vault
+        .apply_read(&source, &read("a", payslip(&me, vec![unsure, january()])))
+        .unwrap();
+    assert_eq!(first.checks, 1);
+    // The re-read no longer finds the unsure value: nothing is left to check.
+    let second = vault
+        .apply_read(&source, &read("b", payslip(&me, vec![january()])))
+        .unwrap();
+    assert_eq!(second.checks, 0);
+    assert_eq!(
+        count(&vault, "SELECT checks FROM read_summary WHERE run_id='b'"),
+        0
+    );
+}
+
+#[test]
+fn a_read_with_an_unknown_owner_or_period_is_rejected() {
+    let (mut vault, source) = synthetic_payslip_source();
+    let mut owner = fact("Kostenstelle", "4711", None);
+    owner.owner = "employer".into();
+    let mut period = fact("Lohnsteuer", "1.032,58", None);
+    period.period = Some("monthly".into());
+    for bad in [owner, period] {
+        let result = vault.apply_read(
+            &source,
+            &DocumentRead {
+                run_id: "r".into(),
+                facts: vec![fact("Steuerklasse", "1", None), bad],
+                ..Default::default()
+            },
+        );
+        assert!(matches!(result, Err(crate::Error::Validation(_))));
+    }
+    assert_eq!(count(&vault, "SELECT count(*) FROM document_fact"), 0);
+    assert_eq!(count(&vault, "SELECT count(*) FROM read_summary"), 0);
 }

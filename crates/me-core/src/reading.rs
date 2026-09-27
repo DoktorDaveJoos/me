@@ -2,13 +2,13 @@
 //! is a document fact of its source; values nobody interpreted stay visible.
 use crate::{
     DocumentGraph, Error, Result, Uncovered, Vault,
-    graph::{GRAPH_POLICY, policy_decision, resolve_document},
+    graph::{GRAPH_POLICY, resolve_read},
     vault::id,
 };
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +68,33 @@ pub struct ReadOutcome {
     pub uninterpreted: usize,
 }
 
+/// Owners and amount periods the read store accepts (the `document_fact` checks).
+const OWNERS: &[&str] = &[
+    "self",
+    "household",
+    "party",
+    "organization",
+    "unclear",
+    "unknown",
+];
+const PERIODS: &[&str] = &["document", "cumulative", "other", "none"];
+
+fn validate(facts: &[ReadFact]) -> Result<()> {
+    for fact in facts {
+        if !OWNERS.contains(&fact.owner.as_str()) {
+            return Err(Error::Validation("A read value has an unknown owner."));
+        }
+        if fact
+            .period
+            .as_deref()
+            .is_some_and(|p| !PERIODS.contains(&p))
+        {
+            return Err(Error::Validation("A read value has an unknown period."));
+        }
+    }
+    Ok(())
+}
+
 fn locator(source: &str, segment: &str, start: usize, end: usize) -> String {
     json!({"kind":"candidate","source_id":source,"segment_id":segment,"start":start,"end":end})
         .to_string()
@@ -77,6 +104,7 @@ impl Vault {
     /// Replaces this source's read: document facts, automatic profile values and
     /// the summary. User decisions are never overridden.
     pub fn apply_read(&mut self, source: &str, read: &DocumentRead) -> Result<ReadOutcome> {
+        validate(&read.facts)?;
         let tx = self.db.transaction()?;
         let personal: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM source WHERE id=? AND sensitivity='personal' AND retention='keep')",
@@ -88,34 +116,17 @@ impl Vault {
                 "This document is not available for analysis.",
             ));
         }
-        // Automatic values this source supported so far; a person's decision wins.
-        let previous: BTreeSet<String> = tx
-            .prepare("SELECT DISTINCT a.id FROM assertion_state a JOIN assertion_evidence e ON e.assertion_id=a.id WHERE e.source_id=? AND a.origin='extraction' AND a.state='accept' AND (SELECT actor FROM decision d WHERE d.assertion_id=a.id ORDER BY d.local_seq DESC LIMIT 1)='policy'")?
-            .query_map([source], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<_, _>>()?;
-        let graph = match &read.graph {
-            Some(g) => Some(resolve_document(&tx, source, g)?),
-            None => None,
-        };
-        let recorded = graph
-            .as_ref()
-            .map(|g| g.recorded.clone())
-            .unwrap_or_default();
-        for stale in previous.difference(&recorded) {
-            policy_decision(&tx, stale, "retract", "not_found_on_reread")?;
-            tx.execute(
-                "UPDATE collection_item SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE current_assertion_id=? AND kind='note' AND deleted_at IS NULL",
-                [stale],
-            )?;
-        }
+        // Profile values replace this source's earlier automatic values; a person's
+        // decision wins.
+        let graph = resolve_read(&tx, source, read.graph.as_ref())?;
         tx.execute("DELETE FROM document_fact WHERE source_id=?", [source])?;
-        let slots = graph
-            .as_ref()
-            .map(|g| g.slot_assertions.clone())
-            .unwrap_or_default();
         let mut in_profile = 0;
         for (ordinal, f) in read.facts.iter().enumerate() {
-            let assertion = f.slot.as_ref().and_then(|s| slots.get(s)).cloned();
+            let assertion = f
+                .slot
+                .as_ref()
+                .and_then(|s| graph.slot_assertions.get(s))
+                .cloned();
             in_profile += usize::from(assertion.is_some());
             tx.execute(
                 "INSERT INTO document_fact VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
@@ -154,11 +165,11 @@ impl Vault {
                 ],
             )?;
         }
-        let checks = graph.as_ref().map_or(0, |g| g.checks);
         let outcome = ReadOutcome {
             values: read.facts.len(),
             in_profile,
-            checks,
+            // Counted after every retraction of this read.
+            checks: graph.checks,
             uninterpreted: read.uninterpreted.len(),
         };
         tx.execute(
