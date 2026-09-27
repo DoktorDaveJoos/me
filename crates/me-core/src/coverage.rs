@@ -20,7 +20,7 @@ pub fn worth_reading(c: &Candidate) -> bool {
     use CandidateKind::*;
     match c.kind {
         Iban | TaxId | SocialInsuranceNumber | Mrz => c.checksum,
-        Money | Amount | Date | Period => c.label.is_some(),
+        Money | Amount | Date => c.label.is_some(),
         _ => false,
     }
 }
