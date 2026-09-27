@@ -221,7 +221,7 @@ impl Vault {
                     "Unknown field. Use field keys from me_status.",
                 ));
             }
-            let mut stmt = self.db.prepare("SELECT DISTINCT a.id,a.value_json,s.id,s.title,e.locator_json FROM assertion_state a JOIN assertion_evidence e ON e.assertion_id=a.id JOIN source s ON s.id=e.source_id WHERE a.subject_id=(SELECT profile_id FROM vault_meta) AND a.property_key=? AND a.state='accept' AND s.sensitivity='personal' AND s.retention='keep' AND s.id IN (SELECT value FROM json_each(?)) ORDER BY a.id,s.id LIMIT 11")?;
+            let mut stmt = self.db.prepare("SELECT DISTINCT a.id,a.value_json,s.id,s.title,e.locator_json FROM assertion_state a JOIN assertion_evidence e ON e.assertion_id=a.id JOIN source s ON s.id=e.source_id WHERE a.subject_id=(SELECT profile_id FROM vault_meta) AND a.property_key=? AND a.state='accept' AND (a.time_kind IN ('unknown','timeless') OR (a.valid_from<=date('now') AND (a.valid_to IS NULL OR a.valid_to>date('now')) AND (a.time_kind<>'point' OR a.valid_from=date('now')))) AND s.sensitivity='personal' AND s.retention='keep' AND s.id IN (SELECT value FROM json_each(?)) ORDER BY a.id,s.id LIMIT 11")?;
             let rows = stmt
                 .query_map(params![field, scope.json()], |r| {
                     Ok((
@@ -453,6 +453,7 @@ impl Vault {
         let mut count = 0;
         crate::review_questions::store_questions(&tx, &input.source_id, &input.run_id, questions)?;
         for (fact, value) in checked {
+            crate::domain::store_observation(&tx, &input.source_id, &input.run_id, &fact, true)?;
             let key = crate::review_questions::candidate_key(&fact);
             let answered: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ai_question WHERE source_id=? AND candidate_key=? AND state IN ('confirmed','dismissed'))", params![input.source_id,key], |r|r.get(0))?;
             if answered {

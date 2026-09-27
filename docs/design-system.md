@@ -167,6 +167,32 @@ relationship, including conflicts and unverified sources, without relying on col
 Only selected connections are emphasized. Background grid, data fill, inset
 selection and faint halos keep the reference’s layered appearance restrained.
 
+## Identity setup, constellation and quick checks
+
+“Who are you?” reuses the account onboarding geometry (`ONBOARDING_*`,
+`modal_panel`, the step rail with `01`–`04` mono labels, shared fields and the
+44 px primary action). Its four steps are You, Born, Home and Files. The settled
+fingerprint gains an `ACCENT` overlay of `constellation::ANSWER_TINT` per answered
+step, capped at the fingerprint opacity; no new asset or animation is added.
+Household roles are compact 32 px option buttons with the standard radius; the
+selected role uses `ACCENT` text and border on `HOVER`.
+
+The Imports constellation (`design_system::constellation`) reuses the Knowledge
+cell language at a smaller scale: `CELL_RADIUS` 44 px pointy-top cells with the
+standard rounded corners, `SURFACE` fill, 1 px `DECORATIVE` borders, `ACCENT` for
+the user and household, and `WARNING` for an entity with something worth a check.
+At most `MAX_NODES` (19: the center and two rings) are shown in a `HEIGHT` 400 px
+inset panel. Labels use Caption in a `LABEL_WIDTH` × `LABEL_HEIGHT` box, split at
+word boundaries into at most two truncated lines. Links are 1 px `DECORATIVE`
+strokes at `EDGE_OPACITY`. A plain-text line (“Latest: …”) and family chips
+always describe the same state in words; color is never the only signal. The
+completed-work bar is the shared `progress_bar`.
+
+Quick checks use result cards: a Label heading per entity, Small labels, Value in
+Geist Mono for the stored value, a Caption reason in `WARNING` text, and compact
+primary/secondary actions (“Looks right” / “Not right”). Numeric confidence is
+never shown.
+
 ## Honeycomb and interface motion
 
 Use `theme::motion` for native, finite transitions. Pass the device's motion
@@ -197,24 +223,33 @@ identity for the legacy local-vault/restore view.
 | `CONNECTION_TRACE_MS` | 640 | Selected connections draw along cell borders |
 | `SELECTION_TRACE_MS` | 280 | Selected cell inset draws in place |
 
-Motion geometry is centralized alongside timing: 32 px field cells, 20 px
-sidebar cells, 1 px structure and 1.5 px drawing fronts.
+Motion geometry is centralized alongside timing: 32 px identity cells, 24 px
+window-ring cells, 1 px structure and 1.5 px drawing fronts.
 The identity field fades from every edge over a 320 px band with a smoothstep
 curve. Its static lines and animated indigo fronts use the same opacity mask;
 there is no hard central cutout. Selected cells have three inner cube edges and
 a 1.5 px filled center dot. Paths are split into at most 8 px segments and grouped
-in 32 alpha batches. Sidebar decoration fades through the upper-right 160×224 px
-area; the workspace corner uses 320×160 px. Both use the same smoothstep opacity
-curve as the identity field, applied to normalized elliptical distance from the
-outer corner. All three fields include quiet cube edges and dots. Static lines,
-entrance drawing fronts and busy highlights share the exact same fade mask.
+in 32 alpha batches. The unlocked window uses one continuous ring (`Field::Window`)
+with the same smoothstep fade over a 120 px band from every window edge. Its
+lattice is anchored to the window, not the painting element: the sidebar and the
+workspace each paint their part, and cells continue across the sidebar border.
+Static lines, entrance drawing fronts and busy highlights share the exact same mask.
+
+The lattice is embossed. Each cell has a 2 px `INK` drop line offset 1.5 px
+down-right at 9% of field opacity, and a 1 px `SURFACE` light edge offset 0.75 px
+up-left at 95%. These faint layers use one alpha per cell. While motion is enabled
+and the window is active, a throttled ambient clock (66 ms ticks) drifts the whole
+lattice on a ±2 px Lissajous path (24 s × 36 s) and sweeps a diagonal band of light
+across the light edges every 12 s. The clock wraps at 72 s, which every period
+divides. It stops for inactive or hidden windows and for reduced motion, where the
+lattice is still.
 Paint these decorative layers before page and sidebar content, including during
 loading. Buttons, cards, text and dialogs always draw above them. Page roots use
 the shell background so the decoration stays visible in empty space; opaque
 control and card surfaces cover it. Decoration has no hit targets or input handlers.
-Page navigation replays the short field entrance; sidebar decoration stays settled.
-Actual loading work adds the same clockwise activity highlight, which disappears
-when that work ends. Reduced motion suppresses it. Field opacity is 80%, sidebar 70%, header 55%;
+The window ring plays its entrance once and does not replay on page navigation.
+Actual loading work adds the same clockwise, pulsing activity highlight, which
+disappears when that work ends. Reduced motion suppresses it. Field opacity is 80%, window ring 60%;
 animated fronts use 65%, navigation 40%, cube edges 70% of field opacity.
 The drawing tail spans 16% of a cell outline; fronts use 48% of the timeline for
 inward spread, 10% deterministic stagger and 38% per-cell drawing. Page content
@@ -334,6 +369,9 @@ clear password fields; failed attempts retain them for correction.
 The button pairs an operation label with a spinner. A clockwise light wave travels
 through the existing perimeter honeycombs only while work is active and fades inward
 with the static lattice. `ACCOUNT_ACTIVITY_MS` is 2800 ms with a 28% angular tail;
+its brightness pulses twice per lap between 45% and 100%, and lit cells get a 7%
+`ACCENT` fill. Angles are measured around the window center, so the same wave laps
+the whole unlocked window across sidebar and workspace;
 `SPINNER_MS` is 1000 ms, size 16 px with 2 px inset, 1.5 px stroke, a 20% track and
 70% bright arc. Reduced motion omits the lattice wave and stops the spinner.
 Neither indicator represents a percentage or delays completion.

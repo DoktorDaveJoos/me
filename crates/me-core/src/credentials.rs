@@ -1629,6 +1629,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut v = vault(&dir);
         v.save_note(None, "Existing", "original content").unwrap();
+        crate::revisions::remove_for_legacy_fixture(&v.db);
         v.db.execute_batch(
             "DROP TABLE onboarding; DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; PRAGMA user_version=5;",
         )

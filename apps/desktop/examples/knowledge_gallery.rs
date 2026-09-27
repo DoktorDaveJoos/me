@@ -47,8 +47,13 @@ fn main() {
     std::fs::create_dir_all(parent).unwrap();
     let mut vault = me_core::Vault::create(&root, "synthetic-gallery-passphrase").unwrap();
     vault.set_automatic_evaluation(false).unwrap();
-    let mode = std::env::args().nth(1).unwrap_or_default();
-    if !matches!(mode.as_str(), "empty" | "loading" | "error") {
+    let mode = std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("ME_GALLERY_MODE").ok())
+        .unwrap_or_default();
+    if mode == "domain" {
+        domain_fixture(&mut vault);
+    } else if !matches!(mode.as_str(), "empty" | "loading" | "error") {
         for (label, value) in [
             ("Preferred name", "Alex"),
             ("Languages", "English, German"),
@@ -137,7 +142,8 @@ fn main() {
                 .unwrap();
         }
     }
-    let small = std::env::args().any(|arg| arg == "small");
+    let small = std::env::args().any(|arg| arg == "small")
+        || std::env::var_os("ME_GALLERY_SMALL").is_some();
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
@@ -176,4 +182,53 @@ fn main() {
                 .unwrap();
             cx.activate(true);
         });
+}
+
+fn domain_fixture(vault: &mut me_core::Vault) {
+    use me_core::{AssertionDraft, EntityKind, FactValue, Period, Validity};
+    let person = vault.profile_entity_id().unwrap();
+    let car = vault
+        .create_entity(EntityKind::Vehicle, "Synthetic C250")
+        .unwrap();
+    let contract = vault
+        .create_entity(EntityKind::InsuranceContract, "Policy SYN-1837")
+        .unwrap();
+    let insurer = vault
+        .create_entity(EntityKind::Organization, "Synthetic Insurance")
+        .unwrap();
+    // Properties come from the shared vocabulary installed with every vault.
+    for (subject, property, object) in [
+        (&person, "person.owns", &car),
+        (&contract, "insurance.insured_object", &car),
+        (&contract, "contract.provider", &insurer),
+    ] {
+        vault
+            .record_fact(&AssertionDraft {
+                subject: subject.clone(),
+                property: property.into(),
+                value: FactValue::Entity(object.clone()),
+                validity: Validity::Timeless,
+            })
+            .unwrap();
+    }
+    for (amount, from, to) in [
+        ("700.00", "2026-01-01", Some("2027-01-01")),
+        ("742.00", "2027-01-01", None),
+    ] {
+        vault
+            .record_fact(&AssertionDraft {
+                subject: contract.clone(),
+                property: "contract.premium".into(),
+                value: FactValue::Money {
+                    amount: amount.into(),
+                    currency: "EUR".into(),
+                    period: Some(Period::Year),
+                },
+                validity: Validity::Interval {
+                    from: from.into(),
+                    to: to.map(str::to_owned),
+                },
+            })
+            .unwrap();
+    }
 }

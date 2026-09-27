@@ -88,7 +88,7 @@ impl Render for Gallery {
                 .items_center()
                 .justify_center()
                 .gap(px(space::XXL))
-                .child(motion::field_at(motion::Field::Identity, phase))
+                .child(motion::field_at(motion::Field::Identity, phase, None))
                 .child(onboarding_fingerprint_at(phase))
                 .child(heading("Identity drawing & orbit"))
                 .child(eyebrow(format!(

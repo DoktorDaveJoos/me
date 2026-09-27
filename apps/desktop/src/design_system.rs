@@ -64,6 +64,10 @@ pub mod motion {
     pub const LOGIN_BADGE_TINT: f32 = 0.08;
     pub const ACCOUNT_ACTIVITY_MS: u64 = 2800;
     pub const ACCOUNT_ACTIVITY_TAIL: f32 = 0.28;
+    /// Brightness pulses per clockwise lap, never dimmer than the floor.
+    pub const ACTIVITY_PULSES: f32 = 2.;
+    pub const ACTIVITY_PULSE_FLOOR: f32 = 0.45;
+    pub const ACTIVITY_FILL_OPACITY: f32 = 0.07;
     pub const SPINNER_MS: u64 = 1000;
     pub const SPINNER_SIZE: f32 = 16.;
     pub const SPINNER_INSET: f32 = 2.;
@@ -79,7 +83,6 @@ pub mod motion {
     pub const CONTENT_START_OPACITY: f32 = 0.35;
     pub const NODE_START_OPACITY: f32 = 0.4;
     pub const FIELD_CELL_RADIUS: f32 = 32.;
-    pub const SIDEBAR_CELL_RADIUS: f32 = 20.;
     pub const FIELD_STROKE: f32 = 1.;
     pub const TRACE_STROKE: f32 = 1.5;
     pub const FIELD_BAND: f32 = 320.;
@@ -94,13 +97,28 @@ pub mod motion {
     pub const FINGERPRINT_MIN_WIDTH: f32 = 0.18;
     pub const FINGERPRINT_TILT: f32 = 0.24;
     pub const FINGERPRINT_OPACITY: f32 = 0.85;
-    pub const SIDEBAR_FIELD_WIDTH: f32 = 160.;
-    pub const SIDEBAR_FIELD_HEIGHT: f32 = 224.;
-    pub const HEADER_FIELD_WIDTH: f32 = 320.;
-    pub const HEADER_FIELD_HEIGHT: f32 = 160.;
+    /// The unlocked window frame: one lattice across sidebar and workspace.
+    pub const WINDOW_FIELD_BAND: f32 = 120.;
+    pub const WINDOW_CELL_RADIUS: f32 = 24.;
+    pub const WINDOW_FIELD_OPACITY: f32 = 0.6;
     pub const FIELD_OPACITY: f32 = 0.8;
-    pub const SIDEBAR_FIELD_OPACITY: f32 = 0.7;
-    pub const HEADER_FIELD_OPACITY: f32 = 0.55;
+    /// Embossed lattice: a soft drop line below-right, a light edge above-left.
+    pub const FIELD_SHADOW_OFFSET: f32 = 1.5;
+    pub const FIELD_SHADOW_STROKE: f32 = 2.;
+    pub const FIELD_SHADOW_OPACITY: f32 = 0.09;
+    pub const FIELD_HIGHLIGHT_OFFSET: f32 = 0.75;
+    pub const FIELD_HIGHLIGHT_OPACITY: f32 = 0.95;
+    /// Ambient motion is throttled and pauses while the window is inactive.
+    pub const AMBIENT_FRAME_MS: u64 = 66;
+    pub const AMBIENT_MAX_STEP: f32 = 0.1;
+    /// Every ambient period divides this cycle, so wrapping the clock is seamless.
+    pub const AMBIENT_CYCLE: f32 = 72.;
+    pub const DRIFT_PERIOD_X: f32 = 24.;
+    pub const DRIFT_PERIOD_Y: f32 = 36.;
+    pub const DRIFT_AMPLITUDE: f32 = 2.;
+    pub const SHIMMER_PERIOD: f32 = 12.;
+    pub const SHIMMER_WAVELENGTH: f32 = 720.;
+    pub const SHIMMER_DEPTH: f32 = 0.7;
     pub const TRACE_OPACITY: f32 = 0.65;
     pub const NAV_TRACE_OPACITY: f32 = 0.4;
     pub const SEAL_OPACITY: f32 = 0.8;
@@ -211,4 +229,18 @@ pub mod knowledge {
     pub const DIM_OPACITY: f32 = 0.45;
     pub const DETAIL_ZOOM: f64 = 0.8;
     pub const ZOOM_STEP: f64 = 0.2;
+}
+
+/// The growing constellation on Imports: a small honeycomb of the most connected
+/// entities around the user. Same cell language as the Knowledge map, smaller.
+pub mod constellation {
+    pub const CELL_RADIUS: f32 = 44.;
+    pub const HEIGHT: f32 = 400.;
+    /// The center cell and two full rings.
+    pub const MAX_NODES: usize = 19;
+    pub const LABEL_WIDTH: f32 = 68.;
+    pub const LABEL_HEIGHT: f32 = 40.;
+    pub const EDGE_OPACITY: f32 = 0.6;
+    /// Tint added to the setup fingerprint per answered “Who are you?” step.
+    pub const ANSWER_TINT: f32 = 0.2;
 }

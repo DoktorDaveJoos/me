@@ -7,8 +7,8 @@ including animated tips, and add small center dots and isometric cube edges.
 The large account fingerprint follows a finite orbital entrance and settles half
 behind the form card, without a seal or constellation. The form remains usable
 throughout. Legacy local-vault/restore views keep the small fingerprint seal.
-Sidebar and workspace fields fade smoothly inward from their outer corners,
-including drawing fronts and busy highlights. They settle into quiet linework. Navigation, page changes,
+The unlocked window has one thin embossed ring across sidebar and workspace,
+fading inward from every window edge, including drawing fronts and busy highlights. Navigation, page changes,
 focused text fields and dialogs have short finite transitions. No new dependency
 or data schema is required.
 
@@ -17,7 +17,8 @@ border routes. Selection draws an inset; new cells fade into their persisted
 positions. Refreshing identical data does not restart cell arrivals. Selecting
 the current node does not restart its connections. Pan and zoom remain immediate.
 Only active Knowledge transitions request new frames, and shared GPUI animations
-run once; decorative effects do not run a perpetual idle loop. During account submission or workspace loading, a clockwise highlight follows
+run once. The only idle loop is the throttled ambient honeycomb drift (66 ms
+ticks), which stops while the window is inactive or motion is reduced. During account submission or workspace loading, a clockwise highlight follows
 the existing honeycomb lattice. Account actions also show a small spinner. Both stop as soon as work finishes; reduced motion
 omits the traveling highlight and shows a static spinner arc.
 
@@ -215,3 +216,29 @@ The active trace was visually checked in the native macOS release preview at
 1120×820 and 800×600 with synthetic data. The three shared motion tests, design
 guard and its five regression tests, formatting and workspace/all-target/all-feature
 strict Clippy passed. The macOS bundle was rebuilt; Linux rendering was not checked.
+
+
+## Honeycomb depth, ambient drift and window ring — 27 September 2026
+
+The lattice is embossed with a soft drop line and a light edge per cell. A throttled
+ambient clock drifts it by at most ±2 px and sweeps a slow diagonal light across the
+light edges. The clock only advances while motion is enabled and the window is
+active; it caps each step at 100 ms, so resuming does not jump. Sidebar and
+workspace corner patches are replaced by one continuous `Field::Window` ring
+(24 px cells, 120 px band, 60% opacity). Its lattice is anchored to the window, so
+cells and the loading wave continue across the sidebar border. The busy wave now
+pulses twice per 2800 ms lap (45–100%) and tints lit cells with a 7% accent fill.
+The ring entrance no longer replays on page navigation.
+
+Verification: the release `motion_gallery` was inspected on macOS with synthetic
+data. At 1120×820 this covered `search` and `locked`, and `loading` in two wave
+positions (right edge, then sidebar). At 800×600 `loading` was inspected. Measured
+over 20 s, idle CPU was 14.6% of a core in `search` versus 13.3% with reduced
+motion, and 15.5% versus 14.2% in `locked`. An inactive window used 0.2%. The
+roughly 13% active baseline predates this change and was not investigated. Unit
+tests cover pulse bounds and looping, still/bounded/wrapping ambient motion,
+window-lattice continuity between sidebar and workspace regions, and empty regions.
+All 39 desktop tests passed, along with the design guard and its five regression
+checks, formatting of the changed files and strict all-target/all-feature Clippy.
+Linux rendering, screen readers, the `busy` gallery flag (reset by startup tasks)
+and toggling Reduce motion while the ambient clock runs were not visually verified.

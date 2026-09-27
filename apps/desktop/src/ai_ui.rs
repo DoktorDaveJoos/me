@@ -23,6 +23,7 @@ struct DocumentResult {
     proposals: Vec<me_core::Proposal>,
     fact_count: Option<usize>,
     warning: Option<String>,
+    graph: Option<super::graph_import::GraphRun>,
 }
 
 struct VaultCheckpoints {
@@ -280,6 +281,10 @@ impl MeApp {
                     }
                     _ => {
                         record("queue.idle", &[]);
+                        // Reduce once the map stage is idle: equivalence and alignment.
+                        if this.active_imports.is_empty() {
+                            this.run_reduce(cx);
+                        }
                     }
                 }
             });
@@ -371,6 +376,7 @@ impl MeApp {
         self.error = None;
         let session = self.session.clone();
         let generation = self.generation;
+        let codex_ready = self.codex_ready;
         let (tx, rx) = std::sync::mpsc::channel();
         let run = uuid::Uuid::new_v4().to_string();
         let task = cx.background_executor().spawn(async move {
@@ -487,6 +493,7 @@ impl MeApp {
                             proposals: v.proposals(item).map_err(core_error)?,
                             fact_count: None,
                             warning: None,
+                            graph: None,
                         });
                     }
                     session
@@ -501,6 +508,53 @@ impl MeApp {
                         current: 1,
                         total: 1,
                     });
+                    if automatic {
+                        // Tiered pipeline: classify every file, extract eager types only.
+                        stage = "graph.pipeline";
+                        record(stage, &[F::Count("item", item)]);
+                        let graph = super::graph_import::run_graph_import(
+                            &session,
+                            item,
+                            &run,
+                            &cancel,
+                            &tx,
+                            &home,
+                            codex_ready,
+                        );
+                        let mut guard = session.lock().map_err(|_| "Vault unavailable.")?;
+                        let v = guard.as_mut().ok_or("Vault locked.")?;
+                        return match graph {
+                            Ok(graph) => Ok(DocumentResult {
+                                collection: v.collection("", false).map_err(core_error)?,
+                                proposals: v.proposals(item).map_err(core_error)?,
+                                fact_count: Some(graph.assertions),
+                                warning: (graph.checks > 0).then(|| {
+                                    format!(
+                                        "{} worth a quick look in Review.",
+                                        if graph.checks == 1 {
+                                            "1 value is".to_owned()
+                                        } else {
+                                            format!("{} values are", graph.checks)
+                                        }
+                                    )
+                                }),
+                                graph: Some(graph),
+                            }),
+                            Err(e) => {
+                                let failure = me_core::ImportFailure::new(
+                                    me_core::ImportProvider::Local,
+                                    if cancel.load(Ordering::SeqCst) {
+                                        me_core::ImportErrorKind::Cancelled
+                                    } else {
+                                        me_core::ImportErrorKind::Storage
+                                    },
+                                    e.clone(),
+                                );
+                                let _ = v.record_import_failure(item, &run, &failure);
+                                Err(e)
+                            }
+                        };
+                    }
                     stage = "ai.prepare";
                     record(stage, &[F::Count("item", item)]);
                     let input = {
@@ -632,6 +686,7 @@ impl MeApp {
                                 fact_count: Some(proposals.len()),
                                 proposals,
                                 warning,
+                                graph: None,
                             })
                         }
                         Err(e) => {
@@ -763,15 +818,24 @@ impl MeApp {
                         proposals,
                         fact_count: count,
                         warning,
+                        graph,
                     })) => {
                         if this.search.read(cx).content.is_empty() && !this.pinned_only {
                             this.collection = collection;
                         }
-                        this.ai_message = Some(match count {
-                            None => "File is searchable. Ready for AI analysis.".into(),
-                            Some(0) => "No supported details found. Check the original if you expected more.".into(),
-                            Some(count) => format!("{count} details ready for review."),
+                        this.ai_message = Some(match (&graph, count) {
+                            (Some(g), _) if !g.eager => format!(
+                                "Filed under {}. Details are read when you need them.",
+                                me_core::doc_types::family(&g.family).map_or("Other", |f| f.label)
+                            ),
+                            (Some(g), _) => format!("{} details added to ME.", g.assertions),
+                            (None, None) => "File is searchable. Ready for AI analysis.".into(),
+                            (None, Some(0)) => "No supported details found. Check the original if you expected more.".into(),
+                            (None, Some(count)) => format!("{count} details ready for review."),
                         });
+                        if graph.is_some() {
+                            this.refresh_graph(cx);
+                        }
                         if let Some(warning) = warning {
                             this.ai_message = Some(format!(
                                 "{} {warning}",

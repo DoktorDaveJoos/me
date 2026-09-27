@@ -156,6 +156,7 @@ impl MeApp {
                         this.focus_filter_on_ready = true;
                         this.refresh_search(cx);
                         this.refresh_imports(cx);
+                        this.refresh_graph(cx);
                         this.kick_auto_queue(cx);
                     }
                     Err(error) => {
@@ -234,6 +235,19 @@ impl MeApp {
         self.stop_bridge(cx);
         self.proposals.clear();
         self.questions.clear();
+        // Personal names and values never outlive the session on screen.
+        if let Some(cancel) = &self.graph.dump_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.graph = GraphState::default();
+        for input in [
+            &self.identity_name,
+            &self.identity_aliases,
+            &self.identity_birth,
+            &self.household_name,
+        ] {
+            input.update(cx, |i, cx| i.set_text("", cx));
+        }
         self.question_edit = None;
         self.question_error = None;
         self.ai_message = None;

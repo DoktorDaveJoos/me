@@ -10,6 +10,95 @@ what remains uncertain. It is not a claim of perfect OCR or perfect AI interpret
 A plausible answer without the right person, period and source is a failed import
 outcome, even when every character in the answer occurs somewhere in the file.
 
+## Tiered pipeline and personal graph
+
+Implemented 27 September 2026; design in
+[the import pipeline spec](superpowers/specs/2026-09-27-import-pipeline-design.md).
+It replaces full OpenAI extraction for automatically queued files. Explicit
+**Run AI** and on-demand reading keep the grounded deep extraction below.
+
+1. **Intake.** Window drops, file picking and folder dumps create envelopes
+   (`intake_envelope`/`envelope_source`). Identical bytes are stored once; a
+   repeat links the existing source. A folder dump first shows one summary
+   (files, size, unreadable formats, hidden files) instead of a per-file list, and
+   queues behind interactive drops. Scanner and mail sources are envelope kinds
+   without a producer yet.
+2. **Normalize.** Unchanged local OCR and parsing.
+3. **Candidates (Context step).** `me_core::find_candidates` finds typed values
+   locally with their exact source spans: MRZ (ICAO 9303 check digits), IBAN
+   (mod 97), BIC, German tax ID and pension insurance number (check digits),
+   German/ISO dates (no invented centuries), money with an explicit currency,
+   labeled identifiers, names after salutations or matching the anchors, plates,
+   VINs, organizations, streets, postal codes and cities.
+4. **Classify (Interpretation step).** One TypeSafe request per document: family
+   Choice, one speculative type Choice per family, subject Choice with an
+   existence Noul, legibility and mixed-document Nouls. An uncertain type keeps
+   only the family. A valid MRZ decides the subject. Classification is cached by
+   content fingerprint, registry, model and anchors.
+5. **Extract (Extraction step), eager types only.** One TypeSafe request selects
+   candidate IDs per slot, each Choice paired with an existence Noul and, for open
+   payment periods, a closed period Choice. MRZ fields need no judgment. When a
+   required slot is still missing and the import's OpenAI allowance permits, one
+   small grounded deep-extraction section proposes values; they are offered as
+   new candidates and verified with SDE-cascade Nouls (hallucinated, off target,
+   wrong person, format) before use.
+6. **Resolve (Verification step).** Entities are matched by scoped identifiers
+   (passport/ID number, IBAN, VIN, plate, contract number per provider,
+   normalized organization name, normalized street per postal code). Names alone
+   never merge people. Values become assertions accepted by policy
+   `import-graph-v1`, with `assertion_review` confidence and source. Newer
+   documents close older open intervals in any import order; overlapping
+   different values are flagged as conflicts. User decisions are never
+   overridden.
+7. **Reduce.** When the queue is idle, TypeSafe judges flagged conflicts that
+   differ only in spelling and organizations that share a leading name word
+   (Score plus companion Noul). Results become quick checks or merge proposals,
+   never automatic merges.
+
+Lazy documents (invoices, letters, health documents, unknown types) are classified
+and searchable. On Search, **Look inside filed documents** asks one existence Noul
+per lazy document, several documents per request, and reads up to three matches
+with the deep extraction.
+
+**Review.** Everything automatic is usable immediately and marked unreviewed.
+Values below the check threshold, value conflicts, household proposals (three
+documents about the same non-anchor person) and merge proposals appear under
+**Quick checks** in Review. The threshold starts at 0.8 and moves to 0.9 or 0.7
+from the user's own review outcomes; no numeric confidence is displayed.
+
+**Identity setup.** “Who are you?” records the self name, former names, birth
+date and household anchors before the first dump. It can be skipped and does not
+block imports. The Imports page shows the growing constellation of entities,
+completed-work progress, family clusters and the latest discovery in words.
+
+All TypeSafe questions and thresholds are in
+`crates/me-agent/src/typesafe_questions.rs`. Requests pin `jev-1.13.0`, record the
+answering model, and retry 429/529 up to three times honoring `retry-after`.
+Every request is reserved against the per-file allowance before it is sent.
+
+### Verification — 27 September 2026
+
+- Workspace formatting, the design-system guard and its regression checks, and
+  workspace Clippy with all targets and features pass.
+- Tests pass across the workspace, including migration 14 → 15, the registry,
+  candidates (34 synthetic tests), Resolve (order independence, identifier
+  matching, spelling-equivalent addresses, conflicts, user decisions, household
+  proposals, threshold tuning), intake deduplication and queue priority, and the
+  TypeSafe pipeline with scripted answers.
+- One opt-in live test (`live_synthetic_payslip_is_classified_and_its_values_selected`)
+  sent two requests with a synthetic payslip to TypeSafe: it was classified as
+  an employment payslip about the anchor, and employer, gross and net were
+  selected correctly.
+- Release measurement on this Mac: 1 000 synthetic payslips resolved in 9.5 s
+  (about 10 ms each, local SQLCipher); constellation and quick checks read back
+  in 27 ms. Conflict marking compares only a document's new assertions, so the
+  cost stays linear in a property's history.
+- The synthetic `identity_gallery` example was inspected at 1120×780 and 800×600:
+  all four setup steps, the dump summary, the constellation and quick checks.
+- Not verified: live accuracy on real German documents, the OpenAI gap-fill path
+  end to end, OS folder drops, Linux rendering and screen readers. Thresholds are
+  starting values, not calibrated accuracy.
+
 ## Findings from primary sources
 
 | Finding | Consequence for ME. | Source |

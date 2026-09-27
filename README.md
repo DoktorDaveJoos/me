@@ -235,6 +235,11 @@ Axum, and Tokio, now used by the account service. The
 keeps one repository with independent desktop, browser, iPhone, and API releases.
 The desktop layout migration is complete; product release pipelines remain future work.
 
+The [personal-domain foundation](docs/personal-domain.md) adds canonical entity and
+temporal-fact APIs, immutable observations and credential versions, scoped authority
+and action records, and transactional encrypted revision export. These are
+foundations for sync; live cross-device replication remains future work.
+
 ## Status and remaining work
 
 The encrypted vault, import pipeline, evidence checks, review, and native UI are

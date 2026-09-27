@@ -23,4 +23,6 @@ pub fn default_vault_path() -> Option<PathBuf> {
     Some(base.join("ME/vault"))
 }
 
+pub mod graph_pipeline;
 pub mod typesafe;
+pub mod typesafe_questions;

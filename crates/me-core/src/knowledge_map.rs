@@ -151,10 +151,8 @@ impl KnowledgeMap {
     }
 }
 fn text(value: &str) -> Result<String> {
-    let v: Value = serde_json::from_str(value).map_err(|_| Error::Format)?;
-    Ok(v.as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| v.to_string()))
+    let _: Value = serde_json::from_str(value).map_err(|_| Error::Format)?;
+    Ok(crate::domain::display_value(value))
 }
 fn location(v: &Value) -> String {
     let v = v.get("source_locator").unwrap_or(v);
@@ -262,7 +260,7 @@ impl Vault {
             })?
             .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
         drop(stmt);
-        let mut properties = BTreeMap::<String, (String, String, String)>::new();
+        let mut properties = BTreeMap::<String, (String, String, String, String)>::new();
         let mut accepted_aliases = BTreeMap::<(String, String, String), Vec<String>>::new();
         let mut alias_stmt = self.db.prepare(
             "SELECT source_id,property_key,value,id FROM ai_proposal WHERE state='accepted'",
@@ -282,7 +280,7 @@ impl Vault {
                 .push(format!("proposal:{id}"));
         }
         drop(alias_stmt);
-        let mut stmt = self.db.prepare("SELECT i.local_id,i.stable_id,i.kind,i.title,i.source_id,coalesce(a.value_json,'null'),s.sensitivity,s.retention,coalesce(f.path,''),coalesce(c.vault_name,''),coalesce(i.current_assertion_id,''),coalesce(c.category,'') FROM collection_item i JOIN source s ON s.id=i.source_id LEFT JOIN assertion a ON a.id=i.current_assertion_id LEFT JOIN document_folder f ON f.item_id=i.local_id LEFT JOIN credential_record c ON c.item_id=i.local_id WHERE i.deleted_at IS NULL AND (i.kind!='note' OR s.kind='note') AND s.retention NOT IN ('purge_requested','purged') ORDER BY i.local_id")?;
+        let mut stmt = self.db.prepare("SELECT i.local_id,i.stable_id,i.kind,i.title,i.source_id,coalesce(a.value_json,'null'),s.sensitivity,s.retention,coalesce(f.path,''),coalesce(c.vault_name,''),coalesce(i.current_assertion_id,''),coalesce(c.category,'') FROM collection_item i JOIN source s ON s.id=i.source_id LEFT JOIN assertion a ON a.id=i.current_assertion_id LEFT JOIN document_folder f ON f.item_id=i.local_id LEFT JOIN credential_record c ON c.item_id=i.local_id WHERE i.deleted_at IS NULL AND (a.id IS NULL OR EXISTS(SELECT 1 FROM entity x WHERE x.id=a.subject_id AND x.deleted_at IS NULL)) AND (i.kind!='note' OR s.kind='note') AND s.retention NOT IN ('purge_requested','purged') ORDER BY i.local_id")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -379,7 +377,7 @@ impl Vault {
         drop(stmt);
         // Include every live confirmed assertion and all of its retained evidence.
         // Property cardinality and scoped keys prevent monthly values becoming false conflicts.
-        let mut stmt = self.db.prepare("SELECT a.id,a.subject_id,a.property_key,p.label,a.value_json,p.cardinality,p.rules_json,a.state,a.object_entity_id,e.source_id,e.locator_json FROM assertion_state a JOIN property_definition p ON p.key=a.property_key JOIN assertion_evidence e ON e.assertion_id=a.id JOIN source s ON s.id=e.source_id WHERE a.state IN ('accept','proposed') AND s.sensitivity='personal' AND s.retention='keep' AND EXISTS(SELECT 1 FROM collection_item i WHERE i.source_id=s.id AND i.deleted_at IS NULL AND i.kind!='credential') ORDER BY a.recorded_at,a.id,e.source_id,e.evidence_key")?;
+        let mut stmt = self.db.prepare("SELECT a.id,a.subject_id,a.property_key,p.label,a.value_json,p.cardinality,p.rules_json,a.state,a.object_entity_id,e.source_id,e.locator_json FROM assertion_state a JOIN property_definition p ON p.key=a.property_key JOIN assertion_evidence e ON e.assertion_id=a.id JOIN source s ON s.id=e.source_id WHERE a.state IN ('accept','proposed') AND EXISTS(SELECT 1 FROM entity x WHERE x.id=a.subject_id AND x.deleted_at IS NULL) AND s.sensitivity='personal' AND s.retention='keep' AND EXISTS(SELECT 1 FROM collection_item i WHERE i.source_id=s.id AND i.deleted_at IS NULL AND i.kind!='credential') ORDER BY a.recorded_at,a.id,e.source_id,e.evidence_key")?;
         let mut entity_links = Vec::new();
         for row in stmt.query_map([], |r| {
             Ok((
@@ -429,12 +427,13 @@ impl Vault {
                     id.clone(),
                     KnowledgeKind::Fact,
                     short_label(label, &rules),
-                    value,
+                    value.clone(),
                     source_node.item,
                     source_node.group.clone(),
                     source_node.group_label.clone(),
                 )
             });
+            n.value = value;
             n.status = if state == "accept" {
                 KnowledgeStatus::Confirmed
             } else {
@@ -450,15 +449,30 @@ impl Vault {
             if let Some(q) = locator["review_question_id"].as_str() {
                 n.aliases.push(format!("question:{q}"));
             }
-            properties.insert(id.clone(), (subject.clone(), property.clone(), cardinality));
+            let subject = crate::domain::canonical_entity(&self.db, &subject)?;
+            properties.insert(
+                id.clone(),
+                (
+                    subject.clone(),
+                    property.clone(),
+                    cardinality,
+                    assertion.clone(),
+                ),
+            );
+            let validity = self.assertion_validity_label(&assertion)?;
+            if !validity.is_empty() {
+                n.context = validity;
+            }
             if state == "accept" {
+                let object =
+                    object.and_then(|o| crate::domain::canonical_entity(&self.db, &o).ok());
                 entity_links.push((id.clone(), subject, object));
             }
             let relation = if state != "accept" {
                 KnowledgeRelation::Unconfirmed
             } else if matches!(
                 locator["kind"].as_str(),
-                Some("manual" | "manual_confirmation")
+                Some("manual" | "manual_confirmation" | "reviewed_mapping")
             ) {
                 KnowledgeRelation::EnteredByYou
             } else {
@@ -558,24 +572,30 @@ impl Vault {
                 nodes.insert(id, n);
             }
         }
-        let mut values = BTreeMap::<(String, String), BTreeSet<String>>::new();
-        for (id, (subject, property, cardinality)) in &properties {
-            if cardinality == "one" && nodes[id].status == KnowledgeStatus::Confirmed {
-                values
+        let mut conflicts = BTreeSet::new();
+        let mut candidates = BTreeMap::<(String, String), Vec<(&String, &String)>>::new();
+        for (node, (subject, property, cardinality, assertion)) in &properties {
+            if cardinality == "one" && nodes[node].status == KnowledgeStatus::Confirmed {
+                candidates
                     .entry((subject.clone(), property.clone()))
                     .or_default()
-                    .insert(nodes[id].value.clone());
+                    .push((node, assertion));
             }
         }
-        for (id, (subject, property, cardinality)) in &properties {
-            if cardinality == "one"
-                && values
-                    .get(&(subject.clone(), property.clone()))
-                    .is_some_and(|v| v.len() > 1)
-                && nodes[id].status == KnowledgeStatus::Confirmed
-            {
-                nodes.get_mut(id).unwrap().status = KnowledgeStatus::Conflicting;
+        for group in candidates.values() {
+            for (index, (a, aa)) in group.iter().enumerate() {
+                for (b, bb) in &group[index + 1..] {
+                    if nodes[*a].value != nodes[*b].value
+                        && self.assertion_periods_overlap(aa, bb)?
+                    {
+                        conflicts.insert((*a).clone());
+                        conflicts.insert((*b).clone());
+                    }
+                }
             }
+        }
+        for id in conflicts {
+            nodes.get_mut(&id).unwrap().status = KnowledgeStatus::Conflicting;
         }
         let profile: String = self
             .db
@@ -603,7 +623,7 @@ impl Vault {
                 let mut n = node(
                     id.clone(),
                     KnowledgeKind::Entity,
-                    kind.clone(),
+                    kind.replace('_', " "),
                     label.clone(),
                     None,
                     parent.group.clone(),

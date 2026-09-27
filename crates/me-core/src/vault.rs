@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 #[path = "development.rs"]
 mod development;
 
-const MAX_FILE: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_FILE: u64 = 64 * 1024 * 1024;
 const MAX_TEXT: usize = 1024 * 1024;
 const SCHEMA: &str = include_str!("../migrations/001_vault.sql");
 
@@ -90,6 +90,25 @@ fn database(path: &Path, key: &[u8], create: bool) -> Result<Connection> {
     Ok(db)
 }
 
+// Backups intentionally omit this device-local identity. Restores keep record IDs
+// and ancestry, but cannot impersonate the originating replica or reuse its grants.
+fn device_identity_file(root: &Path, db: &Connection) -> Result<()> {
+    let path = root.join("device-id");
+    let identity = if path.exists() {
+        regular(&path)?;
+        let bytes = crypto::read_bounded(&path, 64)?;
+        let value = String::from_utf8(bytes.to_vec()).map_err(|_| Error::Format)?;
+        uuid::Uuid::parse_str(&value).map_err(|_| Error::Format)?;
+        value
+    } else {
+        let value = id();
+        crypto::atomic_write(&path, value.as_bytes())?;
+        value
+    };
+    db.execute("UPDATE vault_meta SET device_id=?", [&identity])?;
+    Ok(())
+}
+
 impl Vault {
     pub fn exists(root: &Path) -> Result<bool> {
         match fs::symlink_metadata(root) {
@@ -132,12 +151,17 @@ impl Vault {
             tx.execute_batch(include_str!("../migrations/011_knowledge_map.sql"))?;
             tx.execute_batch(include_str!("../migrations/012_onboarding.sql"))?;
             tx.execute_batch(include_str!("../migrations/013_native_credentials.sql"))?;
+            tx.execute_batch(include_str!("../migrations/014_personal_domain.sql"))?;
+            tx.execute_batch(include_str!("../migrations/015_import_graph.sql"))?;
             let profile = id();
             tx.execute("INSERT INTO entity(id,kind,label,created_at) VALUES(?,'person','Ich',strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [&profile])?;
             tx.execute(
                 "INSERT INTO vault_meta VALUES(1,?,?,?)",
                 params![header.vault_id, id(), profile],
             )?;
+            device_identity_file(root, &tx)?;
+            crate::vocabulary::install(&tx)?;
+            crate::revisions::initialize(&tx, true)?;
             tx.commit()?;
             header.write(&root.join("header.json"))?;
             File::open(root)?.sync_all()?;
@@ -179,7 +203,7 @@ impl Vault {
         let keys = header.unlock(password)?;
         let mut db = database(&root.join("vault.db"), &keys[..32], false)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(1..=13).contains(&version) {
+        if !(1..=15).contains(&version) {
             return Err(Error::Format);
         }
         if version == 1 {
@@ -242,11 +266,26 @@ impl Vault {
             tx.execute_batch(include_str!("../migrations/013_native_credentials.sql"))?;
             tx.commit()?;
         }
+        device_identity_file(root, &db)?;
+        if version < 14 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/014_personal_domain.sql"))?;
+            crate::revisions::initialize(&tx, true)?;
+            tx.commit()?;
+        }
+        if version < 15 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/015_import_graph.sql"))?;
+            // Journal the new authoritative tables; existing heads are left untouched.
+            crate::revisions::initialize(&tx, true)?;
+            tx.commit()?;
+        }
         let vault_id: String =
             db.query_row("SELECT vault_id FROM vault_meta", [], |row| row.get(0))?;
         if vault_id != header.vault_id {
             return Err(Error::Authentication);
         }
+        crate::vocabulary::install(&db)?;
         let mut vault = Self {
             db,
             root: root.to_owned(),
@@ -255,6 +294,7 @@ impl Vault {
             _lock: guard,
         };
         vault.verify()?;
+        vault.db.execute("UPDATE action_attempt SET state='indeterminate',finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state='started'", [])?;
         if replacing {
             crate::account::replace_header(&root.join("header.json"), &vault.header)?;
         }
@@ -297,7 +337,7 @@ impl Vault {
         )?;
         let mut stmt = self.db.prepare("SELECT i.local_id,i.stable_id,i.title,i.kind,a.value_json,i.extension,i.pinned,CASE WHEN EXISTS(SELECT 1 FROM ai_question q WHERE q.source_id=i.source_id AND q.state='pending') THEN 'needs_answer' WHEN aj.state='needs_review' THEN 'needs_review' WHEN aj.state='done' THEN 'done' WHEN e.state='done' AND aj.state IS NULL THEN 'manual' ELSE coalesce(e.state,j.state,'manual') END,c.category,c.vault_name,c.archived
             FROM collection_item i LEFT JOIN assertion a ON a.id=i.current_assertion_id LEFT JOIN job j ON j.source_id=i.source_id AND j.kind='index_text' LEFT JOIN job aj ON aj.source_id=i.source_id AND aj.kind='extract_facts' LEFT JOIN document_evaluation e ON e.source_id=i.source_id LEFT JOIN credential_record c ON c.item_id=i.local_id
-            WHERE i.deleted_at IS NULL AND (?1=0 OR i.pinned=1)
+            WHERE i.deleted_at IS NULL AND (a.id IS NULL OR EXISTS(SELECT 1 FROM entity x WHERE x.id=a.subject_id AND x.deleted_at IS NULL)) AND (?1=0 OR i.pinned=1)
             AND (?2='' OR i.source_id IN (SELECT s.source_id FROM segment_fts JOIN source_segment s ON s.rowid=segment_fts.rowid WHERE segment_fts MATCH ?2) OR instr(lower(i.title || ' ' || coalesce(c.vault_name,'')),lower(?3))>0)
             ORDER BY i.pinned DESC,i.local_id DESC LIMIT ?4")?;
         let items = stmt
@@ -312,7 +352,7 @@ impl Vault {
                     let kind: String = r.get(3)?;
                     let content = if kind == "note" {
                         let raw: String = r.get(4)?;
-                        Content::Note(serde_json::from_str(&raw).unwrap_or_default())
+                        Content::Note(crate::domain::display_value(&raw))
                     } else if kind == "credential" {
                         Content::Credential {
                             category: r.get(8)?,
@@ -354,6 +394,14 @@ impl Vault {
             return Err(Error::Validation(
                 "Enter a value or note up to 16,000 bytes.",
             ));
+        }
+        if let Some(item) = item_id {
+            let legacy: bool = self.db.query_row("SELECT a.subject_id=(SELECT profile_id FROM vault_meta) AND a.value_type IN ('text','identifier','date') AND a.time_kind='unknown' FROM collection_item i JOIN assertion a ON a.id=i.current_assertion_id WHERE i.local_id=?", [sql_id(item)?], |r| r.get(0))?;
+            if !legacy {
+                return Err(Error::Validation(
+                    "Edit this typed fact through its entity and validity-aware API.",
+                ));
+            }
         }
         let selected = crate::standard_field(title);
         let tx = self.db.transaction()?;
@@ -480,13 +528,25 @@ impl Vault {
             .unwrap_or("")
             .to_ascii_lowercase();
         let bytes = crypto::read_bounded(path, MAX_FILE)?;
+        self.import_document_bytes(&bytes, delivery_key, class, title, &extension)
+    }
+
+    /// Stores already-read original bytes; `import_document` and batch intake share it.
+    pub(crate) fn import_document_bytes(
+        &mut self,
+        bytes: &[u8],
+        delivery_key: &str,
+        class: DocumentClass,
+        title: &str,
+        extension: &str,
+    ) -> Result<u64> {
         let object = id();
         let source = id();
         let stable = id();
         let inbox = id();
         let ciphertext = crypto::seal(
             &self.keys[32..],
-            &bytes,
+            bytes,
             self.object_context(&object).as_bytes(),
         )?;
         let object_path = self.object_path(&object)?;
@@ -499,7 +559,7 @@ impl Vault {
                 DocumentClass::Unclassified => "restricted",
             };
             tx.execute("INSERT INTO inbox_item VALUES(?,'manual','desktop-manual',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),'staged')",params![inbox,delivery_key])?;
-            tx.execute("INSERT INTO source(id,kind,title,received_at,content_fingerprint,sensitivity,retention,object_id) VALUES(?,'file',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),?,?,'keep',?)",params![source,title,hash(&bytes),sensitivity,object])?;
+            tx.execute("INSERT INTO source(id,kind,title,received_at,content_fingerprint,sensitivity,retention,object_id) VALUES(?,'file',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),?,?,'keep',?)",params![source,title,hash(bytes),sensitivity,object])?;
             tx.execute(
                 "INSERT INTO inbox_source VALUES(?,?)",
                 params![inbox, source],
@@ -512,7 +572,7 @@ impl Vault {
                 segment(&tx, &source, 0, title)?;
             }
             let (state, error) = if matches!(class, DocumentClass::Personal)
-                && ["txt", "md", "csv"].contains(&extension.as_str())
+                && ["txt", "md", "csv"].contains(&extension)
             {
                 ("queued", None)
             } else {
@@ -860,6 +920,7 @@ mod recovery_tests {
         let item = vault
             .save_note(None, "Synthetic detail", "Preserved value")
             .unwrap();
+        crate::revisions::remove_for_legacy_fixture(&vault.db);
         vault
             .db
             .execute_batch(
@@ -873,7 +934,7 @@ mod recovery_tests {
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            13
+            15
         );
         let graph = vault.knowledge_map().unwrap();
         assert_eq!(graph.nodes.len(), 1);
@@ -890,6 +951,7 @@ mod recovery_tests {
         vault
             .save_note(None, "Legacy", "SYNTHETIC migration")
             .unwrap();
+        crate::revisions::remove_for_legacy_fixture(&vault.db);
         vault.db.execute_batch("DROP TABLE onboarding; DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; ALTER TABLE import_progress DROP COLUMN error_code; ALTER TABLE import_progress DROP COLUMN error_provider; DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; DROP TABLE ai_question; DROP TABLE extraction_checkpoint; DROP TABLE document_evaluation; DROP TABLE app_settings; DROP TABLE ai_proposal; DELETE FROM property_definition WHERE key LIKE 'person.%'; PRAGMA user_version=1;").unwrap();
         drop(vault);
         let vault = Vault::unlock(&root, "synthetic-passphrase-2026").unwrap();
@@ -898,7 +960,7 @@ mod recovery_tests {
             .db
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 15);
         let facts = vault
             .facts_get(&vault.shareable_scope().unwrap(), &["person.tax_id".into()])
             .unwrap();
@@ -915,6 +977,7 @@ mod recovery_tests {
         let item = vault
             .import_document(&source, "synthetic", DocumentClass::Unclassified)
             .unwrap();
+        crate::revisions::remove_for_legacy_fixture(&vault.db);
         vault
             .db
             .execute_batch(
@@ -935,6 +998,7 @@ mod recovery_tests {
         let mut vault = Vault::create(&root, "synthetic-passphrase").unwrap();
         vault.set_automatic_evaluation(false).unwrap();
         vault.save_note(None, "Synthetic", "Preserved").unwrap();
+        crate::revisions::remove_for_legacy_fixture(&vault.db);
         vault.db.execute_batch("DROP TABLE onboarding; DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; ALTER TABLE import_progress DROP COLUMN error_code; ALTER TABLE import_progress DROP COLUMN error_provider; DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; DROP TABLE ai_question; DROP TABLE extraction_checkpoint; ALTER TABLE document_evaluation DROP COLUMN warning_message; PRAGMA user_version=3;").unwrap();
         drop(vault);
         let vault = Vault::unlock(&root, "synthetic-passphrase").unwrap();
@@ -945,7 +1009,7 @@ mod recovery_tests {
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            13
+            15
         );
     }
 
@@ -961,6 +1025,7 @@ mod recovery_tests {
             .unwrap();
         vault.set_automatic_evaluation(false).unwrap();
         vault.db.execute("UPDATE document_evaluation SET state='done',warning_message='6 unbelegte Angaben ausgelassen.'", []).unwrap();
+        crate::revisions::remove_for_legacy_fixture(&vault.db);
         vault
             .db
             .execute_batch("DROP TABLE onboarding; DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; ALTER TABLE import_progress DROP COLUMN error_code; ALTER TABLE import_progress DROP COLUMN error_provider; DROP TABLE import_progress; DROP TABLE data_recent; DROP TABLE document_folder; DROP TABLE credential_record; DROP TABLE credential_import; DROP TABLE ai_question; PRAGMA user_version=4;")
@@ -994,6 +1059,7 @@ mod recovery_tests {
         v.begin_import_progress(item, "old-run").unwrap();
         v.update_import_progress(item, "old-run", crate::ImportStage::Extracting, 1, 3)
             .unwrap();
+        crate::revisions::remove_for_legacy_fixture(&v.db);
         v.db.execute_batch("DROP TABLE onboarding; DROP TABLE knowledge_view; DROP TABLE knowledge_position; DROP TABLE import_control; DROP TABLE import_request; DROP TABLE import_budget; DROP TABLE import_step_cache; DROP TABLE import_step_progress; ALTER TABLE import_progress DROP COLUMN error_code; ALTER TABLE import_progress DROP COLUMN error_provider; PRAGMA user_version=9;").unwrap();
         drop(v);
         let v = Vault::unlock(&root, "synthetic-passphrase").unwrap();

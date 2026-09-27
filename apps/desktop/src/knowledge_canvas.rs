@@ -190,6 +190,13 @@ fn hex(center: Point<f32>, radius: f32) -> Vec<Point<f32>> {
         })
         .collect()
 }
+/// Shared cell outline for other honeycomb views (the Imports constellation).
+pub(super) fn hex_outline(center: Point<f32>, radius: f32) -> Vec<Point<f32>> {
+    hex(center, radius)
+}
+pub(super) fn rounded_path(builder: &mut PathBuilder, points: &[Point<f32>], bend: f32) {
+    rounded(builder, points, true, bend);
+}
 pub(super) struct Motion {
     pub routes: f32,
     pub selection: f32,

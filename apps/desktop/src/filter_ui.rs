@@ -721,6 +721,7 @@ impl MeApp {
                                     }),
                             )
                         })
+                        .when(searching, |s| s.child(self.deep_search_panel(cx)))
                         .when(rows.len() > 60 || items.len() > 60, |s| {
                             s.child(
                                 div()

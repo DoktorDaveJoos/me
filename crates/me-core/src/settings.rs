@@ -66,7 +66,7 @@ impl Vault {
         if !self.settings()?.automatic_evaluation || self.import_pause_reason()?.is_some() {
             return Ok(None);
         }
-        let mut stmt=self.db.prepare("SELECT i.local_id,i.extension FROM document_evaluation e JOIN collection_item i ON i.source_id=e.source_id JOIN source s ON s.id=e.source_id WHERE e.state='queued' AND i.kind='document' AND i.deleted_at IS NULL AND s.sensitivity!='credential' AND s.retention='keep' AND NOT EXISTS(SELECT 1 FROM job j WHERE j.source_id=e.source_id AND j.kind='extract_facts' AND j.state IN ('done','needs_review')) ORDER BY i.local_id")?;
+        let mut stmt=self.db.prepare("SELECT i.local_id,i.extension FROM document_evaluation e JOIN collection_item i ON i.source_id=e.source_id JOIN source s ON s.id=e.source_id WHERE e.state='queued' AND i.kind='document' AND i.deleted_at IS NULL AND s.sensitivity!='credential' AND s.retention='keep' AND NOT EXISTS(SELECT 1 FROM job j WHERE j.source_id=e.source_id AND j.kind='extract_facts' AND j.state IN ('done','needs_review')) ORDER BY e.priority DESC,i.local_id")?;
         for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
             let (id, extension) = row?;
             if processable_document(&extension) && !active.contains(&(id as u64)) {
@@ -172,6 +172,7 @@ mod onboarding_tests {
         let root = dir.path().join("vault");
         let mut vault = Vault::create(&root, "synthetic-migration-password").unwrap();
         vault.save_note(None, "Synthetic", "Preserved").unwrap();
+        crate::revisions::remove_for_legacy_fixture(&vault.db);
         vault
             .db
             .execute_batch("DROP TABLE onboarding; PRAGMA user_version=11;")
@@ -185,7 +186,7 @@ mod onboarding_tests {
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            13
+            15
         );
     }
 }

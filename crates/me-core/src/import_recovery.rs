@@ -254,6 +254,46 @@ impl Vault {
         )?;
         Ok(id)
     }
+    /// Reservation for the graph pipeline, bound to the running attempt `run` of
+    /// `item` instead of a deep-extraction checkpoint. Same allowances and pause.
+    pub fn reserve_graph_request(
+        &mut self,
+        item: u64,
+        run: &str,
+        provider: ImportProvider,
+    ) -> Result<String> {
+        let source: String = self.db.query_row("SELECT i.source_id FROM collection_item i JOIN import_progress p ON p.source_id=i.source_id JOIN document_evaluation e ON e.source_id=i.source_id WHERE i.local_id=? AND i.kind='document' AND p.run_id=? AND e.state='running'",params![sql_id(item)?,run],|r|r.get(0)).optional()?.ok_or(Error::Validation("This import attempt is no longer active."))?;
+        if provider == ImportProvider::Local {
+            return Err(Error::Validation(
+                "Local work does not reserve a paid call.",
+            ));
+        }
+        if self.import_pause_reason()?.is_some() {
+            return Err(Error::Validation(
+                "Imports are paused. Check the provider connection or quota before resuming.",
+            ));
+        }
+        self.db.execute(
+            "INSERT OR IGNORE INTO import_budget(source_id) VALUES(?)",
+            [&source],
+        )?;
+        let usage = self.source_usage(&source)?;
+        if (provider == ImportProvider::OpenAi && usage.openai_calls >= usage.openai_limit)
+            || (provider == ImportProvider::TypeSafe
+                && usage.typesafe_calls >= usage.typesafe_limit)
+            || usage.input_tokens.saturating_add(usage.output_tokens) >= usage.token_limit
+        {
+            return Err(Error::Validation(
+                "This file reached its analysis allowance. Saved steps are kept. Review usage before allowing more calls.",
+            ));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        self.db.execute(
+            "INSERT INTO import_request(id,source_id,provider) VALUES(?,?,?)",
+            params![id, source, provider.key()],
+        )?;
+        Ok(id)
+    }
     /// Absolute per-call usage, not a delta. Repeated notifications cannot double count.
     pub fn record_import_usage(
         &mut self,

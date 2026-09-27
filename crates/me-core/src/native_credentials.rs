@@ -594,6 +594,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
+        crate::revisions::remove_for_legacy_fixture(&v.db);
         v.db.execute_batch("ALTER TABLE credential_record RENAME TO credential_record_new;")
             .unwrap();
         let schema = include_str!("../migrations/006_credentials.sql")

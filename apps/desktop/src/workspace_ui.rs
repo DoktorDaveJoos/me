@@ -15,11 +15,17 @@ impl MeApp {
     pub(super) fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .relative()
-            .child(motion::field(motion::Field::Sidebar, self.motion_enabled()))
+            // The sidebar paints its part of the shared window ring.
+            .child(motion::field(
+                motion::Field::Window,
+                self.motion_enabled(),
+                self.ambient(),
+            ))
             .when(self.workspace_activity(), |s| {
                 s.child(motion::activity(
-                    motion::Field::Sidebar,
+                    motion::Field::Window,
                     self.motion_enabled(),
+                    self.ambient(),
                 ))
             })
             .w(px(layout::SIDEBAR_WIDTH))
@@ -205,12 +211,15 @@ impl MeApp {
                             .mb(px(space::SECTION))
                             .type_style(Type::Body)
                             .text_color(rgb(MUTED))
-                            .child(if self.reviews.is_empty() {
+                            .child(if self.reviews.is_empty() && self.graph.checks.is_empty() {
                                 "You're all caught up."
+                            } else if self.reviews.is_empty() {
+                                "A few automatic details are worth a quick look."
                             } else {
                                 "Confirm these details are correct and belong to you."
                             }),
                     )
+                    .child(self.quick_checks_panel(cx))
                     .when(!self.reviews.is_empty(), |s| {
                         s.child(
                             div()

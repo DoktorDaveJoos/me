@@ -35,6 +35,7 @@ impl MeApp {
                         this.focus_filter_on_ready = true;
                         this.refresh_search(cx);
                         this.refresh_imports(cx);
+                        this.refresh_graph(cx);
                         this.kick_auto_queue(cx);
                     }
                     Err(error) => this.error = Some(error.to_string()),

@@ -94,7 +94,7 @@ pub fn filter_data(facts: &[DataFact], query: &str, keys: &[String]) -> Vec<Data
 
 impl Vault {
     pub fn data_facts(&self) -> Result<Vec<DataFact>> {
-        let mut stmt=self.db.prepare("SELECT a.id,a.property_key,p.label,a.value_json,i.local_id,i.title,coalesce(r.sequence,0) FROM assertion_state a JOIN property_definition p ON p.key=a.property_key JOIN assertion_evidence e ON e.assertion_id=a.id JOIN source s ON s.id=e.source_id JOIN collection_item i ON i.source_id=s.id LEFT JOIN data_recent r ON r.assertion_id=a.id WHERE a.state='accept' AND a.subject_id=(SELECT profile_id FROM vault_meta) AND s.sensitivity='personal' AND s.retention='keep' AND i.deleted_at IS NULL AND i.kind IN ('document','note') ORDER BY r.sequence DESC,a.recorded_at DESC,i.local_id DESC")?;
+        let mut stmt=self.db.prepare("SELECT a.id,a.property_key,p.label,a.value_json,i.local_id,i.title,coalesce(r.sequence,0) FROM assertion_state a JOIN property_definition p ON p.key=a.property_key JOIN assertion_evidence e ON e.assertion_id=a.id JOIN source s ON s.id=e.source_id JOIN collection_item i ON i.source_id=s.id LEFT JOIN data_recent r ON r.assertion_id=a.id WHERE a.state='accept' AND (a.time_kind IN ('unknown','timeless') OR (a.valid_from<=date('now') AND (a.valid_to IS NULL OR a.valid_to>date('now')) AND (a.time_kind<>'point' OR a.valid_from=date('now')))) AND a.subject_id=(SELECT profile_id FROM vault_meta) AND s.sensitivity='personal' AND s.retention='keep' AND i.deleted_at IS NULL AND i.kind IN ('document','note') ORDER BY r.sequence DESC,a.recorded_at DESC,i.local_id DESC")?;
         let rows = stmt.query_map([], |r| {
             let raw: String = r.get(3)?;
             let value = serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_default();

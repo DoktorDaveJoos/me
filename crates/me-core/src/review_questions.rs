@@ -68,6 +68,7 @@ pub(crate) fn store_questions(
             ));
         }
         let property = crate::extraction_fields::ensure_extraction_property(tx, source, &fact)?;
+        crate::domain::store_observation(tx, source, run, &fact, false)?;
         // A model's segment id is only a hint. Resolve it against this source.
         let segment: Option<String> = tx
             .query_row(

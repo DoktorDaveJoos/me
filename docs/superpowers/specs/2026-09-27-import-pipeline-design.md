@@ -1,6 +1,6 @@
 # Personal data import pipeline — design
 
-Design agreed 27 September 2026. Status: approved for planning, not implemented.
+Design agreed 27 September 2026. Status: implemented; see [import-pipeline.md](../../import-pipeline.md#tiered-pipeline-and-personal-graph) for verified behavior and limits.
 
 ## Goal
 
@@ -28,6 +28,64 @@ originals, grounding, observations, checkpoints and allowances are reused.
 | Confidence | Assertions carry a confidence and its source. Below a threshold they become `check_suggested` and appear in Quick checks. Scores are never displayed as percentages. |
 | Setup UI | Conversational, one question per screen, with the onboarding fingerprint drawing as the user answers. |
 | Dump progress UI | A growing constellation (Knowledge map) with an honest progress bar and a one-line text ticker. |
+
+## TypeSafe review (27 September 2026)
+
+Checked against the TypeSafe use-case map, the Jev 1.13 limitations page, the
+confidence and model pages, and the cookbooks for SDE cascade, pre-parsed value
+extraction, hierarchical classification, confidence fallback, entity alignment,
+citation check, semantic find, parallel questions and self-consistency. The
+pipeline uses TypeSafe for its two advertised strengths:
+
+**AI map-reduce over big data.** Map: every document gets one classify request,
+and every eager document gets one extraction request. Reduce happens in code:
+family counts, household mentions, entity blocking and conflict detection.
+Candidate entity pairs and conflicting value pairs are mapped over again with
+typed questions. Lazy documents are searched on demand with one existence Noul
+per document, several documents per request. At $0.042 per million input tokens,
+classifying 3 000 documents at about 4 000 tokens costs about $0.50. TypeSafe
+spend is therefore bounded by request counts, not money; the OpenAI allowance is
+the real budget.
+
+**Universal verification.** TypeSafe verifies other models' work:
+
+- OpenAI gap-fill values (SDE cascade): one Noul per failure mode, where true
+  means wrong. The modes are hallucinated, off target, wrong person and format
+  violation. Any head above 0.7 rejects the value.
+- Deep extraction on demand keeps its grounding and its TypeSafe
+  omission/attribution checks with one conditional audit.
+- Value conflicts in Resolve: a Choice (same, different, contradicts) decides
+  whether two differently written values actually conflict, for example
+  "Musterstr. 1" and "Musterstraße 1".
+- Name-only entity matches: a three-level Score plus companion Nouls (the
+  entity-alignment pattern) ranks merge proposals.
+
+**Changes made to follow the documented limits**
+
+| Rule from the docs | Change |
+| --- | --- |
+| Dates and arithmetic belong in code | The "current or superseded" question is dropped. Validity is computed in code from extracted dates. |
+| Select, don't generate | Slots are Choices over local candidate IDs, each described by its verbatim text and source line, plus `none`. |
+| Choice probabilities always sum to 1 | Every slot Choice is paired with an existence Noul. A value is asserted only when both agree. |
+| Report the parent when the child is uncertain | Type confidence below the threshold keeps the family and treats the document as lazy. |
+| Speculative fan-out in one request | Classify asks the family Choice and every family's type Choice in the same request; code reads the relevant one. |
+| Filter irrelevant state | Extraction sends only candidate lines with one line of context, never the whole document. |
+| Checksums validate values, not meaning | A checksum marks the value as checked. The meaning still comes from TypeSafe, except for MRZ fields, whose position defines their meaning. |
+| Pin versions once thresholds matter | Requests pin `jev-1.13.0`; each stage run stores the answering model. |
+| Retry 429 and 529 with backoff | Up to three attempts that honor `retry-after`. Other errors are not retried. |
+| Questions and thresholds in one reviewable place | `me-agent/src/typesafe_questions.rs` holds every question text and threshold. |
+| English is the primary language | Instructions are in English; German source text stays in state. Confidence routing covers the lower accuracy. |
+
+**Confidence bands** (starting values, to be tuned on labeled vault outcomes):
+
+- Classify: a family confidence below 0.5 means `other`. A type confidence below
+  0.8 keeps only the family.
+- Slots: accepted when choice confidence ≥ 0.8 and the existence Noul ≥ 0.7.
+  Between 0.6 and 0.8, or an existence Noul between 0.35 and 0.7, the value is
+  accepted with `check_suggested`. Below that it is not asserted, and a required
+  slot escalates to the OpenAI gap fill.
+- Verification heads: any value above 0.7 rejects.
+- Entity alignment: Score rounding, with cut points at 0.5 and 1.5.
 
 ## Architecture
 
@@ -62,10 +120,11 @@ pure over saved inputs and injected providers. Output is checkpointed in
 runs a stage twice, across envelopes. Bumping one stage's version reruns only
 that stage and later ones.
 
-**Queue (`me-core`).** Replaces the fixed five-step `ImportStage` with per-envelope
-stage state and priority: interactive drop > bulk dump > lazy backfill. Keeps run
-IDs, stale-write rejection, durable allowances, pause on quota/rate-limit/auth,
-and explicit resume.
+**Queue (`me-core`).** The durable `document_evaluation` queue gains a priority
+(interactive drop > bulk dump > lazy backfill). The five progress steps are reused:
+Interpretation = Classify, Context = local candidates, Extraction = selection and
+gap fill, Verification = Resolve. It keeps run IDs, stale-write rejection, durable
+allowances, pause on quota/rate-limit/auth, and explicit resume.
 
 **Providers (`me-agent`).** The existing TypeSafe client and Codex extractor
 behind the `Decisions` and extractor traits. Stages receive providers by
@@ -98,8 +157,12 @@ page, capped at about 3 KB, plus the anchor names. One TypeSafe request asks:
 2. **Type within the family** (choice), from the document type registry, for
    example identity → passport, ID card, driving licence, residence permit; tax →
    Lohnsteuerbescheinigung, Steuerbescheid, Steuererklärung, Spendenquittung.
-3. **Subject** (choice): which anchor the document is about, or none.
-4. **Current or superseded** (probability), for example an expired passport.
+3. **Subject** (choice): which anchor or locally found person name the document
+   is about, or none, paired with an existence Noul ("is it about one private
+   person?").
+4. **Readable**, **mixed documents** and **decimal comma** (Nouls).
+
+Whether a document is current or superseded is computed in code from dates.
 
 A family score below threshold classifies the document as `other` (lazy). The
 result is stored as `source.document_type`. It also replaces the per-section
@@ -127,12 +190,15 @@ Runs eagerly for `eager` types and on demand for `lazy` types. Cheapest first:
    money amounts with currency, label/value pairs from the OCR line layout, and
    names matched against anchors.
 2. **TypeSafe slot selection.** One request for all slots of the document. Per
-   slot, a choice among the candidates plus "none". The chosen option's
-   probability becomes the assertion confidence (`confidence_source = typesafe`).
-   Values validated by a checksum get confidence 1.0 (`confidence_source = checksum`).
-3. **OpenAI gap fill** only when a required slot has no candidate or its
-   confidence is below threshold. One small call scoped to the missing slots,
-   grounded exactly as today (`confidence_source = openai_grounded`).
+   slot: a Choice among the compatible candidate IDs plus `none`, and an existence
+   Noul. The Choice confidence becomes the assertion confidence
+   (`confidence_source = typesafe`). A checksum-valid value sets `value_checked`.
+   MRZ fields need no selection: their confidence is 1.0 with
+   `confidence_source = checksum` when all check digits pass.
+3. **OpenAI gap fill** only when a required slot has no accepted value. It reuses
+   the grounded deep extraction scoped to the document. Its facts are offered to
+   the same slot Choice as additional candidates, then verified with the
+   SDE-cascade heads before use (`confidence_source = openai_grounded`).
 
 Every extracted value becomes an immutable observation with its source locator,
 as in schema 14.
@@ -211,8 +277,8 @@ sent to TypeSafe and OpenAI. No currency amount is promised.
 ### Growing constellation
 
 - Nodes are entities, not documents.
-- At most about 30 nodes: the user, household, then the most-linked entities. The
-  rest collapse into family clusters ("Invoices · 212").
+- At most 19 cells (the center and two rings): the user, household, then the
+  most-linked entities. Document families appear as clusters ("Invoices · 212").
 - New nodes fade in; `check_suggested` nodes use the warning outline.
 - Reuses Knowledge map geometry and motion tokens; respects reduced motion.
 - An honest completed-work bar above the map (existing `progress_bar` rules).
@@ -253,12 +319,15 @@ kept for resume.
 
 ## Migration (schema 15)
 
-- New tables `intake_envelope` and `stage_run` (content hash, stage, version,
-  encrypted output, usage).
-- New column `source.document_type`; assertion columns `confidence`,
-  `confidence_source`, `review_state`. Existing user-authored assertions become
-  `reviewed` / `user`; existing extraction-derived confirmed assertions become
-  `reviewed`.
+- New tables `import_batch`, `intake_envelope`, `envelope_source`, `stage_run`
+  (content hash, stage, version, output, model, tokens), `document_profile`,
+  `assertion_review` (confidence, source, value check, check reason),
+  `review_outcome`, `household_member`, `identity_setup`, `person_mention`,
+  `household_proposal` and `merge_proposal`; column `document_evaluation.priority`.
+- Review state is derived, not stored twice: a user decision means reviewed; a
+  policy decision (`import-graph-v1`) with a check reason means check suggested;
+  a policy decision alone means unreviewed. Existing assertions keep their user
+  decisions and therefore read as reviewed.
 - Existing documents are backfilled through Classify and Resolve; saved
   extraction steps are reused where their cache identity still matches.
 - `ImportStage` maps onto the new stages so the Imports page keeps working.

@@ -5,6 +5,25 @@
 //! outside the UI thread. The desktop calls the vault on a background worker.
 
 pub mod account;
+mod domain;
+pub use domain::*;
+mod candidates;
+pub use candidates::*;
+pub mod doc_types;
+pub use doc_types::{
+    DOC_TYPES, DocType, PAYMENT_PERIODS, Slot, SlotValidity, Target, Tier, ValueKind, doc_type,
+    family_types,
+};
+mod graph;
+pub use graph::*;
+mod intake;
+pub use intake::*;
+mod authority;
+pub use authority::*;
+mod revisions;
+pub use revisions::*;
+mod vocabulary;
+pub use vocabulary::{PERSONAL_VOCABULARY, vocabulary};
 mod import_recovery;
 pub use import_recovery::*;
 mod imports;
@@ -70,3 +89,6 @@ pub const APP_NAME: &str = "ME.";
 
 /// The product's central promise.
 pub const TAGLINE: &str = "It's about you. Your data. Your fingerprints.";
+
+#[cfg(test)]
+mod domain_tests;

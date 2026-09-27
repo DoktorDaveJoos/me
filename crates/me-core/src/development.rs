@@ -19,6 +19,10 @@ impl Vault {
             .collect::<Result<Vec<_>>>()?;
         let tx = self.db.transaction()?;
         tx.execute_batch("PRAGMA defer_foreign_keys=ON;")?;
+        let triggers = tx.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND (name LIKE 'journal_%' OR name LIKE 'credential_version_%' OR name LIKE 'observation_from_%')")?.query_map([], |r| r.get::<_,String>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        for trigger in triggers {
+            tx.execute_batch(&format!("DROP TRIGGER {trigger}"))?;
+        }
         // Enumerating ordinary tables also clears future content/cache tables.
         // FTS shadow tables must only be changed through their owning FTS index.
         let tables = tx
@@ -39,6 +43,8 @@ impl Vault {
              INSERT INTO import_control VALUES(1,NULL);
              INSERT INTO segment_fts(segment_fts) VALUES('rebuild');",
         )?;
+        crate::vocabulary::install(&tx)?;
+        crate::revisions::initialize(&tx, false)?;
         tx.commit()?;
         for file in files {
             fs::remove_file(file).map_err(|_| Error::Validation(
@@ -114,7 +120,7 @@ mod tests {
             for table in tables {
                 let expected = match table.as_str() {
                     "vault_meta" | "app_settings" | "onboarding" | "entity" | "import_control" => 1,
-                    "property_definition" => 3,
+                    "property_definition" => 3 + crate::PERSONAL_VOCABULARY.len() as i64,
                     _ => 0,
                 };
                 let count: i64 = vault

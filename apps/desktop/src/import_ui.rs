@@ -91,6 +91,11 @@ impl MeApp {
         if self.login_edit_guard(cx) {
             return;
         }
+        // Folders become a dump with one summary instead of a per-file list.
+        if self.app_ready() && paths.iter().any(|p| p.is_dir()) {
+            self.plan_dump(paths.to_vec(), cx);
+            return;
+        }
         // Metadata only. Nothing is imported or released to AI until confirmation.
         let paths = paths.to_vec();
         let generation = self.generation;
@@ -357,7 +362,9 @@ impl MeApp {
             .child(div().max_w(px(layout::SEARCH_WIDTH)).mx_auto().pt(px(space::PAGE_TOP)).flex().flex_col().gap(px(space::XXL))
                 .child(div().flex().items_center().justify_between().gap(px(space::LG))
                     .child(heading("Imports"))
-                    .child(primary_action().id("choose-imports").on_click(cx.listener(|this,_,_,cx|this.pick_documents(cx))).child(icon(Icon::Plus,IconSize::Medium,SURFACE)).child("Add files")))
+                    .child(div().flex().gap(px(space::SM))
+                        .child(secondary_action().id("choose-folders").hover(|s|s.bg(rgb(HOVER))).on_click(cx.listener(|this,_,_,cx|this.choose_dump_folders(cx))).child(icon(Icon::Folder,IconSize::Medium,INK)).child("Add folders"))
+                        .child(primary_action().id("choose-imports").on_click(cx.listener(|this,_,_,cx|this.pick_documents(cx))).child(icon(Icon::Plus,IconSize::Medium,SURFACE)).child("Add files"))))
                 .child(div().type_style(Type::Body).text_color(rgb(MUTED)).child("Every file, every step. Progress is saved as your documents are understood."))
                 .when_some(self.import_pause.clone(),|s,reason|s.child(div().p(px(space::LG)).rounded(px(radius::STANDARD)).bg(rgb(WARNING_SURFACE)).flex().flex_col().gap(px(space::SM))
                     .child(div().type_style(Type::Body).text_color(rgb(WARNING)).child(reason))
@@ -366,6 +373,7 @@ impl MeApp {
                     .child(format!("{active} processing"))
                     .child(format!("{queued} queued"))
                     .child(if self.settings.automatic_evaluation {"Automatic reading on"} else {"Automatic reading off"}))
+                .when(!self.graph.constellation.nodes.is_empty() || self.graph.dump_cancel.is_some() || self.graph.batch.is_some(), |s| s.child(self.constellation_panel(cx)))
                 .when_some(self.intake_message.clone(), |s,m|s.child(div().type_style(Type::Body).text_color(rgb(ACCENT)).child(m)))
                 .when(self.import_jobs.is_empty() && !self.intake_active, |s|s.child(div().p(px(space::SECTION)).bg(rgb(SURFACE)).rounded(px(radius::STANDARD)).border_1().border_color(rgb(LINE)).flex().flex_col().gap(px(space::MD))
                     .child(icon(Icon::Upload,IconSize::Large,ACCENT)).child(div().type_style(Type::Section).child("Your next file starts here"))
@@ -382,7 +390,7 @@ impl MeApp {
                 }))
                 .when_some(self.error.clone(),|s,e|s.child(div().type_style(Type::Small).text_color(rgb(DANGER)).child(e)))
                 .children(self.import_jobs.iter().map(|job|self.import_row(job,cx).into_any_element()))
-                .child(div().type_style(Type::Caption).text_color(rgb(MUTED)).child("Bars count completed pages and sections, not elapsed time. TypeSafe guides decisions; OpenAI extracts details. No automatic retries or web research.")))
+                .child(div().type_style(Type::Caption).text_color(rgb(MUTED)).child("Bars count completed pages and sections, not elapsed time. Text is read on this device; TypeSafe sorts documents and selects values; OpenAI only fills missing important values. No web research.")))
     }
     fn import_row(&self, job: &ImportJob, cx: &mut Context<Self>) -> impl IntoElement {
         let item = job.item;

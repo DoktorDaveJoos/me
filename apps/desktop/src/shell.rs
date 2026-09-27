@@ -19,6 +19,11 @@ mod motion_ui;
 use motion_ui::MotionPreferences;
 #[path = "ai_ui.rs"]
 mod ai_ui;
+#[path = "graph_import.rs"]
+mod graph_import;
+#[path = "graph_ui.rs"]
+mod graph_ui;
+use graph_ui::GraphState;
 #[path = "import_ui.rs"]
 mod import_ui;
 use import_ui::{ActiveImport, PendingFile};
@@ -195,6 +200,11 @@ pub struct MeApp {
     codex_message: String,
     codex_login_url: Option<String>,
     codex_login_requested: bool,
+    graph: GraphState,
+    identity_name: Entity<TextInput>,
+    identity_aliases: Entity<TextInput>,
+    identity_birth: Entity<TextInput>,
+    household_name: Entity<TextInput>,
 }
 
 impl MeApp {
@@ -216,10 +226,15 @@ impl MeApp {
         let password_repeat = cx.new(|cx| TextInput::secret("Repeat master password", cx));
         let account_email = cx.new(|cx| TextInput::new("you@example.com", cx));
         let recovery_input = cx.new(|cx| TextInput::secret("Your saved recovery code", cx));
+        let identity_name = cx.new(|cx| TextInput::new("e.g. Max Mustermann", cx));
+        let identity_aliases = cx.new(|cx| TextInput::new("e.g. Max Schmidt", cx));
+        let identity_birth = cx.new(|cx| TextInput::new("DD.MM.YYYY", cx));
+        let household_name = cx.new(|cx| TextInput::new("e.g. Lena Mustermann", cx));
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
         cx.observe(&filter_input, |this, _, cx| this.filter_changed(cx))
             .detach();
         Self::load_motion_preferences(cx);
+        Self::start_ambient_clock(cx);
         Self::inspect_vault(cx);
         Self {
             focus: cx.focus_handle(),
@@ -320,6 +335,11 @@ impl MeApp {
             codex_message: "Checking connection…".into(),
             codex_login_url: None,
             codex_login_requested: false,
+            graph: GraphState::default(),
+            identity_name,
+            identity_aliases,
+            identity_birth,
+            household_name,
         }
     }
 
@@ -886,6 +906,8 @@ impl Focusable for MeApp {
 
 impl Render for MeApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // GPUI redraws on activation changes, so the ambient clock sees them here.
+        self.motion.window_active = window.is_window_active();
         #[cfg(any(debug_assertions, feature = "development-tools"))]
         if self.development.wiping {
             return self.wipe_progress().into_any_element();
@@ -923,12 +945,14 @@ impl Render for MeApp {
                     s.child(motion::field(
                         motion::Field::Identity,
                         self.motion_enabled(),
+                        self.ambient(),
                     ))
                 })
                 .when(self.busy && self.motion.loaded, |s| {
                     s.child(motion::activity(
                         motion::Field::Identity,
                         self.motion_enabled(),
+                        self.ambient(),
                     ))
                 })
                 .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -985,6 +1009,22 @@ impl Render for MeApp {
                 )
                 .into_any_element();
         }
+        if self.identity_setup_visible() {
+            // "Who are you?" comes before the workspace; it never blocks the import.
+            return div()
+                .id("identity-shell")
+                .bg(rgb(BG))
+                .font_family(font::SANS)
+                .type_style(Type::Body)
+                .text_color(rgb(INK))
+                .size_full()
+                .relative()
+                .child(self.identity_setup_view(window, cx))
+                .when(self.graph.plan.is_some(), |s| {
+                    s.child(self.dump_summary_modal(cx))
+                })
+                .into_any_element();
+        }
         if self.show_codex_setup || !self.pending_imports.is_empty() || self.import_scans > 0 {
             window.focus(&self.focus);
         } else if self.focus_filter_on_ready {
@@ -1029,26 +1069,23 @@ impl Render for MeApp {
                     .flex()
                     .flex_col()
                     // GPUI paints siblings in order: decoration stays below every page.
+                    // A stable id keeps the window ring in step with the sidebar;
+                    // page arrival has its own transition.
                     .child(
                         div()
-                            .id((
-                                "workspace-decoration",
-                                if self.show_settings {
-                                    6
-                                } else {
-                                    self.page as usize
-                                },
-                            ))
+                            .id("workspace-decoration")
                             .absolute()
                             .inset_0()
                             .child(motion::field(
-                                motion::Field::Workspace,
+                                motion::Field::Window,
                                 self.motion_enabled(),
+                                self.ambient(),
                             ))
                             .when(self.workspace_activity(), |s| {
                                 s.child(motion::activity(
-                                    motion::Field::Workspace,
+                                    motion::Field::Window,
                                     self.motion_enabled(),
+                                    self.ambient(),
                                 ))
                             }),
                     )
@@ -1078,6 +1115,9 @@ impl Render for MeApp {
                         self.motion_enabled(),
                     )),
             )
+            .when(self.graph.plan.is_some(), |s| {
+                s.child(self.dump_summary_modal(cx))
+            })
             .when(self.filter.handoff_review, |s| {
                 s.child(motion::overlay(
                     self.handoff_modal(cx).into_any_element(),
