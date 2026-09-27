@@ -113,7 +113,7 @@ confidence, period confidence and mapping confidence where asked.
 | Band | Outcome | The user sees |
 | --- | --- | --- |
 | Confidence ≥ threshold | Accepted automatically with evidence, `unreviewed` | Nothing; the value appears |
-| Floor ≤ confidence < threshold | Accepted provisionally | One Quick check naming the doubtful assumption, e.g. "Is 1.032,58 € your Lohnsteuer for January 2026?" |
+| Floor ≤ confidence < threshold | Accepted provisionally | Profile values: one Quick check naming the doubtful assumption, e.g. "Is 1.032,58 € your Lohnsteuer for January 2026?". Document facts: an **uncertain** marker on the document, no question |
 | Confidence < floor, or any failure Noul > 0.7 | The assumption (mapping, owner) is rejected | Nothing; the grounded fact stays on the document, detached from the profile |
 
 The threshold is the existing adaptive check threshold (starts at 0.8, moves
@@ -228,13 +228,17 @@ its tax year.
 
 - Profile values: existing assertions, evidence, `assertion_review` and quick
   checks.
-- Document facts: `observation` rows with `property_hint = document.<printed
-  label>`, verification `supported`, owner and period as resolved, and a new
-  state `unreviewed`. They replace per-fact `ai_proposal` rows for new reads.
+- Document facts: rows of a new `document_fact` table with printed label, raw
+  value, locator, owner, period, profile slot, linked assertion and state
+  (`verified`, `uncertain`, `unverified`, `uninterpreted`). A separate table
+  avoids rebuilding `observation`, whose state CHECK constraint SQLite cannot
+  alter in place. They replace per-fact `ai_proposal` rows for new reads.
   Existing pending proposals and questions stay until the user handles them.
-- Not interpreted: `observation` rows with verification `uninterpreted`.
-- Schema migration 16 adds the observation states and any indexes needed to list
-  a source's facts. Details belong in the implementation plan.
+- Not interpreted: `document_fact` rows with state `uninterpreted`.
+- A `read_summary` row per source records counts and rejection codes for the
+  Imports line and the self-check.
+- Schema migration 16 adds both tables and re-queues documents read by
+  `import-graph-v1`.
 
 ## User interface
 
