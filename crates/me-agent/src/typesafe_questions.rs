@@ -4,9 +4,10 @@
 //! Instructions are English (Jev's primary language); German text stays in state.
 use me_core::{
     Candidate, CandidateKind, DocType, IdentityAnchors, Slot, ValueKind, doc_types::FAMILIES,
-    family_types,
+    family_types, normalize_name,
 };
 use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
 
 /// Pinned model version; answers record the version that produced them.
 pub const MODEL: &str = "jev-1.13.0";
@@ -28,7 +29,8 @@ pub const SLOT_FLOOR: f64 = 0.6;
 /// Existence Noul: found at or above, absent below `PRESENT_ABSENT`.
 pub const PRESENT_FOUND: f64 = 0.7;
 pub const PRESENT_ABSENT: f64 = 0.35;
-/// Options offered per slot; the Choice limit is 255.
+/// Options offered per slot: candidates in Extract, competing facts in fact
+/// verification. The Choice limit is 255.
 pub const MAX_SLOT_OPTIONS: usize = 60;
 /// Bytes of source lines sent with an extraction request.
 pub const MAX_EXTRACT_STATE: usize = 24_000;
@@ -305,13 +307,33 @@ pub fn verify_questions(fields: &[(String, Value, String)]) -> Value {
 }
 
 // Verification of reader facts. Every reader assumption is asked; code combines
-// the answers into one confidence (the weakest head) and a band.
+// the answers into one confidence (the weakest head) and a band. The state holds
+// the facts with their quote and line, the claimed slots and `document.excerpt`
+// (the letterhead), so every question is answerable from what is sent.
 /// Facts per verification request.
 pub const FACT_BATCH: usize = 20;
+/// Letterhead sent as `document.excerpt`: at most this many first lines and bytes.
+pub const LETTERHEAD_LINES: usize = 12;
+pub const LETTERHEAD_BYTES: usize = 2_000;
 
-/// Owner options: the anchors, people named in the document, an organization, unclear.
+/// Owner options: the anchors, other people named in the document, an organization,
+/// unclear. A named person who matches an anchor (normalized as in Classify) is
+/// offered only as that anchor, and spelling variants of one name are one option.
 pub fn owner_options(anchors: &IdentityAnchors, named: &[String]) -> SubjectOptions {
-    let mut options = subject_options(anchors, named);
+    let mut seen: BTreeSet<String> = anchors
+        .names()
+        .into_iter()
+        .map(|(_, n)| normalize_name(&n))
+        .collect();
+    let others: Vec<String> = named
+        .iter()
+        .filter(|name| {
+            let key = normalize_name(name);
+            !key.is_empty() && seen.insert(key)
+        })
+        .cloned()
+        .collect();
+    let mut options = subject_options(anchors, &others);
     options.criteria.remove("none");
     options.criteria.insert(
         "organization".into(),
@@ -319,7 +341,7 @@ pub fn owner_options(anchors: &IdentityAnchors, named: &[String]) -> SubjectOpti
     );
     options.criteria.insert(
         "unclear".into(),
-        json!("The document does not say whose detail this is"),
+        json!("Neither the fact's line nor the document excerpt says whose detail this is"),
     );
     options
 }
@@ -337,11 +359,11 @@ pub fn fact_questions(
     let heads = [
         (
             "hallucinated",
-            "Is `facts.{f}.value` unsupported by `facts.{f}.quote`, or not printed in `document` as the value of `facts.{f}.label`?",
+            "Is `facts.{f}.value` absent from `facts.{f}.quote`, or does `facts.{f}.quote` not state it as the value of `facts.{f}.label`?",
         ),
         (
             "off_target",
-            "Does `facts.{f}.label` fail to describe what `facts.{f}.value` is in `document`: for example a year-to-date total taken as a monthly amount, an employer share taken as the employee's, or a value from a different row or column?",
+            "Does `facts.{f}.label` fail to describe what `facts.{f}.value` is in `facts.{f}.quote` and `facts.{f}.line`: for example a year-to-date total taken as a monthly amount, an employer share taken as the employee's, or a value from a different row or column?",
         ),
     ];
     for (i, fact) in batch {
@@ -356,7 +378,7 @@ pub fn fact_questions(
             format!("{f}::owner"),
             choice(
                 json!(format!(
-                    "Whose detail is `facts.{f}` according to `document`?"
+                    "Whose detail is `facts.{f}` according to `facts.{f}.line` and `document.excerpt`?"
                 )),
                 owners.criteria.clone(),
             ),
@@ -365,11 +387,13 @@ pub fn fact_questions(
             q.insert(
                 format!("{f}::period"),
                 choice(
-                    json!(format!("Which period does the amount `facts.{f}` cover?")),
+                    json!(format!(
+                        "Which period does the amount `facts.{f}` cover, according to `facts.{f}.line` and `document.excerpt`?"
+                    )),
                     criteria(&[
                         (
                             "document",
-                            "The period this document is for, such as this payslip's month or this certificate's year",
+                            "The period this document is for, as `document.excerpt` shows: this payslip's month or this certificate's year",
                         ),
                         ("cumulative", "A cumulative or year-to-date total"),
                         (
@@ -388,7 +412,7 @@ pub fn fact_questions(
             q.insert(
                 format!("{f}::mapping"),
                 noul(json!(format!(
-                    "Is `facts.{f}` the `slots.{}` of `document`?",
+                    "Given `document.type` and `document.excerpt`, is `facts.{f}` the `slots.{}` of this document?",
                     slot.key
                 ))),
             );
@@ -398,7 +422,7 @@ pub fn fact_questions(
                         format!("{f}::direction"),
                         choice(
                             json!(format!(
-                                "Does `facts.{f}` state money paid back to the taxpayer or money the taxpayer must pay?"
+                                "According to `facts.{f}.label`, `facts.{f}.line` and `document.excerpt`, is `facts.{f}` money paid back to the taxpayer or money the taxpayer must pay?"
                             )),
                             criteria(&[
                                 ("refund", "Paid back to the taxpayer (Erstattung, Guthaben)"),
@@ -406,7 +430,10 @@ pub fn fact_questions(
                                     "payment",
                                     "The taxpayer must pay it (Nachzahlung, zu zahlen)",
                                 ),
-                                ("unclear", "The document does not say"),
+                                (
+                                    "unclear",
+                                    "Neither the fact nor the document excerpt says",
+                                ),
                             ]),
                         ),
                     );
@@ -415,7 +442,9 @@ pub fn fact_questions(
                     q.insert(
                         format!("{f}::payment_period"),
                         choice(
-                            json!(format!("How often is `facts.{f}` paid?")),
+                            json!(format!(
+                                "How often is `facts.{f}` paid, according to `facts.{f}.line` and `document.excerpt`?"
+                            )),
                             criteria(me_core::PAYMENT_PERIODS),
                         ),
                     );
@@ -424,7 +453,9 @@ pub fn fact_questions(
                     q.insert(
                         format!("{f}::category"),
                         choice(
-                            json!(format!("Which option describes `facts.{f}`?")),
+                            json!(format!(
+                                "Which option describes `facts.{f}`, given `document.type` and `document.excerpt`?"
+                            )),
                             criteria(options),
                         ),
                     );
@@ -436,7 +467,7 @@ pub fn fact_questions(
     if ask_correction {
         q.insert(
             "document::correction".into(),
-            noul(json!("Does `document` state that it corrects, replaces or cancels an earlier document of the same kind (Korrektur, Berichtigung, Stornierung, Nachberechnung, geändert)?")),
+            noul(json!("Does `document.excerpt` or any line in `facts` state that this document corrects, replaces or cancels an earlier document of the same kind (Korrektur, Berichtigung, Stornierung, Nachberechnung, geändert)?")),
         );
     }
     json!(q)
@@ -449,7 +480,7 @@ pub fn competing_questions(slot: &str, facts: &[usize]) -> Value {
         .map(|i| (format!("f{i}"), json!(format!("`facts.f{i}`"))))
         .collect();
     options.insert("none".into(), json!("None of these is the value"));
-    json!({format!("slot_{slot}"): choice(json!(format!("Which fact is the `slots.{slot}` of `document`?")), options)})
+    json!({format!("slot_{slot}"): choice(json!(format!("Which of `facts` is the `slots.{slot}` of this document, given `document.type` and `document.excerpt`?")), options)})
 }
 
 /// Whether two differently written values of one property mean the same thing.
