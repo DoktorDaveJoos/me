@@ -2,7 +2,7 @@
 //! stored facts and profile values, the refund sign and the pay-month fallback.
 //! Synthetic data only.
 use super::*;
-use me_core::MrzData;
+use me_core::{MrzData, find_candidates};
 
 const SELF: &str = "00000000-0000-4000-8000-000000000001";
 const PARTNER: &str = "00000000-0000-4000-8000-000000000002";
