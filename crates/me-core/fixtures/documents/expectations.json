@@ -8,6 +8,7 @@
       {"label": "Eintritt", "value": "01.04.2021", "quote": "Eintritt   01.04.2021", "slot": null, "period": null, "owner": "self"},
       {"label": "Steuer-ID", "value": "65929970489", "quote": "Steuer-ID   65929970489", "slot": "tax_id", "period": null, "owner": "self"},
       {"label": "StKl", "value": "1", "quote": "StKl   1", "slot": "tax_class", "period": null, "owner": "self"},
+      {"label": "Kfb", "value": "0,0", "quote": "Kfb   0,0", "slot": null, "period": null, "owner": "self"},
       {"label": "SV-Nummer", "value": "65 170839 J 003", "quote": "SV-Nummer   65 170839 J 003", "slot": "social_insurance_number", "period": null, "owner": "self"},
       {"label": "Krankenkasse", "value": "AOK Bayern", "quote": "Krankenkasse   AOK Bayern", "slot": "health_insurer", "period": null, "owner": null},
       {"label": "KV-Zusatzbeitrag", "value": "2,50 %", "quote": "KV-Zusatzbeitrag   2,50 %", "slot": null, "period": null, "owner": null},
@@ -42,6 +43,7 @@
       {"label": "Eintritt", "value": "01.04.2021", "quote": "Eintritt  01.04.2021", "slot": null, "period": null, "owner": "self"},
       {"label": "Steuer-ID", "value": "65929970489", "quote": "Steuer-ID  65929970489", "slot": "tax_id", "period": null, "owner": "self"},
       {"label": "StKl", "value": "1", "quote": "StKl  1", "slot": "tax_class", "period": null, "owner": "self"},
+      {"label": "Kfb", "value": "0,0", "quote": "Kfb  0,0", "slot": null, "period": null, "owner": "self"},
       {"label": "SV-Nummer", "value": "65 170839 J 003", "quote": "SV-Nummer  65 170839 J 003", "slot": "social_insurance_number", "period": null, "owner": "self"},
       {"label": "Krankenkasse", "value": "AOK Bayern", "quote": "Krankenkasse  AOK Bayern", "slot": "health_insurer", "period": null, "owner": null},
       {"label": "KV-Zusatzbeitrag", "value": "2,50 %", "quote": "KV-Zusatzbeitrag  2,50 %", "slot": null, "period": null, "owner": null},
@@ -175,7 +177,7 @@
       {"label": "abzüglich Steuerabzug vom Lohn", "value": "6.208,00 €", "quote": "abzüglich Steuerabzug vom Lohn   6.208,00 €", "slot": null, "period": "document", "owner": "self"},
       {"label": "Nachzahlung", "value": "1.204,00 €", "quote": "Nachzahlung   1.204,00 €", "slot": "tax_balance", "period": null, "owner": "self", "direction": "payment"},
       {"label": "fällig am", "value": "15.07.2026", "quote": "fällig am   15.07.2026", "slot": "payment_due", "period": null, "owner": null},
-      {"label": "Konto des Finanzamts", "value": "DE10 4306 0967 2231 5774 00", "quote": "Konto des Finanzamts DE10 4306 0967 2231 5774 00", "slot": null, "period": null, "owner": "organization"},
+      {"label": "Konto des Finanzamts", "value": "DE55 9999 9996 2231 5774 00", "quote": "Konto des Finanzamts DE55 9999 9996 2231 5774 00", "slot": null, "period": null, "owner": "organization"},
       {"label": "Vorauszahlungen für 2026 und folgende Jahre", "value": "0,00 €", "quote": "Vorauszahlungen für 2026 und folgende Jahre   0,00 €", "slot": null, "period": "other", "owner": "self"}
     ]
   },
@@ -204,12 +206,19 @@
       {"label": "Auszugszeitraum vom", "value": "01.03.2026", "quote": "Auszugszeitraum:   01.03.2026 bis 31.03.2026", "slot": null, "period": null, "owner": null},
       {"label": "Auszugszeitraum bis", "value": "31.03.2026", "quote": "Auszugszeitraum:   01.03.2026 bis 31.03.2026", "slot": null, "period": null, "owner": null},
       {"label": "alter Kontostand vom 28.02.2026", "value": "2.415,30", "quote": "alter Kontostand vom 28.02.2026   2.415,30", "slot": null, "period": "none", "owner": "self"},
+      {"label": "Buchungstag Lastschrift Muster Versicherung AG", "value": "02.03.2026", "quote": "02.03.2026  02.03.2026  Lastschrift Muster Versicherung AG  -34,90", "slot": null, "period": null, "owner": "self"},
+      {"label": "Valuta Lastschrift Muster Versicherung AG", "value": "02.03.2026", "quote": "02.03.2026  Lastschrift Muster Versicherung AG  -34,90", "slot": null, "period": null, "owner": "self"},
       {"label": "Lastschrift Muster Versicherung AG", "value": "-34,90", "quote": "Lastschrift Muster Versicherung AG  -34,90", "slot": null, "period": "none", "owner": "self"},
-      {"label": "IBAN Muster Versicherung AG", "value": "DE36 1203 0000 1004 2788 00", "quote": "IBAN DE36 1203 0000 1004 2788 00", "slot": null, "period": null, "owner": "organization"},
+      {"label": "IBAN Muster Versicherung AG", "value": "DE57 9999 9999 1004 2788 00", "quote": "IBAN DE57 9999 9999 1004 2788 00", "slot": null, "period": null, "owner": "organization"},
+      {"label": "Mandat", "value": "ZV2026448120", "quote": "Mandat ZV2026448120", "slot": null, "period": null, "owner": "self"},
+      {"label": "Buchungstag Gutschrift Lohn/Gehalt Muster Software GmbH", "value": "27.03.2026", "quote": "27.03.2026  27.03.2026  Gutschrift Lohn/Gehalt Muster Software GmbH  +3.210,05", "slot": null, "period": null, "owner": "self"},
+      {"label": "Valuta Gutschrift Lohn/Gehalt Muster Software GmbH", "value": "27.03.2026", "quote": "27.03.2026  Gutschrift Lohn/Gehalt Muster Software GmbH  +3.210,05", "slot": null, "period": null, "owner": "self"},
       {"label": "Gutschrift Lohn/Gehalt Muster Software GmbH", "value": "+3.210,05", "quote": "Gutschrift Lohn/Gehalt Muster Software GmbH  +3.210,05", "slot": null, "period": "none", "owner": "self"},
-      {"label": "IBAN Muster Software GmbH", "value": "DE23 5001 0517 0911 4823 00", "quote": "IBAN DE23 5001 0517 0911 4823 00", "slot": null, "period": null, "owner": "organization"},
+      {"label": "IBAN Muster Software GmbH", "value": "DE81 9999 9998 0911 4823 00", "quote": "IBAN DE81 9999 9998 0911 4823 00", "slot": null, "period": null, "owner": "organization"},
+      {"label": "Buchungstag Dauerauftrag Miete Muster Wohnbau GmbH", "value": "30.03.2026", "quote": "30.03.2026  01.04.2026  Dauerauftrag Miete Muster Wohnbau GmbH  -1.150,00", "slot": null, "period": null, "owner": "self"},
+      {"label": "Valuta Dauerauftrag Miete Muster Wohnbau GmbH", "value": "01.04.2026", "quote": "01.04.2026  Dauerauftrag Miete Muster Wohnbau GmbH  -1.150,00", "slot": null, "period": null, "owner": "self"},
       {"label": "Dauerauftrag Miete Muster Wohnbau GmbH", "value": "-1.150,00", "quote": "Dauerauftrag Miete Muster Wohnbau GmbH  -1.150,00", "slot": null, "period": null, "owner": "self"},
-      {"label": "IBAN Muster Wohnbau GmbH", "value": "DE02 7601 0085 0003 3182 00", "quote": "IBAN DE02 7601 0085 0003 3182 00", "slot": null, "period": null, "owner": "organization"},
+      {"label": "IBAN Muster Wohnbau GmbH", "value": "DE81 9999 9997 0003 3182 00", "quote": "IBAN DE81 9999 9997 0003 3182 00", "slot": null, "period": null, "owner": "organization"},
       {"label": "neuer Kontostand vom 31.03.2026", "value": "4.440,45", "quote": "neuer Kontostand vom 31.03.2026   4.440,45", "slot": null, "period": "none", "owner": "self"}
     ]
   },
@@ -221,16 +230,22 @@
       {"label": "Rechnungsdatum", "value": "12.03.2026", "quote": "Rechnungsdatum:   12.03.2026", "slot": null, "period": null, "owner": null},
       {"label": "Kundennummer", "value": "K-88412", "quote": "Kundennummer:   K-88412", "slot": null, "period": null, "owner": "self"},
       {"label": "Leistungsdatum", "value": "05.03.2026", "quote": "Leistungsdatum:   05.03.2026", "slot": null, "period": null, "owner": null},
+      {"label": "Einzelpreis Austausch Steckdosen", "value": "18,50", "quote": "Austausch Steckdosen   4   18,50   74,00", "slot": null, "period": "none", "owner": "self"},
+      {"label": "Gesamt Austausch Steckdosen", "value": "74,00", "quote": "Austausch Steckdosen   4   18,50   74,00", "slot": null, "period": "none", "owner": "self"},
+      {"label": "Einzelpreis Arbeitszeit Elektriker (Std.)", "value": "65,00", "quote": "Arbeitszeit Elektriker (Std.)   2   65,00   130,00", "slot": null, "period": "none", "owner": "self"},
+      {"label": "Gesamt Arbeitszeit Elektriker (Std.)", "value": "130,00", "quote": "Arbeitszeit Elektriker (Std.)   2   65,00   130,00", "slot": null, "period": "none", "owner": "self"},
       {"label": "Nettobetrag", "value": "204,00 €", "quote": "Nettobetrag   204,00 €", "slot": null, "period": "none", "owner": "self"},
       {"label": "USt 19 %", "value": "38,76 €", "quote": "USt 19 %   38,76 €", "slot": null, "period": "none", "owner": "self"},
       {"label": "Gesamtbetrag", "value": "242,76 €", "quote": "Gesamtbetrag   242,76 €", "slot": null, "period": "none", "owner": "self"},
       {"label": "Zahlbar bis", "value": "26.03.2026", "quote": "Zahlbar bis:   26.03.2026", "slot": null, "period": null, "owner": null},
-      {"label": "IBAN des Zahlungsempfängers", "value": "DE02 7601 0085 0003 3182 00", "quote": "IBAN DE02 7601 0085 0003 3182 00", "slot": null, "period": null, "owner": "organization"}
+      {"label": "IBAN des Zahlungsempfängers", "value": "DE81 9999 9997 0003 3182 00", "quote": "IBAN DE81 9999 9997 0003 3182 00", "slot": null, "period": null, "owner": "organization"}
     ]
   },
   "passport_mrz.txt": {
     "doc_type": "passport",
     "facts": [
+      {"label": "Typ / Type", "value": "P", "quote": "Typ / Type   P", "slot": null, "period": null, "owner": "household"},
+      {"label": "Kode / Code", "value": "D", "quote": "Kode / Code   D", "slot": null, "period": null, "owner": "household"},
       {"label": "Pass-Nr. / Passport No.", "value": "C01X00T47", "quote": "Pass-Nr. / Passport No.   C01X00T47", "slot": "number", "period": null, "owner": "household"},
       {"label": "Name / Surname", "value": "BEISPIEL", "quote": "Name / Surname   BEISPIEL", "slot": null, "period": null, "owner": "household"},
       {"label": "Vornamen / Given names", "value": "ERIKA", "quote": "Vornamen / Given names   ERIKA", "slot": null, "period": null, "owner": "household"},

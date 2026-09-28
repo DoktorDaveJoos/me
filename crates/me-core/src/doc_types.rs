@@ -55,7 +55,10 @@ pub enum ValueKind {
     /// A closed set judged by TypeSafe from the document, not a printed span.
     Category(&'static [(&'static str, &'static str)]),
     /// A month or year the document covers; code computes its first and last day.
-    Period,
+    /// The granularity (`Month` or `Year`) is the only valid whole span for this
+    /// slot: a year must never type into a month slot such as `pay_month`, and a
+    /// month must never type into a year slot such as `tax_year`.
+    Period(Period),
     /// A signed one-off amount whose direction (refund or payment) TypeSafe judges;
     /// code stores a refund as negative.
     Balance,
@@ -736,7 +739,7 @@ pub const DOC_TYPES: &[DocType] = &[
                 "tax_year",
                 None,
                 Target::Subject,
-                ValueKind::Period,
+                ValueKind::Period(Period::Year),
                 PERIOD,
                 "tax year",
                 "The calendar year assessed (Veranlagungszeitraum)",
@@ -896,7 +899,7 @@ pub const DOC_TYPES: &[DocType] = &[
                 "pay_month",
                 None,
                 Target::Subject,
-                ValueKind::Period,
+                ValueKind::Period(Period::Month),
                 PERIOD,
                 "pay month",
                 "The month this payslip covers (Abrechnungsmonat)",

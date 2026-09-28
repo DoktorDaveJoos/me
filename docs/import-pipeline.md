@@ -217,16 +217,20 @@ Run on this Mac from the repository root, with the shared build cache:
   warnings`: clean (only the existing future-incompatibility note for `block` and
   `proc-macro-error2`).
 - `./scripts/cargo test --workspace`: 407 passed, 0 failed, 11 ignored. Among
-  them me-core 179 unit tests (1 ignored) with the new year-typing test, the
-  corpus (2), me-agent 79 unit tests (4 ignored), the live evaluation's offline
-  scorer check (1; the live evaluation itself is ignored), and me-app 51.
-  `./scripts/cargo test -p me-agent --no-run` builds every me-agent test target.
+  them me-core 179 passed and 1 ignored in its unit tests, with the new
+  year-typing test, the corpus (2), me-agent 79 passed and 4 ignored in its unit
+  tests, the live evaluation's offline scorer check (1; the live evaluation
+  itself is ignored), and me-app 51. `./scripts/cargo test -p me-agent --no-run`
+  builds every me-agent test target.
 - The row-label and amount-flag fix came later the same day. After it, `test
-  --workspace` gave 410 passed, 0 failed, 11 ignored: me-core 181 unit tests,
-  with the row-label and omission-sweep tests, and me-agent 80 unit tests, with
-  the amount-flag test. The corpus stayed green without new expectations,
-  because its quotes already covered every newly labeled value. `fmt` and
-  `clippy` were clean.
+  --workspace` gave 410 passed, 0 failed, 11 ignored. The corpus stayed green
+  without new expectations, because its quotes already covered every newly
+  labeled value.
+- Completing the corpus expectations (bank-statement dates and mandate, invoice
+  line items, `Kfb`, passport type and code), fictional bank codes for every test
+  IBAN, the month/year granularity guard for period slots and the balance
+  direction check: `test --workspace` gave 412 passed, 0 failed, 11 ignored.
+  `fmt --check` and `clippy -D warnings` were clean.
 - Synthetic gallery states inspected during the implementation (27–28
   September), window-only, at 1120×780 and 800×600: the “Read from this document”
   groups, the Imports read line with Not read yet and Partly read, and the

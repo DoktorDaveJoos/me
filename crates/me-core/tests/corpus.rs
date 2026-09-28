@@ -67,6 +67,15 @@ fn every_fixture_value_worth_reading_is_expected_and_every_slot_value_types() {
             let slot = kind
                 .slot(slot)
                 .unwrap_or_else(|| panic!("{name}: {key} has no slot {slot}"));
+            if slot.value == ValueKind::Balance {
+                let direction = f["direction"].as_str();
+                assert!(
+                    matches!(direction, Some("refund") | Some("payment")),
+                    "{name}: {label}: Balance slot {} needs direction \"refund\" or \"payment\", got {:?}",
+                    slot.key,
+                    f.get("direction")
+                );
+            }
             let typed = type_value(&ctx, &at, label, value, slot.value).is_some();
             // A printed category that is not a code (a tariff name) is judged by
             // TypeSafe; its expected key is recorded instead.

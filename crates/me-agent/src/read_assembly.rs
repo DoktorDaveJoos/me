@@ -311,7 +311,10 @@ pub fn profile_values(
             check: v.band == Band::Check,
         });
     }
-    if let Some(slot) = kind.slots.iter().find(|s| s.value == ValueKind::Period)
+    if let Some(slot) = kind
+        .slots
+        .iter()
+        .find(|s| matches!(s.value, ValueKind::Period(_)))
         && !values.iter().any(|x| x.slot == slot.key)
         && let Some((period, confidence)) =
             shared_period(candidates, segments, typed, inputs, verdicts)

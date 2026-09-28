@@ -284,7 +284,7 @@ impl Resolved<'_> {
         self.kind
             .slots
             .iter()
-            .filter(|s| s.value == ValueKind::Period)
+            .filter(|s| matches!(s.value, ValueKind::Period(_)))
             .find_map(|s| match &self.values.get(s.key)?.content {
                 SlotContent::Candidate(c) => match &c.value {
                     CandidateValue::Period { start, end } => Some((start.clone(), end.clone())),

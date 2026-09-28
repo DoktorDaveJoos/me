@@ -306,7 +306,16 @@ fn expectations(spec: &Value, segments: &[SourceSegment<'_>], kind: &DocType) ->
                 kind => {
                     let mut c = type_value(&ctx, &located, &label, &value, kind).expect("typed");
                     if kind == ValueKind::Balance {
-                        apply_direction(&mut c, Some(f["direction"] == "refund"));
+                        // An unknown or missing direction must not silently score as a
+                        // payment: it is a fixture bug, not a valid expectation.
+                        let refund = match f["direction"].as_str() {
+                            Some("refund") => true,
+                            Some("payment") => false,
+                            other => panic!(
+                                "{label}: tax_balance direction must be \"refund\" or \"payment\", got {other:?}"
+                            ),
+                        };
+                        apply_direction(&mut c, Some(refund));
                     }
                     Want::Value(Box::new(c.value))
                 }
@@ -576,6 +585,34 @@ fn the_scorer_gives_a_perfect_read_full_marks_and_an_empty_read_none() {
         let required = kind.slots.iter().any(|s| s.required);
         assert_eq!(t.false_completions, u32::from(required), "{name}");
     }
+}
+
+/// An expectations fixture with a `tax_balance` fact whose `direction` is
+/// neither "refund" nor "payment" (including a missing key) must fail loudly,
+/// not silently score as a payment.
+#[test]
+#[should_panic(expected = "direction must be \"refund\" or \"payment\"")]
+fn an_unrecognized_balance_direction_panics_instead_of_defaulting_to_payment() {
+    let text = "Nachzahlung 1.204,00 €\n";
+    let source = segments(text);
+    let segs: Vec<SourceSegment<'_>> = source
+        .iter()
+        .map(|s| SourceSegment {
+            id: &s.segment_id,
+            text: &s.text,
+        })
+        .collect();
+    let kind = doc_type("tax_assessment").expect("registry type");
+    let spec: Value = serde_json::from_str(
+        r#"{
+            "doc_type": "tax_assessment",
+            "facts": [
+                {"label": "Nachzahlung", "value": "1.204,00 €", "quote": "Nachzahlung 1.204,00 €", "slot": "tax_balance", "period": null, "owner": "self"}
+            ]
+        }"#,
+    )
+    .unwrap();
+    expectations(&spec, &segs, kind);
 }
 
 #[test]

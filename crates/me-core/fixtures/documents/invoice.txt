@@ -15,4 +15,4 @@ Nettobetrag   204,00 €
 USt 19 %   38,76 €
 Gesamtbetrag   242,76 €
 Zahlbar bis:   26.03.2026 ohne Abzug
-Bankverbindung: Muster Elektro GmbH   IBAN DE02 7601 0085 0003 3182 00
+Bankverbindung: Muster Elektro GmbH   IBAN DE81 9999 9997 0003 3182 00

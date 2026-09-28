@@ -151,7 +151,7 @@ pub fn type_value(
             let c = whole(CandidateKind::Date)?;
             (CandidateKind::Date, c.value, false)
         }
-        ValueKind::Period => {
+        ValueKind::Period(granularity) => {
             // A year is a period only after a printed keyword ("Veranlagungszeitraum
             // 2025"), so a bare year value is typed in its source line.
             let c = whole(CandidateKind::Period).or_else(|| {
@@ -159,6 +159,14 @@ pub fn type_value(
                     .into_iter()
                     .find(|c| c.kind == CandidateKind::Period && c.text.trim() == value.trim())
             })?;
+            // The printed span must match the slot's own granularity: a year must
+            // never type into a month slot (`pay_month`) and a month must never
+            // type into a year slot (`tax_year`).
+            match &c.value {
+                CandidateValue::Period { start, end }
+                    if candidates::whole_period(granularity, start, end) => {}
+                _ => return None,
+            }
             (CandidateKind::Period, c.value, false)
         }
         ValueKind::Identifier => {
@@ -369,7 +377,7 @@ mod tests {
             &at,
             "Abrechnungsmonat",
             "Januar 2026",
-            ValueKind::Period,
+            ValueKind::Period(Period::Month),
         )
         .unwrap();
         assert_eq!(
@@ -387,7 +395,14 @@ mod tests {
         let segments = seg(text);
         let ctx = TypingContext::new(&segments, Some("tax_assessment"), 2026);
         let at = locate(&segments, "s0", "Veranlagungszeitraum   2025", "2025").unwrap();
-        let c = type_value(&ctx, &at, "Veranlagungszeitraum", "2025", ValueKind::Period).unwrap();
+        let c = type_value(
+            &ctx,
+            &at,
+            "Veranlagungszeitraum",
+            "2025",
+            ValueKind::Period(Period::Year),
+        )
+        .unwrap();
         assert_eq!(
             c.value,
             V::Period {
@@ -398,7 +413,85 @@ mod tests {
         assert_eq!((c.start, c.end), (at.start, at.end));
         // A bare year without a period keyword is not a period.
         let at = locate(&segments, "s0", "Kundennummer   2025", "2025").unwrap();
-        assert!(type_value(&ctx, &at, "Kundennummer", "2025", ValueKind::Period).is_none());
+        assert!(
+            type_value(
+                &ctx,
+                &at,
+                "Kundennummer",
+                "2025",
+                ValueKind::Period(Period::Year)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn period_granularity_guards_month_and_year_slots() {
+        // `pay_month` accepts only a month period: a year in period context
+        // (e.g. "Kalenderjahr 2026") must never type into it.
+        let text = "Kalenderjahr 2026\nAbrechnung Februar 2026\n";
+        let segments = seg(text);
+        let ctx = TypingContext::new(&segments, Some("payslip"), 2026);
+        let at = locate(&segments, "s0", "Kalenderjahr 2026", "2026").unwrap();
+        assert!(
+            type_value(
+                &ctx,
+                &at,
+                "Kalenderjahr",
+                "2026",
+                ValueKind::Period(Period::Month)
+            )
+            .is_none()
+        );
+        let at = locate(&segments, "s0", "Abrechnung Februar 2026", "Februar 2026").unwrap();
+        let c = type_value(
+            &ctx,
+            &at,
+            "Abrechnung",
+            "Februar 2026",
+            ValueKind::Period(Period::Month),
+        )
+        .unwrap();
+        assert_eq!(
+            c.value,
+            V::Period {
+                start: "2026-02-01".into(),
+                end: "2026-02-28".into()
+            }
+        );
+
+        // `tax_year` accepts only a whole-year period: a month must never type
+        // into it.
+        let text = "Monat Januar 2025\nVeranlagungszeitraum 2025\n";
+        let segments = seg(text);
+        let ctx = TypingContext::new(&segments, Some("tax_assessment"), 2026);
+        let at = locate(&segments, "s0", "Monat Januar 2025", "Januar 2025").unwrap();
+        assert!(
+            type_value(
+                &ctx,
+                &at,
+                "Monat",
+                "Januar 2025",
+                ValueKind::Period(Period::Year)
+            )
+            .is_none()
+        );
+        let at = locate(&segments, "s0", "Veranlagungszeitraum 2025", "2025").unwrap();
+        let c = type_value(
+            &ctx,
+            &at,
+            "Veranlagungszeitraum",
+            "2025",
+            ValueKind::Period(Period::Year),
+        )
+        .unwrap();
+        assert_eq!(
+            c.value,
+            V::Period {
+                start: "2025-01-01".into(),
+                end: "2025-12-31".into()
+            }
+        );
     }
 
     #[test]

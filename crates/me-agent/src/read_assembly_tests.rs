@@ -470,7 +470,7 @@ fn fallback_period(
     let period = kind
         .slots
         .iter()
-        .find(|s| s.value == ValueKind::Period)
+        .find(|s| matches!(s.value, ValueKind::Period(_)))
         .unwrap();
     match &values.iter().find(|v| v.slot == period.key)?.content {
         SlotContent::Candidate(c) => Some(c.value.clone()),
