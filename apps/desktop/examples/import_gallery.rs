@@ -1,4 +1,7 @@
 //! Synthetic import UI harness; no user vault or provider connection is used.
+//! `ME_VAULT_DIR=/tmp/<fresh>/vault ./scripts/cargo run -p me-app --example
+//! import_gallery -- <mode> [small] [expanded] [scroll=<px>]`; modes: confirm, progress,
+//! failure, budget, complete, read (a document detail after a full read).
 #![allow(dead_code)]
 #[path = "../src/assets.rs"]
 mod assets;
@@ -12,11 +15,16 @@ mod shell {
     include!("../src/shell.rs");
     pub fn fixture(
         cx: &mut Context<MeApp>,
-        vault: Vault,
+        mut vault: Vault,
         samples: Vec<PathBuf>,
         mode: String,
     ) -> MeApp {
         let mut app = MeApp::new(cx);
+        if mode == "read" {
+            let item = super::read_fixture(&mut vault, samples[0].parent().unwrap());
+            app.document_open = Some(item);
+            app.document_read = Some(vault.document_read(item).unwrap());
+        }
         // Prevent the deferred connection check from launching a provider process.
         app.codex_cancel = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
         app.codex_ready = true;
@@ -161,6 +169,287 @@ mod shell {
 use gpui::{
     App, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, prelude::*, px, size,
 };
+use me_core::{
+    Candidate, CandidateKind, CandidateValue, ConfidenceSource, DocumentGraph, DocumentPart,
+    DocumentRead, FactState, ReadFact, SlotContent, SlotValue, Uncovered,
+};
+
+/// Verification only: sends one in-process scroll event to the gallery window at
+/// its center, so a capture can show the lower part of a scrolling dialog. No
+/// system-wide input is posted. AppKit has no safe scroll-event constructor.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn scroll_window(width: f32, height: f32, offset: f32) {
+    use objc2::{
+        ClassType, MainThreadMarker,
+        encode::{Encoding, RefEncode},
+        msg_send,
+        rc::Retained,
+    };
+    use objc2_app_kit::{NSApplication, NSEvent, NSScreen};
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+    #[repr(C)]
+    struct CGEvent {
+        _opaque: [u8; 0],
+    }
+    unsafe impl RefEncode for CGEvent {
+        const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("__CGEvent", &[]));
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventCreateScrollWheelEvent2(
+            source: *const c_void,
+            units: u32,
+            count: u32,
+            wheel1: i32,
+            wheel2: i32,
+            wheel3: i32,
+        ) -> *mut CGEvent;
+        fn CGEventSetLocation(event: *mut CGEvent, location: CGPoint);
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(object: *const c_void);
+    }
+    let mtm = MainThreadMarker::new().unwrap();
+    let screen = NSScreen::screens(mtm).objectAtIndex(0).frame().size.height;
+    // An event without a window reports screen coordinates (bottom-left origin)
+    // as its window location, so aim at the window center in those terms.
+    let event =
+        unsafe { CGEventCreateScrollWheelEvent2(std::ptr::null(), 0, 1, -offset as i32, 0, 0) };
+    unsafe {
+        CGEventSetLocation(
+            event,
+            CGPoint {
+                x: f64::from(width / 2.),
+                y: screen - f64::from(height / 2.),
+            },
+        )
+    };
+    let native: Option<Retained<NSEvent>> =
+        unsafe { msg_send![NSEvent::class(), eventWithCGEvent: event] };
+    unsafe { CFRelease(event.cast()) };
+    if let Some(native) = native {
+        for window in NSApplication::sharedApplication(mtm).windows().iter() {
+            // GPUI draws into a subview of the content view.
+            if let Some(content) = window.contentView() {
+                for view in content.subviews().iter() {
+                    view.scrollWheel(&native);
+                }
+            }
+        }
+    }
+}
+
+/// A synthetic two-page payslip, read in full: four profile values (one waiting
+/// in Quick checks), other details (two uncertain, one with a long label and
+/// value) and three values nobody interpreted. Returns its collection item.
+fn read_fixture(vault: &mut me_core::Vault, dir: &std::path::Path) -> u64 {
+    let path = dir.join("Payslip January 2026 · synthetic.txt");
+    let pages = [
+        "Entgeltabrechnung Januar 2026\nErika Beispiel\nBruttoentgelt 4.250,00\nLohnsteuer 612,41\nKirchensteuer 49,99\nNettoentgelt 2.745,18\nKV-Beitrag 348,50",
+        "Kostenstelle 4711\nPersonalnummer 000123\nArbeitgeberanteil Rentenversicherung 395,25\nResturlaub aus dem Vorjahr, übertragbar bis 31.03. 12,5 Tage\nVermögenswirksame Leistungen, Arbeitgeberzuschuss laut Tarifvertrag 40,00 EUR monatlich bis Dezember 2026\nUmlage U1 12,75\n7,30",
+    ];
+    std::fs::write(&path, pages.join("\n")).unwrap();
+    let item = vault
+        .import_document(
+            &path,
+            "synthetic-payslip",
+            me_core::DocumentClass::Unclassified,
+        )
+        .unwrap();
+    // Released explicitly, with page locators as a PDF reader would record them.
+    let input = vault.begin_document_processing(item).unwrap().unwrap();
+    let parts: Vec<_> = (1..)
+        .zip(pages)
+        .map(|(page, text)| DocumentPart {
+            text: text.into(),
+            page: Some(page),
+            section: None,
+            method: "pdf_text".into(),
+        })
+        .collect();
+    vault.finish_document_processing(&input, &parts).unwrap();
+    let (source, _, segments) = vault.document_texts(item).unwrap();
+    // Where a printed value is: its segment and byte range.
+    let at = |text: &str| {
+        segments
+            .iter()
+            .find_map(|s| {
+                s.text
+                    .find(text)
+                    .map(|start| (s.segment_id.clone(), start, start + text.len()))
+            })
+            .unwrap()
+    };
+    let money = |slot: &str, printed: &str, amount: &str, confidence: f64| {
+        let (segment_id, start, end) = at(printed);
+        SlotValue {
+            slot: slot.into(),
+            content: SlotContent::Candidate(Box::new(Candidate {
+                id: String::new(),
+                kind: CandidateKind::Money,
+                text: printed.into(),
+                value: CandidateValue::Money {
+                    amount: amount.into(),
+                    currency: "EUR".into(),
+                },
+                segment_id,
+                start,
+                end,
+                line: printed.into(),
+                label: None,
+                checksum: false,
+            })),
+            period: None,
+            confidence,
+            source: ConfidenceSource::Typesafe,
+            value_checked: false,
+            check: false,
+        }
+    };
+    let month = {
+        let (segment_id, start, end) = at("Januar 2026");
+        SlotValue {
+            slot: "pay_month".into(),
+            content: SlotContent::Candidate(Box::new(Candidate {
+                id: String::new(),
+                kind: CandidateKind::Period,
+                text: "Januar 2026".into(),
+                value: CandidateValue::Period {
+                    start: "2026-01-01".into(),
+                    end: "2026-01-31".into(),
+                },
+                segment_id,
+                start,
+                end,
+                line: "Entgeltabrechnung Januar 2026".into(),
+                label: None,
+                checksum: false,
+            })),
+            period: None,
+            confidence: 0.95,
+            source: ConfidenceSource::Typesafe,
+            value_checked: false,
+            check: false,
+        }
+    };
+    let fact = |label: &str, printed: &str, slot: Option<&str>, context: &str, state| {
+        let (segment_id, start, end) = at(printed);
+        ReadFact {
+            label: label.into(),
+            value: printed.into(),
+            segment_id,
+            start,
+            end,
+            context: context.into(),
+            owner: "self".into(),
+            owner_entity: None,
+            owner_name: None,
+            period: Some("document".into()),
+            slot: slot.map(str::to_owned),
+            state,
+            confidence: Some(0.95),
+        }
+    };
+    let uncovered = |label: Option<&str>, printed: &str| {
+        let (segment_id, start, end) = at(printed);
+        Uncovered {
+            segment_id,
+            start,
+            end,
+            kind: CandidateKind::Amount,
+            label: label.map(str::to_owned),
+            text: printed.into(),
+            line: printed.into(),
+        }
+    };
+    let me = vault.profile_entity_id().unwrap();
+    let january = "Januar 2026";
+    let read = DocumentRead {
+        run_id: "synthetic-read".into(),
+        graph: Some(DocumentGraph {
+            doc_type: "payslip".into(),
+            subject: Some(me),
+            subject_confidence: 0.95,
+            values: vec![
+                money("gross", "4.250,00", "4250.00", 0.95),
+                money("wage_tax", "612,41", "612.41", 0.95),
+                money("church_tax", "49,99", "49.99", 0.75),
+                money("net", "2.745,18", "2745.18", 0.95),
+                month,
+            ],
+            models: vec![],
+            correction: false,
+        }),
+        facts: vec![
+            fact(
+                "Bruttoentgelt",
+                "4.250,00",
+                Some("gross"),
+                january,
+                FactState::Verified,
+            ),
+            fact(
+                "Lohnsteuer",
+                "612,41",
+                Some("wage_tax"),
+                january,
+                FactState::Verified,
+            ),
+            fact(
+                "Kirchensteuer",
+                "49,99",
+                Some("church_tax"),
+                january,
+                FactState::Verified,
+            ),
+            fact(
+                "Nettoentgelt",
+                "2.745,18",
+                Some("net"),
+                january,
+                FactState::Verified,
+            ),
+            fact("Kostenstelle", "4711", None, "", FactState::Verified),
+            fact("Personalnummer", "000123", None, "", FactState::Verified),
+            fact(
+                "Arbeitgeberanteil Rentenversicherung",
+                "395,25",
+                None,
+                january,
+                FactState::Verified,
+            ),
+            fact(
+                "Resturlaub aus dem Vorjahr, übertragbar bis 31.03.",
+                "12,5 Tage",
+                None,
+                "",
+                FactState::Uncertain,
+            ),
+            fact(
+                "Vermögenswirksame Leistungen, Arbeitgeberzuschuss laut Tarifvertrag",
+                "40,00 EUR monatlich bis Dezember 2026",
+                None,
+                january,
+                FactState::Uncertain,
+            ),
+        ],
+        uninterpreted: vec![
+            uncovered(Some("KV-Beitrag"), "348,50"),
+            uncovered(Some("Umlage U1"), "12,75"),
+            uncovered(None, "7,30"),
+        ],
+        rejected: Default::default(),
+    };
+    vault.apply_read(&source, &read).unwrap();
+    item
+}
 fn main() {
     let root = std::env::var_os("ME_VAULT_DIR")
         .map(std::path::PathBuf::from)
@@ -189,6 +478,14 @@ fn main() {
     }
     let mode = std::env::args().nth(1).unwrap_or_default();
     let small = std::env::args().any(|arg| arg == "small");
+    let (width, height) = if small { (800., 600.) } else { (1120., 780.) };
+    // `scroll=<px>` scrolls the view under the window center once it is drawn, so
+    // a capture can show the lower part of a scrolling dialog (macOS only).
+    #[cfg(target_os = "macos")]
+    let scroll = std::env::args().find_map(|arg| {
+        arg.strip_prefix("scroll=")
+            .and_then(|v| v.parse::<f32>().ok())
+    });
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
@@ -203,10 +500,7 @@ fn main() {
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                             None,
-                            size(
-                                px(if small { 800. } else { 1120. }),
-                                px(if small { 600. } else { 780. }),
-                            ),
+                            size(px(width), px(height)),
                             cx,
                         ))),
                         ..Default::default()
@@ -216,13 +510,21 @@ fn main() {
                 .unwrap();
             window
                 .update(cx, |_, window, _| {
-                    window.resize(size(
-                        px(if small { 800. } else { 1120. }),
-                        px(if small { 600. } else { 780. }),
-                    ));
+                    window.resize(size(px(width), px(height)));
                     window.set_window_title("ME Import Gallery — Synthetic")
                 })
                 .unwrap();
+            #[cfg(target_os = "macos")]
+            if let Some(offset) = scroll {
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(3000))
+                        .await;
+                    // Outside any app update: the window dispatches the event itself.
+                    scroll_window(width, height, offset);
+                })
+                .detach();
+            }
             cx.activate(true);
         });
 }

@@ -193,6 +193,23 @@ impl ExtractionInput {
         }
     }
 }
+/// Where in its source a segment is, for people: "Page 2", a section heading or
+/// "Source", marked when the text came from OCR.
+pub(crate) fn location_label(segment_locator: Option<&str>) -> String {
+    let loc: Value = segment_locator
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or(Value::Null);
+    let mut label = loc["page"]
+        .as_u64()
+        .map(|p| format!("Page {p}"))
+        .or_else(|| loc["section"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "Source".into());
+    if loc["method"] == "ocr" {
+        label.push_str(" · OCR");
+    }
+    label
+}
+
 #[derive(Clone, Debug)]
 pub struct Proposal {
     pub id: String,
@@ -505,21 +522,7 @@ impl Vault {
                     quote: r.get(3)?,
                     subject_quote: r.get(4)?,
                     existing_values: Vec::new(),
-                    location_label: {
-                        let raw: Option<String> = r.get(5)?;
-                        let loc: Value = raw
-                            .and_then(|v| serde_json::from_str(&v).ok())
-                            .unwrap_or(Value::Null);
-                        let mut label = loc["page"]
-                            .as_u64()
-                            .map(|p| format!("Page {p}"))
-                            .or_else(|| loc["section"].as_str().map(str::to_string))
-                            .unwrap_or_else(|| "Source".into());
-                        if loc["method"] == "ocr" {
-                            label.push_str(" · OCR");
-                        }
-                        label
-                    },
+                    location_label: location_label(r.get::<_, Option<String>>(5)?.as_deref()),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

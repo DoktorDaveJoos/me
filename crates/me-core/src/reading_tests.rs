@@ -1418,3 +1418,112 @@ fn a_verified_read_without_profile_values_withdraws_the_sources_automatic_values
         ) >= 1
     );
 }
+
+#[test]
+fn the_document_view_groups_profile_values_other_details_and_uninterpreted_values() {
+    let (mut vault, source) = synthetic_payslip_source();
+    let item = vault.source_item(&source).unwrap().unwrap();
+    let me = vault.profile_entity_id().unwrap();
+    let mut uncertain = fact("Kostenstelle", "4711", None);
+    uncertain.state = FactState::Uncertain;
+    let read = DocumentRead {
+        run_id: "r".into(),
+        graph: Some(payslip(
+            &me,
+            vec![
+                money("wage_tax", "1032.58", 10),
+                month("2026-01-01", "2026-01-31"),
+            ],
+        )),
+        facts: vec![fact("Lohnsteuer", "1.032,58", Some("wage_tax")), uncertain],
+        uninterpreted: vec![crate::Uncovered {
+            segment_id: "seg".into(),
+            start: 40,
+            end: 46,
+            kind: CandidateKind::Amount,
+            label: Some("KV-Beitrag".into()),
+            text: "435,21".into(),
+            line: "KV-Beitrag 435,21".into(),
+        }],
+        rejected: Default::default(),
+    };
+    vault.apply_read(&source, &read).unwrap();
+    let view = vault.document_read(item).unwrap();
+    assert_eq!(view.in_profile.len(), 1);
+    assert_eq!(view.in_profile[0].label, "Lohnsteuer");
+    assert!(view.in_profile[0].assertion.is_some());
+    assert_eq!(view.other.len(), 1);
+    assert!(view.other[0].uncertain);
+    assert_eq!(view.uninterpreted[0].value, "435,21");
+}
+
+#[test]
+fn the_document_view_shows_checks_locations_and_periods_and_follows_decisions() {
+    let (mut vault, source) = synthetic_payslip_source();
+    let item = vault.source_item(&source).unwrap().unwrap();
+    let me = vault.profile_entity_id().unwrap();
+    vault
+        .db
+        .execute(
+            "INSERT INTO source_segment(id,source_id,extraction_revision,ordinal,locator_json,text,content_hash) VALUES('seg-p1',?,1,1,?,'Lohnsteuer 1.032,58',?)",
+            params![
+                source,
+                json!({"kind":"document_text","method":"ocr","page":1,"section":null}).to_string(),
+                hash(b"Lohnsteuer 1.032,58")
+            ],
+        )
+        .unwrap();
+    let mut unsure = money("wage_tax", "1032.58", 10);
+    unsure.confidence = 0.75;
+    let mut wage_tax = fact("Lohnsteuer", "1.032,58", Some("wage_tax"));
+    wage_tax.segment_id = "seg-p1".into();
+    wage_tax.context = "Januar 2026".into();
+    let read = DocumentRead {
+        run_id: "r".into(),
+        graph: Some(payslip(&me, vec![unsure, january()])),
+        facts: vec![wage_tax, fact("Kostenstelle", "4711", None)],
+        ..Default::default()
+    };
+    vault.apply_read(&source, &read).unwrap();
+
+    // A linked value below the check threshold is in the profile and waits in Quick checks.
+    let view = vault.document_read(item).unwrap();
+    assert_eq!(
+        view.in_profile,
+        vec![ReadRow {
+            label: "Lohnsteuer".into(),
+            value: "1.032,58".into(),
+            period: Some("Januar 2026".into()),
+            location: "Page 1 · OCR".into(),
+            uncertain: false,
+            assertion: view.in_profile[0].assertion.clone(),
+            check: true,
+        }]
+    );
+    let assertion = view.in_profile[0].assertion.clone().unwrap();
+    // Facts without a known segment keep the generic location and no period.
+    assert_eq!(view.other[0].location, "Source");
+    assert_eq!(view.other[0].period, None);
+    assert!(!view.other[0].check);
+    assert!(view.uninterpreted.is_empty());
+
+    // "Looks right" ends the check; the value stays in the profile.
+    vault.confirm_assertion(&assertion).unwrap();
+    let view = vault.document_read(item).unwrap();
+    assert_eq!(view.in_profile.len(), 1);
+    assert!(!view.in_profile[0].check);
+
+    // A value the person rejected is no longer in the profile: the fact stays with
+    // its document as another detail.
+    vault.reject_assertion(&assertion).unwrap();
+    let view = vault.document_read(item).unwrap();
+    assert!(view.in_profile.is_empty());
+    assert_eq!(view.other.len(), 2);
+    assert!(view.other.iter().all(|r| r.assertion.is_none() && !r.check));
+
+    // Unknown items show nothing.
+    assert_eq!(
+        vault.document_read(item + 1000).unwrap(),
+        DocumentReadView::default()
+    );
+}

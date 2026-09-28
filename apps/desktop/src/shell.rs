@@ -189,6 +189,8 @@ pub struct MeApp {
     ai_message: Option<String>,
     ai_failure: Option<(Option<u64>, String)>,
     proposals: Vec<me_core::Proposal>,
+    /// What was read from the open document, grouped for its detail.
+    document_read: Option<me_core::DocumentReadView>,
     questions: Vec<me_core::ReviewQuestion>,
     question_edit: Option<(String, Entity<TextInput>)>,
     question_error: Option<(String, String)>,
@@ -324,6 +326,7 @@ impl MeApp {
             ai_message: None,
             ai_failure: None,
             proposals: Vec::new(),
+            document_read: None,
             questions: Vec::new(),
             question_edit: None,
             question_error: None,

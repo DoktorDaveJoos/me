@@ -60,6 +60,39 @@ pub struct DocumentRead {
     pub rejected: BTreeMap<String, usize>,
 }
 
+/// One value read from a document, as the document detail shows it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ReadRow {
+    pub label: String,
+    /// Raw printed value.
+    pub value: String,
+    /// The period, account or section the document states for this value.
+    pub period: Option<String>,
+    /// Page or section of the source, e.g. "Page 1".
+    pub location: String,
+    /// The reading could not be fully verified.
+    pub uncertain: bool,
+    /// The profile value this fact is in now, if it is accepted.
+    pub assertion: Option<String>,
+    /// The linked profile value is waiting in Quick checks.
+    pub check: bool,
+}
+
+/// What was read from one document: values now in the profile, the other details
+/// it states, and printed values nobody interpreted.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct DocumentReadView {
+    pub in_profile: Vec<ReadRow>,
+    pub other: Vec<ReadRow>,
+    pub uninterpreted: Vec<ReadRow>,
+}
+
+impl DocumentReadView {
+    pub fn is_empty(&self) -> bool {
+        self.in_profile.is_empty() && self.other.is_empty() && self.uninterpreted.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ReadOutcome {
     pub values: usize,
@@ -235,6 +268,46 @@ impl Vault {
         let outcome = store_document_facts(&tx, source, read, &BTreeMap::new(), checks)?;
         tx.commit()?;
         Ok(outcome)
+    }
+
+    /// What was read from this collection item's document, grouped for its detail
+    /// view. A fact counts as in the profile only while its linked value is
+    /// accepted; a value the person rejected leaves its fact as another detail.
+    pub fn document_read(&self, item: u64) -> Result<DocumentReadView> {
+        let mut stmt = self.db.prepare("SELECT f.label,f.value,f.context_quote,g.locator_json,f.state,a.id,coalesce(r.check_reason IS NOT NULL AND (SELECT d.actor FROM decision d WHERE d.assertion_id=a.id ORDER BY d.local_seq DESC LIMIT 1)='policy',0) FROM document_fact f JOIN collection_item i ON i.source_id=f.source_id JOIN source s ON s.id=f.source_id LEFT JOIN source_segment g ON g.id=json_extract(f.locator_json,'$.segment_id') AND g.source_id=f.source_id LEFT JOIN assertion_state a ON a.id=f.assertion_id AND a.state='accept' AND a.subject_id IN (SELECT id FROM entity WHERE deleted_at IS NULL) LEFT JOIN assertion_review r ON r.assertion_id=a.id WHERE i.local_id=? AND s.sensitivity='personal' AND s.retention='keep' ORDER BY f.ordinal")?;
+        let rows = stmt.query_map([crate::vault::sql_id(item)?], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, bool>(6)?,
+            ))
+        })?;
+        let mut view = DocumentReadView::default();
+        for row in rows {
+            let (label, value, context, locator, state, assertion, check) = row?;
+            let entry = ReadRow {
+                label,
+                value,
+                period: (!context.trim().is_empty()).then_some(context),
+                location: crate::knowledge::location_label(locator.as_deref()),
+                uncertain: state == FactState::Uncertain.key()
+                    || state == FactState::Unverified.key(),
+                assertion,
+                check,
+            };
+            if state == FactState::Uninterpreted.key() {
+                view.uninterpreted.push(entry);
+            } else if entry.assertion.is_some() {
+                view.in_profile.push(entry);
+            } else {
+                view.other.push(entry);
+            }
+        }
+        Ok(view)
     }
 
     /// Marks a read's extraction run and job finished.

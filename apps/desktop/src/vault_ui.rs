@@ -243,6 +243,7 @@ impl MeApp {
         self.stop_ai();
         self.stop_bridge(cx);
         self.proposals.clear();
+        self.document_read = None;
         self.questions.clear();
         // Personal names and values never outlive the session on screen.
         if let Some(cancel) = &self.graph.dump_cancel {
@@ -968,6 +969,13 @@ impl MeApp {
                             .child("Stop analysis"),
                     )
                 })
+                .when_some(
+                    self.document_read
+                        .as_ref()
+                        .filter(|read| !read.is_empty())
+                        .map(document_read_section),
+                    |s, section| s.child(section),
+                )
                 .when(!self.proposals.is_empty(), |s| {
                     s.child(
                         div()
@@ -1064,4 +1072,155 @@ impl MeApp {
                 ),
         )
     }
+}
+
+/// "Read from this document": values now in the profile, the other details the
+/// document states, and printed values nobody interpreted.
+fn document_read_section(read: &me_core::DocumentReadView) -> gpui::AnyElement {
+    let group = |title: &'static str, hint: &'static str, rows: &[me_core::ReadRow]| {
+        (!rows.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(space::SM))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(space::MD))
+                        .child(
+                            div()
+                                .type_style(Type::Small)
+                                .font_weight(font::EMPHASIS)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .type_style(Type::Caption)
+                                .font_family(font::MONO)
+                                .text_color(rgb(MUTED))
+                                .child(rows.len().to_string()),
+                        ),
+                )
+                .child(
+                    div()
+                        .type_style(Type::Caption)
+                        .text_color(rgb(MUTED))
+                        .child(hint),
+                )
+                .child(
+                    div()
+                        .px(px(space::MD))
+                        .bg(rgb(BG))
+                        .rounded(px(radius::STANDARD))
+                        .flex()
+                        .flex_col()
+                        .children(
+                            rows.iter()
+                                .enumerate()
+                                .map(|(index, row)| read_row(index == 0, row)),
+                        ),
+                )
+        })
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(space::LG))
+        .child(
+            div()
+                .type_style(Type::Label)
+                .font_weight(font::EMPHASIS)
+                .child("Read from this document"),
+        )
+        .children(group(
+            "In your profile",
+            "Values that now appear in your profile and timeline.",
+            &read.in_profile,
+        ))
+        .children(group(
+            "Other details",
+            "Everything else this document states, kept with the document.",
+            &read.other,
+        ))
+        .children(group(
+            "Not interpreted",
+            "Printed values no step could explain. Check the original.",
+            &read.uninterpreted,
+        ))
+        .into_any_element()
+}
+
+/// One read value: its label and printed value, where it was found and, when it
+/// needs attention, why.
+fn read_row(first: bool, row: &me_core::ReadRow) -> gpui::Div {
+    let place = std::iter::once(row.location.as_str())
+        .chain(row.period.as_deref())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let status = if row.check {
+        Some(("Waiting in Quick checks", ACCENT))
+    } else if row.uncertain {
+        Some(("Uncertain reading", WARNING))
+    } else {
+        None
+    };
+    div()
+        .py(px(space::SM))
+        .when(!first, |s| s.border_t_1().border_color(rgb(LINE)))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .gap(px(space::MD))
+                .child(if row.label.is_empty() {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .type_style(Type::Small)
+                        .text_color(rgb(MUTED))
+                        .child("Unlabeled value")
+                } else {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .type_style(Type::Small)
+                        .child(row.label.clone())
+                })
+                .child(
+                    div()
+                        .max_w(gpui::relative(0.6))
+                        .text_right()
+                        .type_style(Type::Small)
+                        .font_family(font::MONO)
+                        .child(row.value.clone()),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .gap(px(space::MD))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .type_style(Type::Caption)
+                        .text_color(rgb(MUTED))
+                        .child(place),
+                )
+                .when_some(status, |s, (text, color)| {
+                    s.child(
+                        div()
+                            .flex_shrink_0()
+                            .type_style(Type::Caption)
+                            .text_color(rgb(color))
+                            .child(text),
+                    )
+                }),
+        )
 }

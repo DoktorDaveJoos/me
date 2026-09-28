@@ -184,6 +184,7 @@ impl MeApp {
     }
     pub(super) fn load_proposals(&mut self, item: u64, cx: &mut Context<Self>) {
         self.proposals.clear();
+        self.document_read = None;
         self.questions.clear();
         self.question_edit = None;
         self.question_error = None;
@@ -201,6 +202,7 @@ impl MeApp {
                     .ok_or(me_core::Error::Validation("Vault locked."))?;
                 Ok((
                     vault.proposals(item)?,
+                    vault.document_read(item)?,
                     vault.review_questions(item)?,
                     vault.evaluation_error(item)?,
                     vault.evaluation_warning(item)?,
@@ -215,10 +217,11 @@ impl MeApp {
                     && this.proposals_generation == proposals_generation
                 {
                     match result {
-                        Ok((proposals, questions, error, warning)) => {
+                        Ok((proposals, read, questions, error, warning)) => {
                             this.questions = questions;
                             this.document_warning = warning;
                             this.proposals = proposals;
+                            this.document_read = Some(read);
                             this.document_error = error;
                         }
                         Err(error) => {
