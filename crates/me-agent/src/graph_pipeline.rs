@@ -364,7 +364,7 @@ pub fn align_organizations(
     Ok((out, usage))
 }
 
-/// On demand: which lazy documents answer a question. Several documents share one
+/// On demand: which documents not read yet answer a question. Several documents share one
 /// request, each with its own existence Noul. Returns the matching document IDs.
 pub fn search_documents(
     query: &str,

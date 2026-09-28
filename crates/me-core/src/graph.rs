@@ -886,7 +886,7 @@ fn withdraw_unstated(
     Ok(changed)
 }
 /// Accepted automatic values of this source that are suggested for a check.
-fn source_checks(tx: &Transaction<'_>, source: &str) -> Result<usize> {
+pub(crate) fn source_checks(tx: &Transaction<'_>, source: &str) -> Result<usize> {
     let checks: i64 = tx.query_row(
         "SELECT count(DISTINCT a.id) FROM assertion_evidence e JOIN assertion_state a ON a.id=e.assertion_id JOIN assertion_review r ON r.assertion_id=a.id WHERE e.source_id=? AND a.state='accept' AND r.check_reason IS NOT NULL AND (SELECT d.actor FROM decision d WHERE d.assertion_id=a.id ORDER BY d.local_seq DESC LIMIT 1)='policy'",
         [source],

@@ -2,10 +2,10 @@
 //! is a document fact of its source; values nobody interpreted stay visible.
 use crate::{
     DocumentGraph, Error, Result, Uncovered, Vault,
-    graph::{GRAPH_POLICY, resolve_read},
+    graph::{GRAPH_POLICY, resolve_read, source_checks},
     vault::id,
 };
-use rusqlite::params;
+use rusqlite::{Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -100,91 +100,139 @@ fn locator(source: &str, segment: &str, start: usize, end: usize) -> String {
         .to_string()
 }
 
+/// Only personal documents that are kept are read.
+fn check_personal(tx: &Transaction<'_>, source: &str) -> Result<()> {
+    let personal: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM source WHERE id=? AND sensitivity='personal' AND retention='keep')",
+        [source],
+        |r| r.get(0),
+    )?;
+    if !personal {
+        return Err(Error::Validation(
+            "This document is not available for analysis.",
+        ));
+    }
+    Ok(())
+}
+
+/// Replaces this source's document facts and summary. `links` maps slots to the
+/// profile assertions that carry them now; `checks` counts the source's standing
+/// quick checks.
+fn store_document_facts(
+    tx: &Transaction<'_>,
+    source: &str,
+    read: &DocumentRead,
+    links: &BTreeMap<String, String>,
+    checks: usize,
+) -> Result<ReadOutcome> {
+    tx.execute("DELETE FROM document_fact WHERE source_id=?", [source])?;
+    let mut in_profile = 0;
+    for (ordinal, f) in read.facts.iter().enumerate() {
+        let assertion = f.slot.as_ref().and_then(|s| links.get(s)).cloned();
+        in_profile += usize::from(assertion.is_some());
+        tx.execute(
+            "INSERT INTO document_fact VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            params![
+                id(),
+                source,
+                read.run_id,
+                ordinal as i64,
+                f.label,
+                f.value,
+                f.context,
+                locator(source, &f.segment_id, f.start, f.end),
+                f.owner,
+                f.owner_entity,
+                f.owner_name,
+                f.period,
+                f.slot,
+                assertion,
+                f.state.key(),
+                f.confidence.map(|c| c.clamp(0., 1.))
+            ],
+        )?;
+    }
+    let base = read.facts.len();
+    for (i, u) in read.uninterpreted.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO document_fact VALUES(?,?,?,?,?,?,'',?,'unknown',NULL,NULL,NULL,NULL,NULL,'uninterpreted',NULL,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            params![
+                id(),
+                source,
+                read.run_id,
+                (base + i) as i64,
+                u.label.clone().unwrap_or_default(),
+                u.text,
+                locator(source, &u.segment_id, u.start, u.end)
+            ],
+        )?;
+    }
+    let outcome = ReadOutcome {
+        values: read.facts.len(),
+        in_profile,
+        checks,
+        uninterpreted: read.uninterpreted.len(),
+    };
+    tx.execute(
+        "INSERT INTO read_summary VALUES(?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(source_id) DO UPDATE SET run_id=excluded.run_id,policy=excluded.policy,values_read=excluded.values_read,in_profile=excluded.in_profile,checks=excluded.checks,uninterpreted=excluded.uninterpreted,rejected_json=excluded.rejected_json,recorded_at=excluded.recorded_at",
+        params![
+            source,
+            read.run_id,
+            GRAPH_POLICY,
+            outcome.values as i64,
+            outcome.in_profile as i64,
+            outcome.checks as i64,
+            outcome.uninterpreted as i64,
+            serde_json::to_string(&read.rejected).map_err(|_| Error::Format)?
+        ],
+    )?;
+    Ok(outcome)
+}
+
 impl Vault {
-    /// Replaces this source's read: document facts, automatic profile values and
-    /// the summary. User decisions are never overridden.
+    /// Replaces this source's verified read: document facts, automatic profile
+    /// values and the summary. A verified read without profile values (a type that
+    /// fills none) withdraws this source's earlier automatic values like any
+    /// re-read that no longer states them. A read whose verification failed goes
+    /// through [`Vault::store_unverified_read`] instead. User decisions are never
+    /// overridden.
     pub fn apply_read(&mut self, source: &str, read: &DocumentRead) -> Result<ReadOutcome> {
         validate(&read.facts)?;
         let tx = self.db.transaction()?;
-        let personal: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM source WHERE id=? AND sensitivity='personal' AND retention='keep')",
-            [source],
-            |r| r.get(0),
-        )?;
-        if !personal {
+        check_personal(&tx, source)?;
+        // Profile values replace this source's earlier automatic values; a person's
+        // decision wins. Checks are counted after every retraction of this read.
+        let graph = resolve_read(&tx, source, read.graph.as_ref())?;
+        let outcome =
+            store_document_facts(&tx, source, read, &graph.slot_assertions, graph.checks)?;
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// Stores a read whose assumptions could not be verified: only this source's
+    /// document facts (all unverified, plus the values nobody interpreted) and its
+    /// summary are replaced. Profile values, their evidence and every decision stay
+    /// exactly as they are; nothing is resolved, retracted or withdrawn.
+    pub fn store_unverified_read(
+        &mut self,
+        source: &str,
+        read: &DocumentRead,
+    ) -> Result<ReadOutcome> {
+        validate(&read.facts)?;
+        if read.graph.is_some()
+            || read
+                .facts
+                .iter()
+                .any(|f| f.state != FactState::Unverified || f.slot.is_some())
+        {
             return Err(Error::Validation(
-                "This document is not available for analysis.",
+                "An unverified read stores only unverified document facts.",
             ));
         }
-        // Profile values replace this source's earlier automatic values; a person's
-        // decision wins.
-        let graph = resolve_read(&tx, source, read.graph.as_ref())?;
-        tx.execute("DELETE FROM document_fact WHERE source_id=?", [source])?;
-        let mut in_profile = 0;
-        for (ordinal, f) in read.facts.iter().enumerate() {
-            let assertion = f
-                .slot
-                .as_ref()
-                .and_then(|s| graph.slot_assertions.get(s))
-                .cloned();
-            in_profile += usize::from(assertion.is_some());
-            tx.execute(
-                "INSERT INTO document_fact VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-                params![
-                    id(),
-                    source,
-                    read.run_id,
-                    ordinal as i64,
-                    f.label,
-                    f.value,
-                    f.context,
-                    locator(source, &f.segment_id, f.start, f.end),
-                    f.owner,
-                    f.owner_entity,
-                    f.owner_name,
-                    f.period,
-                    f.slot,
-                    assertion,
-                    f.state.key(),
-                    f.confidence.map(|c| c.clamp(0., 1.))
-                ],
-            )?;
-        }
-        let base = read.facts.len();
-        for (i, u) in read.uninterpreted.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO document_fact VALUES(?,?,?,?,?,?,'',?,'unknown',NULL,NULL,NULL,NULL,NULL,'uninterpreted',NULL,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-                params![
-                    id(),
-                    source,
-                    read.run_id,
-                    (base + i) as i64,
-                    u.label.clone().unwrap_or_default(),
-                    u.text,
-                    locator(source, &u.segment_id, u.start, u.end)
-                ],
-            )?;
-        }
-        let outcome = ReadOutcome {
-            values: read.facts.len(),
-            in_profile,
-            // Counted after every retraction of this read.
-            checks: graph.checks,
-            uninterpreted: read.uninterpreted.len(),
-        };
-        tx.execute(
-            "INSERT INTO read_summary VALUES(?,?,?,?,?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(source_id) DO UPDATE SET run_id=excluded.run_id,policy=excluded.policy,values_read=excluded.values_read,in_profile=excluded.in_profile,checks=excluded.checks,uninterpreted=excluded.uninterpreted,rejected_json=excluded.rejected_json,recorded_at=excluded.recorded_at",
-            params![
-                source,
-                read.run_id,
-                GRAPH_POLICY,
-                outcome.values as i64,
-                outcome.in_profile as i64,
-                outcome.checks as i64,
-                outcome.uninterpreted as i64,
-                serde_json::to_string(&read.rejected).map_err(|_| Error::Format)?
-            ],
-        )?;
+        let tx = self.db.transaction()?;
+        check_personal(&tx, source)?;
+        let checks = source_checks(&tx, source)?;
+        let outcome = store_document_facts(&tx, source, read, &BTreeMap::new(), checks)?;
         tx.commit()?;
         Ok(outcome)
     }

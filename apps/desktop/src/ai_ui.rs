@@ -91,28 +91,28 @@ impl me_agent::codex::Checkpoints for VaultCheckpoints {
         input: &me_core::ExtractionInput,
         provider: me_core::ImportProvider,
     ) -> Result<String, me_core::ImportFailure> {
-        use me_core::{ImportErrorKind as Kind, ImportFailure, ImportProvider};
-        let storage = || {
-            ImportFailure::new(
-                ImportProvider::Local,
-                Kind::Storage,
-                "The vault is unavailable. Saved work is kept.",
-            )
-        };
-        let mut guard = self.session.lock().map_err(|_| storage())?;
-        let v = guard.as_mut().ok_or_else(storage)?;
-        v.reserve_import_request(input, provider).map_err(|e| {
-            let message = e.to_string();
-            let kind = if message.contains("allowance") {
-                Kind::Budget
-            } else if message.contains("paused") {
-                Kind::Quota
-            } else {
-                Kind::Storage
-            };
-            ImportFailure::new(ImportProvider::Local, kind, message)
-        })
+        reserve_paid_call(&self.session, |v| v.reserve_import_request(input, provider))
     }
+}
+
+/// Reserves one paid call durably before it is sent. A refusal is reported the
+/// same way on every path: an allowance stop as a budget failure, a paused queue
+/// as a quota failure, anything else as a storage failure.
+pub(super) fn reserve_paid_call(
+    session: &Arc<Mutex<Option<Vault>>>,
+    reserve: impl FnOnce(&mut Vault) -> me_core::Result<String>,
+) -> Result<String, me_core::ImportFailure> {
+    use me_core::{ImportErrorKind as Kind, ImportFailure, ImportProvider};
+    let storage = || {
+        ImportFailure::new(
+            ImportProvider::Local,
+            Kind::Storage,
+            "The vault is unavailable. Saved work is kept.",
+        )
+    };
+    let mut guard = session.lock().map_err(|_| storage())?;
+    let v = guard.as_mut().ok_or_else(storage)?;
+    reserve(v).map_err(|e| ImportFailure::refused_reservation(&e))
 }
 
 impl MeApp {

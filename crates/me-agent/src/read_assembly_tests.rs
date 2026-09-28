@@ -387,3 +387,132 @@ fn only_accepted_assumptions_are_verified() {
     assert_eq!(fact_state(Band::Check), FactState::Uncertain);
     assert_eq!(fact_state(Band::Reject), FactState::Uncertain);
 }
+
+/// The fallback period of one mapped amount of `doc_type` whose context quote
+/// prints `context`.
+fn fallback_period(
+    doc_type: &str,
+    text: &str,
+    amount: &str,
+    slot: &str,
+    context: &str,
+) -> Option<CandidateValue> {
+    let segments = seg(text);
+    let typing = TypingContext::new(&segments, Some(doc_type), 2026);
+    let facts = vec![fact("document.Betrag", amount, amount, context, slot)];
+    let kind = me_core::doc_type(doc_type).unwrap();
+    let (typed, inputs) = type_facts(&facts, &segments, &typing, Some(kind));
+    assert_eq!(inputs[0].slot.map(|s| s.key), Some(slot));
+    let candidates = find_candidates(&segments, &[], 2026);
+    let verdicts = [verdict(Owner::Anchor(SELF.into()), Band::Accept, 0.9, true)];
+    let values = profile_values(kind, &candidates, &segments, &typed, &inputs, &verdicts);
+    let period = kind
+        .slots
+        .iter()
+        .find(|s| s.value == ValueKind::Period)
+        .unwrap();
+    match &values.iter().find(|v| v.slot == period.key)?.content {
+        SlotContent::Candidate(c) => Some(c.value.clone()),
+        SlotContent::Category { .. } => None,
+    }
+}
+
+#[test]
+fn a_fallback_period_fills_only_a_slot_of_its_own_granularity() {
+    let year = |y: &str| CandidateValue::Period {
+        start: format!("{y}-01-01"),
+        end: format!("{y}-12-31"),
+    };
+    // A tax year is a whole calendar year, never a month.
+    let text = "Finanzamt Musterstadt\nBescheid für 2025\nMonat Januar 2025\nFestgesetzte Einkommensteuer 1.234,56 €\n";
+    assert_eq!(
+        fallback_period(
+            "tax_assessment",
+            text,
+            "1.234,56 €",
+            "income_tax_assessed",
+            "Bescheid für 2025"
+        ),
+        Some(year("2025"))
+    );
+    assert_eq!(
+        fallback_period(
+            "tax_assessment",
+            text,
+            "1.234,56 €",
+            "income_tax_assessed",
+            "Monat Januar 2025"
+        ),
+        None
+    );
+    // A pay month is exactly one calendar month, never a year.
+    let text = "Acme GmbH\nKalenderjahr 2026\nAbrechnung Februar 2026\nGesamtbrutto 4.200,00 €\n";
+    assert_eq!(
+        fallback_period(
+            "payslip",
+            text,
+            "4.200,00 €",
+            "gross",
+            "Abrechnung Februar 2026"
+        ),
+        Some(CandidateValue::Period {
+            start: "2026-02-01".into(),
+            end: "2026-02-28".into()
+        })
+    );
+    assert_eq!(
+        fallback_period("payslip", text, "4.200,00 €", "gross", "Kalenderjahr 2026"),
+        None
+    );
+}
+
+#[test]
+fn a_failed_verification_stores_unverified_facts_and_a_cancelled_one_nothing() {
+    let segments = seg(PAYSLIP);
+    let typing = TypingContext::new(&segments, Some("payslip"), 2026);
+    let facts = payslip_facts("Januar 2026");
+    let (typed, inputs) = type_facts(&facts, &segments, &typing, me_core::doc_type("payslip"));
+    let open = vec![Uncovered {
+        segment_id: "s1".into(),
+        start: 0,
+        end: 9,
+        kind: CandidateKind::Amount,
+        label: Some("Umlage".into()),
+        text: "12,34".into(),
+        line: "Umlage 12,34".into(),
+    }];
+    let rejected: BTreeMap<String, usize> = [("value_not_in_quote".to_owned(), 2)].into();
+
+    let read = unverified_read(
+        "run",
+        &typed,
+        &inputs,
+        open.clone(),
+        rejected.clone(),
+        ImportErrorKind::Timeout,
+    )
+    .expect("a failed verification keeps what was read");
+    assert_eq!(read.run_id, "run");
+    assert!(read.graph.is_none(), "no profile values");
+    assert_eq!(read.facts.len(), typed.len());
+    assert!(read.facts.iter().all(|f| f.state == FactState::Unverified
+        && f.slot.is_none()
+        && f.owner == "unknown"
+        && f.confidence.is_none()));
+    assert_eq!(
+        (read.uninterpreted, read.rejected),
+        (open.clone(), rejected.clone())
+    );
+
+    assert_eq!(
+        unverified_read(
+            "run",
+            &typed,
+            &inputs,
+            open,
+            rejected,
+            ImportErrorKind::Cancelled
+        ),
+        None
+    );
+}

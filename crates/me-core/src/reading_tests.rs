@@ -1229,3 +1229,192 @@ fn a_read_with_an_unknown_owner_or_period_is_rejected() {
     assert_eq!(count(&vault, "SELECT count(*) FROM document_fact"), 0);
     assert_eq!(count(&vault, "SELECT count(*) FROM read_summary"), 0);
 }
+
+type Snapshot = (
+    Vec<(String, String, String, Option<String>)>,
+    Vec<(String, String)>,
+    i64,
+);
+/// Profile values, their evidence and the decision count, for before/after checks.
+fn profile_snapshot(vault: &Vault) -> Snapshot {
+    let states = vault
+        .db
+        .prepare("SELECT id,state,valid_from,valid_to FROM assertion_state ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    let evidence = vault
+        .db
+        .prepare(
+            "SELECT assertion_id,source_id FROM assertion_evidence ORDER BY assertion_id,source_id",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    (
+        states,
+        evidence,
+        count(vault, "SELECT count(*) FROM decision"),
+    )
+}
+fn unverified(label: &str, value: &str) -> ReadFact {
+    ReadFact {
+        owner: "unknown".into(),
+        period: None,
+        state: FactState::Unverified,
+        confidence: None,
+        ..fact(label, value, None)
+    }
+}
+
+#[test]
+fn an_unverified_read_keeps_profile_values_and_their_evidence() {
+    let (mut vault, source) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    let mut unsure = money("church_tax", "10.00", 30);
+    unsure.confidence = 0.75;
+    let verified = DocumentRead {
+        run_id: "a".into(),
+        graph: Some(payslip(
+            &me,
+            vec![money("wage_tax", "1032.58", 10), unsure, january()],
+        )),
+        facts: vec![
+            fact("Lohnsteuer", "1.032,58", Some("wage_tax")),
+            fact("Kostenstelle", "4711", None),
+        ],
+        ..Default::default()
+    };
+    vault.apply_read(&source, &verified).unwrap();
+    let before = profile_snapshot(&vault);
+    assert!(before.0.iter().any(|(_, state, _, _)| state == "accept"));
+    assert!(!before.1.is_empty());
+
+    // Verification failed on a re-read: only the document's facts and summary change.
+    let read = DocumentRead {
+        run_id: "b".into(),
+        graph: None,
+        facts: vec![unverified("Lohnsteuer", "1.032,58")],
+        uninterpreted: vec![crate::Uncovered {
+            segment_id: "seg".into(),
+            start: 40,
+            end: 46,
+            kind: CandidateKind::Amount,
+            label: Some("KV-Beitrag".into()),
+            text: "435,21".into(),
+            line: "KV-Beitrag 435,21".into(),
+        }],
+        rejected: [("value_not_in_quote".to_owned(), 1)].into(),
+    };
+    let outcome = vault.store_unverified_read(&source, &read).unwrap();
+    assert_eq!(
+        outcome,
+        ReadOutcome {
+            values: 1,
+            in_profile: 0,
+            // The source's standing check is still there.
+            checks: 1,
+            uninterpreted: 1
+        }
+    );
+    assert_eq!(profile_snapshot(&vault), before);
+    assert_eq!(accepted(&vault, "person.wage_tax").len(), 1);
+    assert_eq!(
+        count(
+            &vault,
+            "SELECT count(*) FROM decision WHERE reason_code='not_found_on_reread'"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &vault,
+            "SELECT count(*) FROM document_fact WHERE run_id<>'b'"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &vault,
+            "SELECT count(*) FROM document_fact WHERE run_id='b' AND state IN ('unverified','uninterpreted') AND owner='unknown' AND assertion_id IS NULL"
+        ),
+        2
+    );
+    assert_eq!(
+        count(
+            &vault,
+            "SELECT count(*) FROM read_summary WHERE run_id='b' AND values_read=1 AND in_profile=0 AND uninterpreted=1"
+        ),
+        1
+    );
+
+    // Only unverified, unlinked facts and no profile values are stored this way.
+    let mut checked = read.clone();
+    checked.facts[0].state = FactState::Verified;
+    let mut linked = read.clone();
+    linked.facts[0].slot = Some("wage_tax".into());
+    let mut valued = read.clone();
+    valued.graph = Some(payslip(&me, vec![january()]));
+    for bad in [checked, linked, valued] {
+        assert!(matches!(
+            vault.store_unverified_read(&source, &bad),
+            Err(crate::Error::Validation(_))
+        ));
+    }
+    assert_eq!(profile_snapshot(&vault), before);
+    assert_eq!(
+        count(&vault, "SELECT count(*) FROM read_summary WHERE run_id='b'"),
+        1
+    );
+}
+
+#[test]
+fn a_verified_read_without_profile_values_withdraws_the_sources_automatic_values() {
+    // The counterpart of an unverified read: a verified read of a type that fills
+    // no profile values (graph None) replaces this source's automatic values, so
+    // values it no longer supports are withdrawn. A person's decision stays.
+    let (mut vault, source) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    let first = DocumentRead {
+        run_id: "a".into(),
+        graph: Some(payslip(
+            &me,
+            vec![
+                money("wage_tax", "1032.58", 10),
+                money("church_tax", "10.00", 30),
+                january(),
+            ],
+        )),
+        ..Default::default()
+    };
+    vault.apply_read(&source, &first).unwrap();
+    let church: String = vault
+        .db
+        .query_row(
+            "SELECT id FROM assertion_state WHERE property_key='person.church_tax' AND state='accept'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    vault.confirm_assertion(&church).unwrap();
+    let verified = DocumentRead {
+        run_id: "b".into(),
+        graph: None,
+        facts: vec![fact("Kostenstelle", "4711", None)],
+        ..Default::default()
+    };
+    let outcome = vault.apply_read(&source, &verified).unwrap();
+    assert_eq!((outcome.values, outcome.in_profile), (1, 0));
+    assert!(accepted(&vault, "person.wage_tax").is_empty());
+    assert_eq!(accepted(&vault, "person.church_tax").len(), 1);
+    assert!(
+        count(
+            &vault,
+            "SELECT count(*) FROM decision WHERE actor='policy' AND action='retract' AND reason_code='not_found_on_reread'"
+        ) >= 1
+    );
+}

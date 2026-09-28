@@ -4,9 +4,10 @@
 //! session, provider or UI is involved; the desktop orchestrates these steps.
 use crate::fact_verification::{Band, FactInput, Owner, PeriodKind, Verdict};
 use me_core::{
-    Candidate, CandidateKind, CandidateValue, ConfidenceSource, DocType, ExtractedFact, FactState,
-    Located, ReadFact, RejectedFact, SlotContent, SlotValue, SourceSegment, TypingContext,
-    ValueKind, doc_types::MrzField, locate, type_value,
+    Candidate, CandidateKind, CandidateValue, ConfidenceSource, DocType, DocumentRead,
+    ExtractedFact, FactState, ImportErrorKind, Located, ReadFact, RejectedFact, SlotContent,
+    SlotValue, SourceSegment, TypingContext, Uncovered, ValueKind, doc_types::MrzField, locate,
+    type_value,
 };
 use std::collections::BTreeMap;
 
@@ -185,6 +186,32 @@ pub fn unverified_fact(t: &Typed<'_>, input: &FactInput) -> ReadFact {
     }
 }
 
+/// What a read stores when its verification failed: every grounded fact as
+/// unverified (owner unknown, never linked to the profile), the values nobody
+/// interpreted and the rejection counts, but no profile values. The vault stores
+/// it without touching the source's existing profile values. A cancelled
+/// verification stores nothing.
+pub fn unverified_read(
+    run_id: &str,
+    typed: &[Typed<'_>],
+    inputs: &[FactInput],
+    uninterpreted: Vec<Uncovered>,
+    rejected: BTreeMap<String, usize>,
+    failure: ImportErrorKind,
+) -> Option<DocumentRead> {
+    (failure != ImportErrorKind::Cancelled).then(|| DocumentRead {
+        run_id: run_id.to_owned(),
+        graph: None,
+        facts: typed
+            .iter()
+            .zip(inputs)
+            .map(|(t, i)| unverified_fact(t, i))
+            .collect(),
+        uninterpreted,
+        rejected,
+    })
+}
+
 /// Code applies the direction TypeSafe judged: a refund is stored negative and
 /// a payment positive, whatever sign was printed. Zero stays unsigned.
 pub fn apply_direction(c: &mut Candidate, refund: Option<bool>) {
@@ -295,8 +322,11 @@ fn locate_context(segments: &[SourceSegment<'_>], fact: &ExtractedFact) -> Optio
 
 /// Pay-month fallback: the one period that the context quotes of all mapped
 /// amounts for this document's own period print, at its real source span, with
-/// the weakest confidence among those amounts. `None` when they print no period
-/// or more than one.
+/// the weakest confidence among those amounts. Only a period of the amounts' own
+/// granularity counts: a monthly amount's context gives a whole calendar month
+/// (the pay month), a yearly amount's a whole calendar year (the tax year), so a
+/// month token never fills a tax year. `None` when they print no such period or
+/// more than one.
 fn shared_period(
     candidates: &[Candidate],
     segments: &[SourceSegment<'_>],
@@ -310,6 +340,9 @@ fn shared_period(
         if !(v.mapped && input.money && v.period == Some(PeriodKind::Document)) {
             continue;
         }
+        let Some(ValueKind::Money(Some(granularity))) = input.slot.map(|s| s.value) else {
+            continue;
+        };
         let Some(at) = locate_context(segments, t.fact) else {
             continue;
         };
@@ -320,6 +353,8 @@ fn shared_period(
                     && c.segment_id == at.segment_id
                     && at.quote_start <= c.start
                     && c.end <= at.quote_end
+                    && matches!(&c.value, CandidateValue::Period { start, end }
+                        if me_core::whole_period(granularity, start, end))
             })
             .collect();
         if !periods.is_empty() {

@@ -35,7 +35,7 @@ pub const VERIFY_FIRE: f64 = 0.7;
 pub const EQUIVALENT: f64 = 0.8;
 /// Score rounding cut point for proposing a merge (levels 0..2).
 pub const ALIGN_PROPOSE: f64 = 0.5;
-// On-demand search over lazy documents.
+// On-demand search over documents not read yet.
 pub const SEARCH_FOUND: f64 = 0.7;
 // Bands must stay ordered when a value is tuned.
 const _: () = assert!(FAMILY_FLOOR < TYPE_CONFIDENT && SLOT_FLOOR < TYPE_CONFIDENT);
@@ -377,7 +377,8 @@ pub fn alignment_questions(pairs: usize) -> Value {
     json!(questions)
 }
 
-/// One existence Noul per document for an on-demand search over lazy documents.
+/// One existence Noul per document for an on-demand search over documents not
+/// read yet.
 pub fn search_questions(count: usize) -> Value {
     let mut questions = Map::new();
     for i in 0..count {

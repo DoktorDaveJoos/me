@@ -9,7 +9,7 @@ use me_agent::fact_verification as verify;
 use me_agent::graph_pipeline::{self as pipeline, Classification};
 use me_agent::read_assembly::{
     covered_spans, keep_grounded, named_owners, profile_values, read_fact, time_year, type_facts,
-    unverified_fact,
+    unverified_read,
 };
 use me_core::{
     DocumentGraph, DocumentRead, ImportErrorKind as Kind, ImportFailure, ImportProvider,
@@ -38,7 +38,8 @@ fn vault_call<T>(
     f(vault).map_err(|e| e.to_string())
 }
 
-/// Reserves each TypeSafe request durably before it is sent, then records usage.
+/// Reserves each TypeSafe request durably before it is sent (against the file and,
+/// when the file came with an import batch, the batch), then records usage.
 struct Metered<'a> {
     session: &'a Arc<Mutex<Option<Vault>>>,
     item: u64,
@@ -53,20 +54,26 @@ impl me_agent::typesafe::Decisions for Metered<'_> {
         questions: serde_json::Value,
         cancel: &AtomicBool,
     ) -> me_agent::typesafe::Result<me_agent::typesafe::DecisionResponse> {
-        let call = vault_call(self.session, |v| {
+        let call = super::ai_ui::reserve_paid_call(self.session, |v| {
             v.reserve_graph_request(self.item, self.run, ImportProvider::TypeSafe)
-        })
-        .map_err(|e| ImportFailure::new(ImportProvider::Local, Kind::Unprocessable, e))?;
+        })?;
         let response = self.inner.evaluate(state, questions, cancel)?;
-        let _ = vault_call(self.session, |v| {
-            v.record_import_usage(
-                self.item,
-                self.run,
-                &call,
-                response.input_tokens.unwrap_or(0),
-                response.output_tokens.unwrap_or(0),
-            )
-        });
+        // The reservation already counts the call; unrecorded tokens stay visible
+        // as unreported usage.
+        if !matches!(
+            vault_call(self.session, |v| {
+                v.record_import_usage(
+                    self.item,
+                    self.run,
+                    &call,
+                    response.input_tokens.unwrap_or(0),
+                    response.output_tokens.unwrap_or(0),
+                )
+            }),
+            Ok(true)
+        ) {
+            record("read.usage_unrecorded", &[F::Count("item", self.item)]);
+        }
         let _ = self.tx.send(Progress::Usage {
             call,
             input_tokens: response.input_tokens.unwrap_or(0),
@@ -198,20 +205,18 @@ pub(super) fn run_read(
 fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
     let (session, item, run, cancel, tx) = (a.session, a.item, a.run, a.cancel, a.tx);
     // 1. Inputs.
-    let (source, title, texts, anchors, threshold, fingerprint, batch) =
-        vault_call(session, |v| {
-            let (source, title, texts) = v.document_texts(item)?;
-            let fingerprint = v.source_fingerprint(&source)?;
-            Ok((
-                source,
-                title,
-                texts,
-                v.identity_anchors()?,
-                v.check_threshold()?,
-                fingerprint,
-                v.item_batch(item)?,
-            ))
-        })?;
+    let (source, title, texts, anchors, threshold, fingerprint) = vault_call(session, |v| {
+        let (source, title, texts) = v.document_texts(item)?;
+        let fingerprint = v.source_fingerprint(&source)?;
+        Ok((
+            source,
+            title,
+            texts,
+            v.identity_anchors()?,
+            v.check_threshold()?,
+            fingerprint,
+        ))
+    })?;
     let segments: Vec<SourceSegment<'_>> = texts
         .iter()
         .map(|t| SourceSegment {
@@ -230,8 +235,8 @@ fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
         inner: me_agent::typesafe::TypeSafe::configured().map_err(|f| a.fail(f))?,
         tx,
     };
-    let mut requests = 0u32;
-    let mut tokens = 0u64;
+    // Every paid call is counted when it is reserved: against the file and, for a
+    // file that came with an import batch, the batch (see `reserve_paid_call`).
 
     // 2. Classify (cached by content), so every read document is filed.
     step(tx, session, item, run, ImportStage::Interpreting, false);
@@ -249,8 +254,6 @@ fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
             };
             let c = pipeline::classify(document, &anchors, &candidates, &mut decisions, cancel)
                 .map_err(|f| a.fail(f))?;
-            requests += c.usage.requests;
-            tokens += c.usage.input_tokens;
             let model = c.usage.models.first().cloned();
             let value = serde_json::to_value(&c).map_err(|_| "Invalid classification.")?;
             vault_call(session, |v| {
@@ -354,7 +357,9 @@ fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
         let typing = TypingContext::new(&segments, classification.doc_type.as_deref(), year);
         let (typed, inputs) = type_facts(&facts, &segments, &typing, kind);
 
-        // 6. TypeSafe verification. A failure keeps the facts unverified and resumable.
+        // 6. TypeSafe verification. A failure stores the facts as unverified without
+        // touching the source's profile values; the run stays resumable. A stop
+        // stores nothing.
         step(tx, session, item, run, ImportStage::Verifying, false);
         let named = named_owners(&candidates);
         let subject = classification
@@ -376,23 +381,27 @@ fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
         ) {
             Ok(v) => v,
             Err(failure) => {
-                let read = DocumentRead {
-                    run_id: input.run_id.clone(),
-                    graph: None,
-                    facts: typed
-                        .iter()
-                        .zip(&inputs)
-                        .map(|(t, i)| unverified_fact(t, i))
-                        .collect(),
-                    uninterpreted: open,
-                    rejected,
+                let stop = if cancel.load(Ordering::SeqCst) {
+                    Kind::Cancelled
+                } else {
+                    failure.kind
                 };
-                let _ = vault_call(session, |v| v.apply_read(&source, &read));
+                if let Some(read) =
+                    unverified_read(&input.run_id, &typed, &inputs, open, rejected, stop)
+                {
+                    let stored = vault_call(session, |v| v.store_unverified_read(&source, &read));
+                    record(
+                        "read.unverified",
+                        &[
+                            F::Count("item", item),
+                            F::Count("facts", read.facts.len() as u64),
+                            F::Flag("stored", stored.is_ok()),
+                        ],
+                    );
+                }
                 return Err(a.fail(failure));
             }
         };
-        requests += verification.usage.requests;
-        tokens += verification.usage.input_tokens;
 
         // 7. Profile values: MRZ fields by position, verified mappings, pay month.
         let graph = kind.map(|k| {
@@ -450,15 +459,9 @@ fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
         );
         Ok(ReadRun { outcome })
     })();
-    if result.is_err() {
-        let _ = vault_call(session, |v| v.fail_extraction(&input.run_id));
-    }
-    if let Some(batch) = &batch
-        && (requests > 0 || tokens > 0)
-    {
-        let _ = vault_call(session, |v| {
-            v.record_batch_usage(batch, requests, tokens, 0)
-        });
+    // A run left running would not be offered for resume; say so in diagnostics.
+    if result.is_err() && vault_call(session, |v| v.fail_extraction(&input.run_id)).is_err() {
+        record("read.run_not_failed", &[F::Count("item", item)]);
     }
     result
 }
