@@ -53,6 +53,14 @@ impl ImportStage {
         }
     }
 }
+/// Counts of a file's finished read, as its `read_summary` stores them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadCounts {
+    pub values: u32,
+    pub in_profile: u32,
+    pub checks: u32,
+    pub uninterpreted: u32,
+}
 #[derive(Clone, Debug)]
 pub struct ImportJob {
     pub item: u64,
@@ -69,6 +77,8 @@ pub struct ImportJob {
     pub steps: [crate::StepProgress; 5],
     pub usage: crate::ImportUsage,
     pub failure: Option<crate::ImportFailure>,
+    /// Present once the file was read in full; `None` while it has no stored read.
+    pub read: Option<ReadCounts>,
 }
 impl Vault {
     /// Keep an explicitly attached Search form out of automatic fact extraction.
@@ -78,7 +88,7 @@ impl Vault {
         Ok(())
     }
     pub fn import_jobs(&self) -> Result<Vec<ImportJob>> {
-        let mut stmt = self.db.prepare("SELECT i.local_id,i.title,e.state,coalesce(p.stage,'normalizing'),coalesce(p.current,0),coalesce(p.total,0),e.error_message,e.warning_message,i.extension,s.sensitivity,(SELECT count(*) FROM ai_proposal a WHERE a.source_id=e.source_id AND a.state='proposed'),(SELECT count(*) FROM ai_question q WHERE q.source_id=e.source_id AND q.state='pending'),p.error_code,p.error_provider FROM document_evaluation e JOIN collection_item i ON i.source_id=e.source_id JOIN source s ON s.id=i.source_id LEFT JOIN import_progress p ON p.source_id=e.source_id WHERE i.kind='document' AND i.deleted_at IS NULL AND s.retention='keep' ORDER BY i.local_id DESC")?;
+        let mut stmt = self.db.prepare("SELECT i.local_id,i.title,e.state,coalesce(p.stage,'normalizing'),coalesce(p.current,0),coalesce(p.total,0),e.error_message,e.warning_message,i.extension,s.sensitivity,(SELECT count(*) FROM ai_proposal a WHERE a.source_id=e.source_id AND a.state='proposed'),(SELECT count(*) FROM ai_question q WHERE q.source_id=e.source_id AND q.state='pending'),p.error_code,p.error_provider,rs.values_read,rs.in_profile,rs.checks,rs.uninterpreted FROM document_evaluation e JOIN collection_item i ON i.source_id=e.source_id JOIN source s ON s.id=i.source_id LEFT JOIN import_progress p ON p.source_id=e.source_id LEFT JOIN read_summary rs ON rs.source_id=e.source_id WHERE i.kind='document' AND i.deleted_at IS NULL AND s.retention='keep' ORDER BY i.local_id DESC")?;
         let mut jobs = stmt
             .query_map([], |r| {
                 let extension: String = r.get(8)?;
@@ -108,6 +118,15 @@ impl Vault {
                         )
                     }),
                     processable: sensitivity != "credential" && processable_document(&extension),
+                    read: match r.get::<_, Option<u32>>(14)? {
+                        Some(values) => Some(ReadCounts {
+                            values,
+                            in_profile: r.get(15)?,
+                            checks: r.get(16)?,
+                            uninterpreted: r.get(17)?,
+                        }),
+                        None => None,
+                    },
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

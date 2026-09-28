@@ -439,7 +439,9 @@ impl MeApp {
         } else {
             MUTED
         };
-        let status = if running {
+        let status = if let Some(read) = read_status(job, running) {
+            read
+        } else if running {
             format!(
                 "{} · {}s elapsed",
                 stage.label(),
@@ -677,6 +679,50 @@ fn resume_action(job: &ImportJob) -> ResumeAction {
     }
 }
 
+/// Status line of a file whose read finished or that stopped at an allowance
+/// before any read was stored; `None` defers to the other states. Such a stop is
+/// never shown as done: the file is not read yet, or partly once extraction had
+/// started. A stopped re-read keeps its earlier read, so it keeps the pause line.
+pub(super) fn read_status(job: &ImportJob, running: bool) -> Option<String> {
+    use me_core::ImportErrorKind::{BatchBudget, Budget};
+    if running {
+        return None;
+    }
+    if job.state == "done"
+        && let Some(r) = job.read
+    {
+        let plural =
+            |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        return Some(format!(
+            "{} read · {} in profile · {} · {} not interpreted",
+            plural(r.values, "value", "values"),
+            r.in_profile,
+            plural(r.checks, "check", "checks"),
+            r.uninterpreted
+        ));
+    }
+    let stop = job
+        .failure
+        .as_ref()
+        .map(|f| f.kind)
+        .filter(|kind| matches!(kind, Budget | BatchBudget))?;
+    if job.state != "failed" || job.read.is_some() {
+        return None;
+    }
+    let started = ImportStage::Extracting
+        .index()
+        .is_some_and(|i| job.steps[i].current > 0);
+    Some(format!(
+        "{} · {}",
+        if started {
+            "Partly read"
+        } else {
+            "Not read yet"
+        },
+        error_label(stop)
+    ))
+}
+
 fn error_label(kind: me_core::ImportErrorKind) -> &'static str {
     use me_core::ImportErrorKind::*;
     match kind {
@@ -718,6 +764,7 @@ mod tests {
             steps: [me_core::StepProgress::default(); 5],
             usage,
             failure: stop.map(|k| ImportFailure::new(ImportProvider::Local, k, "SYNTHETIC")),
+            read: None,
         }
     }
     fn from_import(openai_calls: i64) -> ImportUsage {
@@ -778,6 +825,74 @@ mod tests {
         assert_eq!(
             ResumeAction::ExtendFile.label(),
             "Allow 12 more OpenAI + 24 TypeSafe calls and resume"
+        );
+    }
+
+    #[test]
+    fn a_finished_read_reports_counts_and_budget_pauses_say_not_or_partly_read() {
+        let mut done = job("done", None, ImportUsage::default());
+        done.read = Some(me_core::ReadCounts {
+            values: 34,
+            in_profile: 12,
+            checks: 1,
+            uninterpreted: 2,
+        });
+        assert_eq!(
+            read_status(&done, false).as_deref(),
+            Some("34 values read · 12 in profile · 1 check · 2 not interpreted")
+        );
+        done.read = Some(me_core::ReadCounts {
+            values: 1,
+            in_profile: 0,
+            checks: 0,
+            uninterpreted: 0,
+        });
+        assert_eq!(
+            read_status(&done, false).as_deref(),
+            Some("1 value read · 0 in profile · 0 checks · 0 not interpreted")
+        );
+        // A running file keeps its live stage line.
+        assert_eq!(read_status(&done, true), None);
+        let extracting = ImportStage::Extracting.index().unwrap();
+        // Stopped at the file's own allowance, then at its import's allowance.
+        for (kind, label) in [
+            (K::Budget, "Analysis allowance reached"),
+            (K::BatchBudget, "Import allowance reached"),
+        ] {
+            let mut paused = job("failed", Some(kind), ImportUsage::default());
+            assert_eq!(
+                read_status(&paused, false),
+                Some(format!("Not read yet · {label}"))
+            );
+            paused.steps[extracting] = me_core::StepProgress {
+                current: 2,
+                total: 5,
+            };
+            assert_eq!(
+                read_status(&paused, false),
+                Some(format!("Partly read · {label}"))
+            );
+            assert_eq!(read_status(&paused, true), None);
+            // A re-read that stopped keeps the earlier read: not "not read".
+            paused.read = done.read;
+            assert_eq!(read_status(&paused, false), None);
+        }
+        // Other stops, legacy finished files without a summary and waiting files
+        // keep their existing lines.
+        assert_eq!(
+            read_status(
+                &job("failed", Some(K::Timeout), ImportUsage::default()),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            read_status(&job("done", None, ImportUsage::default()), false),
+            None
+        );
+        assert_eq!(
+            read_status(&job("manual", None, ImportUsage::default()), false),
+            None
         );
     }
 

@@ -271,8 +271,10 @@ impl Vault {
             .collect::<std::result::Result<_, _>>()?)
     }
     /// Allows more OpenAI calls for a batch. Its files that stopped at its
-    /// allowance are queued again, so reading continues where it stopped. A file
-    /// stopped at its own allowance keeps waiting for that file's extension.
+    /// allowance are queued again while automatic analysis is on, so reading
+    /// continues where it stopped; with it off they wait to be started, as a new
+    /// import would. A file stopped at its own allowance keeps waiting for that
+    /// file's extension.
     pub fn extend_batch_allowance(&mut self, batch: &str) -> Result<()> {
         let tx = self.db.transaction()?;
         tx.execute(
@@ -280,7 +282,7 @@ impl Vault {
             params![DEFAULT_BATCH_OPENAI_ALLOWANCE, batch],
         )?;
         tx.execute(
-            &format!("{STOPPED_AT_IMPORT_ALLOWANCE} UPDATE document_evaluation SET state='queued',error_message=NULL WHERE state='failed' AND source_id IN (SELECT source_id FROM stopped WHERE batch_id=?2)"),
+            &format!("{STOPPED_AT_IMPORT_ALLOWANCE} UPDATE document_evaluation SET state=CASE WHEN (SELECT automatic_evaluation FROM app_settings WHERE singleton=1)=1 THEN 'queued' ELSE 'manual' END,error_message=NULL WHERE state='failed' AND source_id IN (SELECT source_id FROM stopped WHERE batch_id=?2)"),
             params![crate::import_recovery::IMPORT_ALLOWANCE_REACHED, batch],
         )?;
         tx.commit()?;
@@ -636,5 +638,52 @@ mod tests {
         assert_eq!(state(&v, waiting), "queued");
         assert_eq!(state(&v, earlier), "queued");
         assert_eq!(state(&v, own_limit), "failed");
+    }
+
+    #[test]
+    fn extending_an_import_queues_its_stopped_files_only_while_automatic_analysis_is_on() {
+        use crate::{ImportErrorKind, ImportFailure, ImportProvider};
+        for automatic in [true, false] {
+            let t = tempfile::tempdir().unwrap();
+            let mut v =
+                Vault::create(&t.path().join("vault"), "synthetic-intake-password").unwrap();
+            v.set_automatic_evaluation(automatic).unwrap();
+            let batch = v.begin_import_batch("Setup dump").unwrap();
+            let file = t.path().join("stopped.txt");
+            std::fs::write(&file, "SYNTHETIC stopped").unwrap();
+            let item = v
+                .import_envelope_file(&file, SourceKind::Folder, Some(&batch))
+                .unwrap()
+                .item;
+            let stop = ImportFailure::new(
+                ImportProvider::Local,
+                ImportErrorKind::BatchBudget,
+                "SYNTHETIC import allowance",
+            );
+            v.begin_evaluation(item, false).unwrap();
+            v.begin_import_progress(item, "a").unwrap();
+            v.record_import_failure(item, "a", &stop).unwrap();
+            v.finish_import_evaluation(item, "a", Some(&stop.message), None)
+                .unwrap();
+            v.extend_batch_allowance(&batch).unwrap();
+            let state = v
+                .import_jobs()
+                .unwrap()
+                .into_iter()
+                .find(|j| j.item == item)
+                .unwrap()
+                .state;
+            if automatic {
+                assert_eq!(state, "queued");
+                assert_eq!(v.next_automatic_document().unwrap(), Some(item));
+            } else {
+                // With automatic analysis off the file waits for the person, like a
+                // new import, and never enters the automatic queue; a manual start
+                // works right away.
+                assert_eq!(state, "manual");
+                assert_eq!(v.next_automatic_document().unwrap(), None);
+                assert!(v.begin_evaluation(item, false).unwrap());
+            }
+        }
     }
 }

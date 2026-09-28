@@ -2,7 +2,9 @@
 //! `ME_VAULT_DIR=/tmp/<fresh>/vault ./scripts/cargo run -p me-app --example
 //! import_gallery -- <mode> [small] [expanded] [scroll=<px>]`; modes: confirm, progress,
 //! failure, budget, batch (stopped at its import's allowance), complete, read (a
-//! document detail after a full read).
+//! document detail after a full read). `progress` also lists a file read in full,
+//! one partly read when its own allowance ran out and one not read yet because its
+//! import's allowance ran out.
 #![allow(dead_code)]
 #[path = "../src/assets.rs"]
 mod assets;
@@ -26,6 +28,13 @@ mod shell {
             app.document_open = Some(item);
             app.document_read = Some(vault.document_read(item).unwrap());
         }
+        // Newest first, so these three are listed above the two running files.
+        let finished = (mode == "progress").then(|| {
+            let dir = samples[0].parent().unwrap();
+            let not_read = super::synthetic_file(&mut vault, dir, "Tax assessment 2025.pdf");
+            let partly = super::synthetic_file(&mut vault, dir, "Rental contract.pdf");
+            (super::read_fixture(&mut vault, dir), partly, not_read)
+        });
         // Prevent the deferred connection check from launching a provider process.
         app.codex_cancel = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
         app.codex_ready = true;
@@ -42,8 +51,14 @@ mod shell {
         if mode == "confirm" {
             app.accept_documents(&samples, cx);
         }
-        if mode == "progress" {
-            for (index, job) in app.import_jobs.iter().take(2).enumerate() {
+        if let Some((read, partly, not_read)) = finished {
+            for (index, job) in app
+                .import_jobs
+                .iter()
+                .filter(|job| ![read, partly, not_read].contains(&job.item))
+                .take(2)
+                .enumerate()
+            {
                 let mut active =
                     ActiveImport::new(Arc::new(std::sync::atomic::AtomicBool::new(false)), true);
                 active.stage = if index == 0 {
@@ -96,6 +111,74 @@ mod shell {
                 .into();
                 app.active_imports.insert(job.item, active);
             }
+            let done = me_core::StepProgress {
+                current: 1,
+                total: 1,
+            };
+            for job in &mut app.import_jobs {
+                if job.item == read {
+                    // Its line shows the counts `import_jobs` loaded from the read.
+                    job.state = "done".into();
+                    job.steps = [done; 5];
+                    continue;
+                }
+                let (kind, message) = if job.item == partly {
+                    // Extraction had started when the file's own allowance ran out.
+                    job.steps = [
+                        done,
+                        done,
+                        done,
+                        me_core::StepProgress {
+                            current: 3,
+                            total: 8,
+                        },
+                        me_core::StepProgress::default(),
+                    ];
+                    job.usage.openai_calls = me_core::FILE_OPENAI_CALLS;
+                    job.usage.typesafe_calls = 9;
+                    job.usage.input_tokens = 14210;
+                    job.usage.output_tokens = 2105;
+                    (
+                        me_core::ImportErrorKind::Budget,
+                        "This file reached its analysis allowance. Saved steps are kept. Review usage before allowing more calls.",
+                    )
+                } else if job.item == not_read {
+                    // Its import had no OpenAI calls left before extraction began.
+                    job.steps = [
+                        done,
+                        done,
+                        me_core::StepProgress::default(),
+                        me_core::StepProgress::default(),
+                        me_core::StepProgress::default(),
+                    ];
+                    job.usage.batch = Some(me_core::BatchAllowance {
+                        id: "synthetic-import".into(),
+                        openai_calls: 200,
+                        openai_allowance: 200,
+                    });
+                    (
+                        me_core::ImportErrorKind::BatchBudget,
+                        "This import reached its OpenAI allowance. Saved steps are kept. Allow more OpenAI calls for this import to continue.",
+                    )
+                } else {
+                    continue;
+                };
+                job.state = "failed".into();
+                job.stage = me_core::ImportStage::Extracting;
+                job.error = Some(message.into());
+                job.failure = Some(me_core::ImportFailure::new(
+                    me_core::ImportProvider::Local,
+                    kind,
+                    message,
+                ));
+            }
+            app.import_batch_stops = vec![me_core::ExhaustedBatch {
+                id: "synthetic-import".into(),
+                label: "Folder import".into(),
+                openai_calls: 200,
+                openai_allowance: 200,
+                stopped: 1,
+            }];
         }
         if mode == "failure" || mode == "budget" || mode == "batch" {
             let job = &mut app.import_jobs[0];
@@ -189,6 +272,14 @@ use me_core::{
     DocumentRead, FactState, ReadFact, SlotContent, SlotValue, Uncovered,
 };
 
+/// Saves a synthetic original under `name` and returns its collection item.
+fn synthetic_file(vault: &mut me_core::Vault, dir: &std::path::Path, name: &str) -> u64 {
+    let path = dir.join(name);
+    std::fs::write(&path, "SYNTHETIC EXAMPLE\nReference: 00042").unwrap();
+    vault
+        .import_document(&path, name, me_core::DocumentClass::Unclassified)
+        .unwrap()
+}
 /// A synthetic two-page payslip, read in full: four profile values (one waiting
 /// in Quick checks), other details (two uncertain, one with a long label and
 /// value) and three values nobody interpreted. Returns its collection item.

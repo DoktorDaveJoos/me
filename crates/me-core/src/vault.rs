@@ -154,6 +154,7 @@ impl Vault {
             tx.execute_batch(include_str!("../migrations/014_personal_domain.sql"))?;
             tx.execute_batch(include_str!("../migrations/015_import_graph.sql"))?;
             tx.execute_batch(include_str!("../migrations/016_document_read.sql"))?;
+            tx.execute_batch(include_str!("../migrations/017_import_indexes.sql"))?;
             let profile = id();
             tx.execute("INSERT INTO entity(id,kind,label,created_at) VALUES(?,'person','Ich',strftime('%Y-%m-%dT%H:%M:%fZ','now'))", [&profile])?;
             tx.execute(
@@ -214,7 +215,7 @@ impl Vault {
         }
         let mut db = database(&root.join("vault.db"), &keys[..32], false)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(1..=16).contains(&version) {
+        if !(1..=17).contains(&version) {
             return Err(Error::Format);
         }
         if version == 1 {
@@ -294,6 +295,11 @@ impl Vault {
         if version < 16 {
             let tx = db.transaction()?;
             tx.execute_batch(include_str!("../migrations/016_document_read.sql"))?;
+            tx.commit()?;
+        }
+        if version < 17 {
+            let tx = db.transaction()?;
+            tx.execute_batch(include_str!("../migrations/017_import_indexes.sql"))?;
             tx.commit()?;
         }
         let vault_id: String =
@@ -973,7 +979,7 @@ mod recovery_tests {
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            16
+            17
         );
         let graph = vault.knowledge_map().unwrap();
         assert_eq!(graph.nodes.len(), 1);
@@ -999,7 +1005,7 @@ mod recovery_tests {
             .db
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 16);
+        assert_eq!(version, 17);
         let facts = vault
             .facts_get(&vault.shareable_scope().unwrap(), &["person.tax_id".into()])
             .unwrap();
@@ -1051,7 +1057,7 @@ mod recovery_tests {
                 .db
                 .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            16
+            17
         );
     }
 
@@ -1112,6 +1118,73 @@ mod recovery_tests {
         assert_eq!((jobs[0].current, jobs[0].total), (1, 3));
         assert_eq!(jobs[0].usage.openai_limit, 12);
         assert!(v.import_pause_reason().unwrap().is_none());
+    }
+
+    /// Whether both per-file lookup indexes of the Imports refresh exist.
+    fn import_indexes(db: &Connection) -> Vec<String> {
+        db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('envelope_source_source','import_request_source') ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+    #[test]
+    fn schema_sixteen_adds_the_per_file_import_indexes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("vault");
+        let password = "synthetic-passphrase-2026";
+        let mut vault = Vault::create(&root, password).unwrap();
+        let expected = ["envelope_source_source", "import_request_source"];
+        assert_eq!(import_indexes(&vault.db), expected);
+        let file = temp.path().join("letter.txt");
+        fs::write(&file, "SYNTHETIC letter").unwrap();
+        let batch = vault.begin_import_batch("Synthetic dump").unwrap();
+        let item = vault
+            .import_envelope_file(&file, crate::SourceKind::Folder, Some(&batch))
+            .unwrap()
+            .item;
+        vault
+            .db
+            .execute_batch(
+                "DROP INDEX envelope_source_source; DROP INDEX import_request_source; PRAGMA user_version=16;",
+            )
+            .unwrap();
+        drop(vault);
+        let vault = Vault::unlock(&root, password).unwrap();
+        assert_eq!(
+            vault
+                .db
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            17
+        );
+        assert_eq!(import_indexes(&vault.db), expected);
+        // The per-file lookups of each Imports refresh use them instead of a scan.
+        let plan = |sql: &str| -> String {
+            vault
+                .db
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(["synthetic"], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n")
+        };
+        assert!(
+            plan("SELECT count(*) FROM import_request WHERE source_id=?")
+                .contains("import_request_source")
+        );
+        assert!(
+            plan("SELECT envelope_id FROM envelope_source WHERE source_id=?")
+                .contains("envelope_source_source")
+        );
+        // Existing envelopes still name the file's import.
+        assert_eq!(
+            vault.import_usage(item).unwrap().batch.map(|b| b.id),
+            Some(batch)
+        );
     }
 
     #[test]

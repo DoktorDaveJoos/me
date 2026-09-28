@@ -320,6 +320,54 @@ fn a_read_stores_profile_values_document_facts_and_uninterpreted_values() {
 }
 
 #[test]
+fn the_imports_list_reports_the_counts_of_a_finished_read() {
+    let (mut vault, source) = synthetic_payslip_source();
+    let unread = add_synthetic_source(&mut vault, "unread.txt");
+    let me = vault.profile_entity_id().unwrap();
+    let read = DocumentRead {
+        run_id: "run-1".into(),
+        graph: Some(payslip(
+            &me,
+            vec![money("wage_tax", "1032.58", 10), january()],
+        )),
+        facts: vec![
+            fact("Lohnsteuer", "1.032,58", Some("wage_tax")),
+            fact("Kostenstelle", "4711", None),
+        ],
+        uninterpreted: vec![crate::Uncovered {
+            segment_id: "seg".into(),
+            start: 40,
+            end: 46,
+            kind: CandidateKind::Amount,
+            label: Some("KV-Beitrag".into()),
+            text: "435,21".into(),
+            line: "KV-Beitrag 435,21".into(),
+        }],
+        rejected: Default::default(),
+    };
+    vault.apply_read(&source, &read).unwrap();
+    let item = |source: &str| -> u64 {
+        count(
+            &vault,
+            &format!("SELECT local_id FROM collection_item WHERE source_id='{source}'"),
+        ) as u64
+    };
+    let jobs = vault.import_jobs().unwrap();
+    let job = |item: u64| jobs.iter().find(|j| j.item == item).unwrap();
+    assert_eq!(
+        job(item(&source)).read,
+        Some(crate::ReadCounts {
+            values: 2,
+            in_profile: 1,
+            checks: 0,
+            uninterpreted: 1
+        })
+    );
+    // A file without a stored read has no counts, whatever its state says.
+    assert_eq!(job(item(&unread)).read, None);
+}
+
+#[test]
 fn twelve_monthly_payslips_form_a_timeline_without_conflicts() {
     let (mut vault, _) = synthetic_payslip_source();
     let me = vault.profile_entity_id().unwrap();
@@ -827,7 +875,7 @@ fn migration_sixteen_requeues_documents_read_by_the_tiered_reader() {
         .db
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 16);
+    assert_eq!(version, 17);
     assert_eq!(count(&vault, "SELECT count(*) FROM document_fact"), 0);
 }
 
