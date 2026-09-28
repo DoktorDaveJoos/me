@@ -21,7 +21,6 @@ pub(super) fn core_error(error: me_core::Error) -> String {
 struct DocumentResult {
     collection: Collection,
     proposals: Vec<me_core::Proposal>,
-    fact_count: Option<usize>,
     warning: Option<String>,
     graph: Option<super::read_import::ReadRun>,
 }
@@ -95,13 +94,14 @@ impl me_agent::codex::Checkpoints for VaultCheckpoints {
     }
 }
 
-/// Reserves one paid call durably before it is sent. A refusal is reported the
-/// same way on every path: an allowance stop as a budget failure, a paused queue
-/// as a quota failure, anything else as a storage failure.
-pub(super) fn reserve_paid_call(
+/// Reserves one paid call durably before it is sent, or checks that one may be.
+/// A refusal is reported the same way on every path: the file's or its import's
+/// allowance stop as a budget failure of that kind, a paused queue as a quota
+/// failure, anything else as a storage failure.
+pub(super) fn reserve_paid_call<T>(
     session: &Arc<Mutex<Option<Vault>>>,
-    reserve: impl FnOnce(&mut Vault) -> me_core::Result<String>,
-) -> Result<String, me_core::ImportFailure> {
+    reserve: impl FnOnce(&mut Vault) -> me_core::Result<T>,
+) -> Result<T, me_core::ImportFailure> {
     use me_core::{ImportErrorKind as Kind, ImportFailure, ImportProvider};
     let storage = || {
         ImportFailure::new(
@@ -493,7 +493,6 @@ impl MeApp {
                         return Ok(DocumentResult {
                             collection: v.collection("", false).map_err(core_error)?,
                             proposals: v.proposals(item).map_err(core_error)?,
-                            fact_count: None,
                             warning: None,
                             graph: None,
                         });
@@ -525,7 +524,6 @@ impl MeApp {
                     Ok(DocumentResult {
                         collection: v.collection("", false).map_err(core_error)?,
                         proposals: v.proposals(item).map_err(core_error)?,
-                        fact_count: Some(read.outcome.values),
                         warning: (read.outcome.checks > 0).then(|| {
                             format!(
                                 "{} worth a quick look in Review.",
@@ -675,20 +673,18 @@ impl MeApp {
                     Ok(Some(DocumentResult {
                         collection,
                         proposals,
-                        fact_count: count,
                         warning,
                         graph,
                     })) => {
                         if this.search.read(cx).content.is_empty() && !this.pinned_only {
                             this.collection = collection;
                         }
-                        this.ai_message = Some(match (&graph, count) {
-                            (Some(r), _) => format!(
+                        this.ai_message = Some(match &graph {
+                            Some(r) => format!(
                                 "{} values read · {} in your profile",
                                 r.outcome.values, r.outcome.in_profile
                             ),
-                            (None, None) => "File is searchable. Ready for AI analysis.".into(),
-                            (None, Some(_)) => "Analysis complete.".into(),
+                            None => "File is searchable. Ready for AI analysis.".into(),
                         });
                         if graph.is_some() {
                             this.refresh_graph(cx);

@@ -20,6 +20,11 @@ const MAX_DEPTH: usize = 32;
 /// classified as noise are left out.
 const UNREAD_DOCUMENTS: &str = "FROM collection_item i JOIN source s ON s.id=i.source_id LEFT JOIN document_profile p ON p.source_id=s.id WHERE i.kind='document' AND i.deleted_at IS NULL AND s.sensitivity='personal' AND s.retention='keep' AND coalesce(p.family,'')<>'noise' AND NOT EXISTS(SELECT 1 FROM read_summary r WHERE r.source_id=s.id) AND EXISTS(SELECT 1 FROM source_segment g WHERE g.source_id=s.id AND g.ordinal>0)";
 
+/// Failed files stopped at the OpenAI allowance of the import that gates them (the
+/// one each arrived with most recently): `(source_id, batch_id)`. `?1` is the
+/// refusal message, which identifies such stops recorded before they were typed.
+const STOPPED_AT_IMPORT_ALLOWANCE: &str = "WITH stopped AS (SELECT e.source_id,(SELECT v.batch_id FROM intake_envelope v JOIN envelope_source es ON es.envelope_id=v.id WHERE es.source_id=e.source_id AND v.batch_id IS NOT NULL ORDER BY v.received_at DESC LIMIT 1) AS batch_id FROM document_evaluation e JOIN import_progress p ON p.source_id=e.source_id JOIN collection_item i ON i.source_id=e.source_id AND i.kind='document' AND i.deleted_at IS NULL WHERE e.state='failed' AND (p.error_code='batch_budget' OR (p.error_code='budget' AND e.error_message=?1)))";
+
 /// The batch a source arrived with most recently, if any.
 pub(crate) fn source_batch(db: &Connection, source: &str) -> Result<Option<String>> {
     Ok(db.query_row("SELECT v.batch_id FROM intake_envelope v JOIN envelope_source es ON es.envelope_id=v.id WHERE es.source_id=? AND v.batch_id IS NOT NULL ORDER BY v.received_at DESC LIMIT 1",[source],|r|r.get(0)).optional()?)
@@ -149,6 +154,17 @@ pub struct BatchProgress {
     pub typesafe_requests: i64,
 }
 
+/// An import whose OpenAI allowance is used up and has stopped files it gates.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ExhaustedBatch {
+    pub id: String,
+    pub label: String,
+    pub openai_calls: i64,
+    pub openai_allowance: i64,
+    /// Files that stopped at this import's allowance and wait for more calls.
+    pub stopped: usize,
+}
+
 impl Vault {
     pub fn begin_import_batch(&mut self, label: &str) -> Result<String> {
         crate::domain::bounded(label, 200)?;
@@ -238,17 +254,25 @@ impl Vault {
             typesafe_requests: requests,
         })
     }
-    /// The batch an item arrived with most recently, if any.
-    pub fn item_batch(&self, item: u64) -> Result<Option<String>> {
-        Ok(self.db.query_row("SELECT v.batch_id FROM intake_envelope v JOIN envelope_source es ON es.envelope_id=v.id JOIN collection_item i ON i.source_id=es.source_id WHERE i.local_id=? AND v.batch_id IS NOT NULL ORDER BY v.received_at DESC LIMIT 1",[sql_id(item)?],|r|r.get(0)).optional()?)
+    /// Imports whose OpenAI allowance is used up and that stopped at least one of
+    /// their files, newest first. Read from the vault, so an allowance stop stays
+    /// actionable after a restart or a later import.
+    pub fn exhausted_import_batches(&self) -> Result<Vec<ExhaustedBatch>> {
+        Ok(self.db.prepare(&format!("{STOPPED_AT_IMPORT_ALLOWANCE} SELECT b.id,b.label,b.openai_calls,b.openai_allowance,count(DISTINCT s.source_id) FROM import_batch b JOIN stopped s ON s.batch_id=b.id WHERE b.openai_calls>=b.openai_allowance GROUP BY b.id ORDER BY b.created_at DESC"))?
+            .query_map([crate::import_recovery::IMPORT_ALLOWANCE_REACHED], |r| {
+                Ok(ExhaustedBatch {
+                    id: r.get(0)?,
+                    label: r.get(1)?,
+                    openai_calls: r.get(2)?,
+                    openai_allowance: r.get(3)?,
+                    stopped: r.get::<_, i64>(4)? as usize,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?)
     }
-    /// Reserves one OpenAI reader call against the batch allowance. Every reader
-    /// and audit reservation of a file that arrived with a batch does this.
-    pub fn reserve_batch_openai_call(&mut self, batch: &str) -> Result<bool> {
-        charge_batch_openai_call(&self.db, batch)
-    }
-    /// Allows more OpenAI calls for a batch. Its files that stopped at an allowance
-    /// are queued again, so reading continues where it stopped.
+    /// Allows more OpenAI calls for a batch. Its files that stopped at its
+    /// allowance are queued again, so reading continues where it stopped. A file
+    /// stopped at its own allowance keeps waiting for that file's extension.
     pub fn extend_batch_allowance(&mut self, batch: &str) -> Result<()> {
         let tx = self.db.transaction()?;
         tx.execute(
@@ -256,8 +280,8 @@ impl Vault {
             params![DEFAULT_BATCH_OPENAI_ALLOWANCE, batch],
         )?;
         tx.execute(
-            "UPDATE document_evaluation SET state='queued',error_message=NULL WHERE state='failed' AND source_id IN (SELECT es.source_id FROM intake_envelope v JOIN envelope_source es ON es.envelope_id=v.id WHERE v.batch_id=?) AND source_id IN (SELECT source_id FROM import_progress WHERE error_code='budget')",
-            [batch],
+            &format!("{STOPPED_AT_IMPORT_ALLOWANCE} UPDATE document_evaluation SET state='queued',error_message=NULL WHERE state='failed' AND source_id IN (SELECT source_id FROM stopped WHERE batch_id=?2)"),
+            params![crate::import_recovery::IMPORT_ALLOWANCE_REACHED, batch],
         )?;
         tx.commit()?;
         Ok(())
@@ -352,10 +376,13 @@ mod tests {
         assert_eq!(first.item, second.item);
         let progress = v.batch_progress(&batch).unwrap();
         assert_eq!((progress.files, progress.duplicates), (1, 1));
+        // A file's usage names the import it arrived with and that import's allowance.
+        let allowance = v.import_usage(first.item).unwrap().batch.unwrap();
         assert_eq!(
-            v.item_batch(first.item).unwrap().as_deref(),
-            Some(batch.as_str())
+            (allowance.id.as_str(), allowance.openai_calls),
+            (batch.as_str(), 0)
         );
+        assert_eq!(allowance.openai_allowance, DEFAULT_BATCH_OPENAI_ALLOWANCE);
         // Bulk intake queues behind interactive drops.
         let drop = t.path().join("drop.txt");
         std::fs::write(&drop, "SYNTHETIC dropped").unwrap();
@@ -363,15 +390,23 @@ mod tests {
             .import_envelope_file(&drop, SourceKind::Drop, None)
             .unwrap();
         assert_eq!(v.next_automatic_document().unwrap(), Some(dropped.item));
-        assert!(v.reserve_batch_openai_call(&batch).unwrap());
+        assert!(v.import_usage(dropped.item).unwrap().batch.is_none());
+        assert!(charge_batch_openai_call(&v.db, &batch).unwrap());
         v.db.execute(
             "UPDATE import_batch SET openai_allowance=1 WHERE id=?",
             [&batch],
         )
         .unwrap();
-        assert!(!v.reserve_batch_openai_call(&batch).unwrap());
+        assert!(!charge_batch_openai_call(&v.db, &batch).unwrap());
+        assert!(
+            v.import_usage(first.item)
+                .unwrap()
+                .batch
+                .unwrap()
+                .exhausted()
+        );
         v.extend_batch_allowance(&batch).unwrap();
-        assert!(v.reserve_batch_openai_call(&batch).unwrap());
+        assert!(charge_batch_openai_call(&v.db, &batch).unwrap());
     }
 
     #[test]
@@ -416,7 +451,8 @@ mod tests {
     fn reader_calls_are_bounded_by_the_import_allowance() {
         use crate::{ImportErrorKind, ImportFailure, ImportProvider};
         let t = tempfile::tempdir().unwrap();
-        let mut v = Vault::create(&t.path().join("vault"), "synthetic-intake-password").unwrap();
+        let root = t.path().join("vault");
+        let mut v = Vault::create(&root, "synthetic-intake-password").unwrap();
         // New vaults start with automatic analysis off; these tests exercise the queue.
         v.set_automatic_evaluation(true).unwrap();
         let file = t.path().join("letter.txt");
@@ -442,10 +478,11 @@ mod tests {
         let refused = v
             .reserve_import_request(&input, ImportProvider::OpenAi)
             .unwrap_err();
-        // Every reservation path reports it as an allowance stop, not a broken source.
+        // Every reservation path reports it as the import's allowance stop, not the
+        // file's and not a broken source.
         assert_eq!(
             ImportFailure::refused_reservation(&refused).kind,
-            ImportErrorKind::Budget
+            ImportErrorKind::BatchBudget
         );
         let refused = refused.to_string();
         assert!(refused.contains("import") && refused.contains("allowance"));
@@ -478,14 +515,35 @@ mod tests {
             .unwrap();
         assert_eq!(tokens, 100);
 
-        // The file is left not read; extending the import allowance queues it again.
-        let failure = ImportFailure::new(ImportProvider::Local, ImportErrorKind::Budget, refused);
+        // The file is left not read. Its stop names the import that refused the
+        // call, and that import is listed as used up, also after a restart.
+        let failure =
+            ImportFailure::new(ImportProvider::Local, ImportErrorKind::BatchBudget, refused);
         v.record_import_failure(item, "a", &failure).unwrap();
         v.fail_extraction(&input.run_id).unwrap();
         v.finish_import_evaluation(item, "a", Some(&failure.message), None)
             .unwrap();
+        drop(v);
+        let mut v = Vault::unlock(&root, "synthetic-intake-password").unwrap();
         assert_eq!(v.next_automatic_document().unwrap(), None);
+        let job = v
+            .import_jobs()
+            .unwrap()
+            .into_iter()
+            .find(|j| j.item == item)
+            .unwrap();
+        assert_eq!(job.failure.unwrap().kind, ImportErrorKind::BatchBudget);
+        let gate = job.usage.batch.unwrap();
+        assert_eq!((gate.id.as_str(), gate.exhausted()), (batch.as_str(), true));
+        let stopped = v.exhausted_import_batches().unwrap();
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(
+            (stopped[0].id.as_str(), stopped[0].stopped),
+            (batch.as_str(), 1)
+        );
+        // Extending that import queues the file again and lets its next call pass.
         v.extend_batch_allowance(&batch).unwrap();
+        assert!(v.exhausted_import_batches().unwrap().is_empty());
         assert_eq!(v.next_automatic_document().unwrap(), Some(item));
         assert!(v.begin_evaluation(item, true).unwrap());
         v.begin_import_progress(item, "b").unwrap();
@@ -493,5 +551,90 @@ mod tests {
         v.reserve_import_request(&input, ImportProvider::OpenAi)
             .unwrap();
         assert_eq!(v.batch_progress(&batch).unwrap().openai_calls, 2);
+    }
+
+    #[test]
+    fn an_exhausted_import_stops_its_files_before_any_paid_call() {
+        use crate::{ImportErrorKind, ImportFailure, ImportProvider};
+        let t = tempfile::tempdir().unwrap();
+        let mut v = Vault::create(&t.path().join("vault"), "synthetic-intake-password").unwrap();
+        v.set_automatic_evaluation(true).unwrap();
+        let batch = v.begin_import_batch("Setup dump").unwrap();
+        let mut items = Vec::new();
+        for name in ["waiting.txt", "own-limit.txt", "earlier.txt"] {
+            let file = t.path().join(name);
+            std::fs::write(&file, format!("SYNTHETIC {name}")).unwrap();
+            let outcome = v
+                .import_envelope_file(&file, SourceKind::Folder, Some(&batch))
+                .unwrap();
+            items.push(outcome.item);
+        }
+        let loose = t.path().join("loose.txt");
+        std::fs::write(&loose, "SYNTHETIC loose").unwrap();
+        let loose = v
+            .import_envelope_file(&loose, SourceKind::Drop, None)
+            .unwrap()
+            .item;
+        let (waiting, own_limit, earlier) = (items[0], items[1], items[2]);
+        assert!(v.ensure_batch_allowance(waiting).is_ok());
+        // Other files of the import used its last OpenAI call.
+        v.db.execute(
+            "UPDATE import_batch SET openai_allowance=1,openai_calls=1 WHERE id=?",
+            [&batch],
+        )
+        .unwrap();
+        let before = v.batch_progress(&batch).unwrap();
+        let refused = v.ensure_batch_allowance(waiting).unwrap_err();
+        let failure = ImportFailure::refused_reservation(&refused);
+        assert_eq!(
+            (failure.provider, failure.kind),
+            (ImportProvider::Local, ImportErrorKind::BatchBudget)
+        );
+        // The check reserves and charges nothing, to the file or to the import.
+        let usage = v.import_usage(waiting).unwrap();
+        assert_eq!((usage.openai_calls, usage.typesafe_calls), (0, 0));
+        assert_eq!(v.batch_progress(&batch).unwrap(), before);
+        // A file that came without an import is never stopped by it.
+        assert!(v.ensure_batch_allowance(loose).is_ok());
+
+        // One file stops at the import's allowance, another at its own. A third
+        // stopped at the import's allowance before such stops had their own kind.
+        let own = ImportFailure::new(
+            ImportProvider::Local,
+            ImportErrorKind::Budget,
+            "SYNTHETIC file allowance",
+        );
+        let untyped = ImportFailure::new(
+            ImportProvider::Local,
+            ImportErrorKind::Budget,
+            crate::import_recovery::IMPORT_ALLOWANCE_REACHED,
+        );
+        for (item, run, stop) in [
+            (waiting, "w", &failure),
+            (own_limit, "o", &own),
+            (earlier, "e", &untyped),
+        ] {
+            v.begin_evaluation(item, false).unwrap();
+            v.begin_import_progress(item, run).unwrap();
+            v.record_import_failure(item, run, stop).unwrap();
+            v.finish_import_evaluation(item, run, Some(&stop.message), None)
+                .unwrap();
+        }
+        assert_eq!(v.exhausted_import_batches().unwrap()[0].stopped, 2);
+        // Extending the import resumes only the file it stopped; the file at its
+        // own limit keeps its own "allow more" action.
+        v.extend_batch_allowance(&batch).unwrap();
+        assert!(v.ensure_batch_allowance(waiting).is_ok());
+        let state = |v: &Vault, item: u64| {
+            v.import_jobs()
+                .unwrap()
+                .into_iter()
+                .find(|j| j.item == item)
+                .unwrap()
+                .state
+        };
+        assert_eq!(state(&v, waiting), "queued");
+        assert_eq!(state(&v, earlier), "queued");
+        assert_eq!(state(&v, own_limit), "failed");
     }
 }

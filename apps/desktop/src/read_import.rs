@@ -27,6 +27,8 @@ pub(super) struct ReadRun {
     pub outcome: me_core::ReadOutcome,
 }
 
+const INACTIVE: &str = "This import attempt is no longer active.";
+
 fn vault_call<T>(
     session: &Arc<Mutex<Option<Vault>>>,
     f: impl FnOnce(&mut Vault) -> me_core::Result<T>,
@@ -83,6 +85,8 @@ impl me_agent::typesafe::Decisions for Metered<'_> {
     }
 }
 
+/// Records a stage boundary. `Err` when the progress cannot be saved or the
+/// attempt is no longer active, so no further paid step starts for it.
 fn step(
     tx: &Sender<Progress>,
     session: &Arc<Mutex<Option<Vault>>>,
@@ -90,9 +94,9 @@ fn step(
     run: &str,
     stage: ImportStage,
     done: bool,
-) {
+) -> Result<(), String> {
     let (current, total) = (u32::from(done), 1);
-    let _ = vault_call(session, |v| {
+    let saved = vault_call(session, |v| {
         v.update_import_progress(item, run, stage, current, total)
     });
     let _ = tx.send(Progress::Step {
@@ -101,6 +105,11 @@ fn step(
         total,
     });
     let _ = tx.send(Progress::Stage(stage));
+    match saved {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(INACTIVE.into()),
+        Err(e) => Err(e),
+    }
 }
 
 /// One import attempt: where its progress, usage and failures are recorded.
@@ -115,15 +124,34 @@ struct Attempt<'a> {
     failure_recorded: Cell<bool>,
 }
 impl Attempt<'_> {
-    /// Records a typed provider failure and returns its message.
+    /// Records a typed failure and returns its message. A failure the vault did
+    /// not take (it is unavailable, or the attempt is no longer active) is noted
+    /// in diagnostics; the attempt stops either way.
     fn fail(&self, failure: ImportFailure) -> String {
         self.failure_recorded.set(true);
-        let _ = vault_call(self.session, |v| {
+        let recorded = vault_call(self.session, |v| {
             v.record_import_failure(self.item, self.run, &failure)
         });
+        if !matches!(recorded, Ok(true)) {
+            record(
+                "read.failure_unrecorded",
+                &[
+                    F::Count("item", self.item),
+                    F::Label("kind", failure.kind.key()),
+                ],
+            );
+        }
         let message = failure.message.clone();
         let _ = self.tx.send(Progress::Failure(failure));
         message
+    }
+
+    /// Stops the file before a paid step when the import it arrived with has no
+    /// OpenAI calls left: the same typed stop a refused reservation gives, without
+    /// reserving or sending anything.
+    fn import_allowance_left(&self) -> Result<(), String> {
+        super::ai_ui::reserve_paid_call(self.session, |v| v.ensure_batch_allowance(self.item))
+            .map_err(|f| self.fail(f))
     }
 
     /// Forwards reader progress into the vault and the UI channel; a failed write
@@ -155,11 +183,7 @@ impl Attempt<'_> {
                 })?,
                 _ => true,
             };
-            if active {
-                Ok(())
-            } else {
-                Err("This import attempt is no longer active.".into())
-            }
+            if active { Ok(()) } else { Err(INACTIVE.into()) }
         })();
         if let Err(e) = saved {
             *failed = Some(e);
@@ -196,8 +220,7 @@ pub(super) fn run_read(
         } else {
             Kind::Storage
         };
-        let failure = ImportFailure::new(ImportProvider::Local, kind, e.clone());
-        let _ = vault_call(session, |v| v.record_import_failure(item, run, &failure));
+        attempt.fail(ImportFailure::new(ImportProvider::Local, kind, e.clone()));
     }
     result
 }
@@ -237,9 +260,11 @@ fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
     };
     // Every paid call is counted when it is reserved: against the file and, for a
     // file that came with an import batch, the batch (see `reserve_paid_call`).
+    // A file whose import has no OpenAI calls left stops before any of them.
 
     // 2. Classify (cached by content), so every read document is filed.
-    step(tx, session, item, run, ImportStage::Interpreting, false);
+    step(tx, session, item, run, ImportStage::Interpreting, false)?;
+    a.import_allowance_left()?;
     let classify_version = pipeline::classify_version(&anchors);
     let cached = vault_call(session, |v| {
         v.stage_output(&fingerprint, pipeline::CLASSIFY_STAGE, &classify_version)
@@ -281,7 +306,7 @@ fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
             classification.usage.models.first().map(String::as_str),
         )
     })?;
-    step(tx, session, item, run, ImportStage::Interpreting, true);
+    step(tx, session, item, run, ImportStage::Interpreting, true)?;
     // Only an eager registry type fills the profile; every type is read in full.
     let kind = classification.eager_type();
     let doc_label = classification
@@ -293,6 +318,8 @@ fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
         me_agent::guides::reading_guide(&classification.family, classification.doc_type.as_deref());
 
     // 3–8 run inside one extraction run: any failure leaves it failed and resumable.
+    // Another file of the same import may have used its last call meanwhile.
+    a.import_allowance_left()?;
     let input = vault_call(session, |v| {
         v.prepare_extraction(item, me_agent::codex::INBOX_MODEL)
     })?;
@@ -326,6 +353,7 @@ fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
                 "Checking {} value(s) the first pass did not quote",
                 open.len()
             )));
+            a.import_allowance_left()?;
             let previous = me_core::ExtractionOutput {
                 facts: facts.clone(),
             };
@@ -360,7 +388,7 @@ fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
         // 6. TypeSafe verification. A failure stores the facts as unverified without
         // touching the source's profile values; the run stays resumable. A stop
         // stores nothing.
-        step(tx, session, item, run, ImportStage::Verifying, false);
+        step(tx, session, item, run, ImportStage::Verifying, false)?;
         let named = named_owners(&candidates);
         let subject = classification
             .subject
@@ -443,7 +471,10 @@ fn read(a: &Attempt<'_>, home: &std::path::Path) -> Result<ReadRun, String> {
         };
         let outcome = vault_call(session, |v| v.apply_read(&source, &read))?;
         vault_call(session, |v| v.complete_read_run(&input.run_id))?;
-        step(tx, session, item, run, ImportStage::Verifying, true);
+        // The read is stored; a lost progress mark does not undo it.
+        if step(tx, session, item, run, ImportStage::Verifying, true).is_err() {
+            record("read.progress_unsaved", &[F::Count("item", item)]);
+        }
         record(
             "read.stored",
             &[

@@ -150,6 +150,8 @@ pub struct MeApp {
     import_jobs: Vec<me_core::ImportJob>,
     expanded_imports: BTreeSet<u64>,
     import_pause: Option<String>,
+    /// Imports whose OpenAI allowance stopped some of their files, from the vault.
+    import_batch_stops: Vec<me_core::ExhaustedBatch>,
     import_refresh: bool,
     import_refresh_pending: bool,
     pending_imports: Vec<PendingFile>,
@@ -287,6 +289,7 @@ impl MeApp {
             import_jobs: Vec::new(),
             expanded_imports: BTreeSet::new(),
             import_pause: None,
+            import_batch_stops: Vec::new(),
             import_refresh: false,
             import_refresh_pending: false,
             pending_imports: Vec::new(),

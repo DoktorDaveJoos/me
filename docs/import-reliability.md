@@ -91,13 +91,23 @@ The UI uses a bounded explanation and a recovery action.
 
 ## Spending controls and their limits
 
-Default **per-file lifetime allowance**: 12 OpenAI model calls, 24 TypeSafe HTTP
-requests and 180,000 reported input plus output tokens. Reservations are stored
+Default **per-file lifetime allowance**: 12 OpenAI model calls, 64 TypeSafe HTTP
+requests and 180,000 reported input plus output tokens. A file whose stored
+allowance predates these defaults is raised to them; an extended allowance is
+never lowered. Reservations are stored
 before dispatch and count even when a timeout or crash makes the outcome unknown.
 A retry, restart or reanalysis does not reset them. Usage events are absolute per
 request and deduplicated. Missing usage remains visibly unreported rather than
 being treated as zero spend. Increasing the allowance requires the separately
 labeled action on that file; it adds another 12/24 calls and 180,000 tokens.
+
+Files added by a folder import also share that **import's OpenAI allowance**
+(200 calls, extendable by 200). Once it is used up, the import's remaining files
+stop before any paid call, including Classify, and are recorded as stopped at
+the import's allowance rather than the file's. Imports shows a notice for each
+such import, read from the vault so it survives a restart, and the stopped
+file offers "Allow more OpenAI calls for this import and resume". Extending the
+import queues only the files it stopped.
 
 At most two document workers run. Each section normally uses two TypeSafe calls
 and one OpenAI call, with at most one additional extraction audit. New sections

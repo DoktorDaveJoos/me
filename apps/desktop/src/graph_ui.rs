@@ -463,8 +463,6 @@ impl MeApp {
                 }
                 this.refresh_graph(cx);
                 this.refresh_search(cx);
-                // An allowance extension queues its stopped documents again.
-                this.kick_auto_queue(cx);
                 cx.notify();
             });
         })
@@ -1013,63 +1011,170 @@ impl MeApp {
             },
         )
         .size_full();
-        div().flex().flex_col().gap(px(space::MD))
-            .child(div().flex().items_center().justify_between().gap(px(space::LG))
-                .child(div().type_style(Type::Section).child("Your world is growing"))
-                .child(div().type_style(Type::Caption).font_family(font::MONO).text_color(rgb(MUTED)).child(match fraction {
-                    Some(f) => format!("{done} / {total} files · {:.0}%", f * 100.),
-                    None => format!("{} places known", map.nodes.len()),
-                })))
-            .when(total > 0 || working, |s| s.child(progress_bar(fraction, ACCENT, self.active_imports.values().next().map_or(0., |a| a.started.elapsed().as_secs_f32() / 3.))))
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::MD))
             .child(
-                div().relative().w_full().h(px(sky::HEIGHT)).rounded(px(radius::STANDARD)).border_1().border_color(rgb(LINE)).bg(rgb(BG)).overflow_hidden()
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::LG))
+                    .child(
+                        div()
+                            .type_style(Type::Section)
+                            .child("Your world is growing"),
+                    )
+                    .child(
+                        div()
+                            .type_style(Type::Caption)
+                            .font_family(font::MONO)
+                            .text_color(rgb(MUTED))
+                            .child(match fraction {
+                                Some(f) => format!("{done} / {total} files · {:.0}%", f * 100.),
+                                None => format!("{} places known", map.nodes.len()),
+                            }),
+                    ),
+            )
+            .when(total > 0 || working, |s| {
+                s.child(progress_bar(
+                    fraction,
+                    ACCENT,
+                    self.active_imports
+                        .values()
+                        .next()
+                        .map_or(0., |a| a.started.elapsed().as_secs_f32() / 3.),
+                ))
+            })
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(sky::HEIGHT))
+                    .rounded(px(radius::STANDARD))
+                    .border_1()
+                    .border_color(rgb(LINE))
+                    .bg(rgb(BG))
+                    .overflow_hidden()
                     .child(div().absolute().inset_0().child(sky))
                     // A zero-size anchor at the exact center; cells are placed around it.
-                    .child(div().absolute().inset_0().flex().items_center().justify_center().child(
-                        div().relative().size_0().children(labels.into_iter().map(|(x, y, label, check, anchor)| {
-                            div().absolute().left(px(x - sky::LABEL_WIDTH / 2.)).top(px(y - sky::LABEL_HEIGHT / 2.))
-                                .w(px(sky::LABEL_WIDTH)).h(px(sky::LABEL_HEIGHT)).flex().items_center().justify_center().overflow_hidden()
-                                .child({
-                                    let (first, second) = two_lines(&label);
-                                    div().w_full().flex().flex_col().items_center().type_style(Type::Caption)
-                                        .text_color(rgb(if check { WARNING } else if anchor { ACCENT } else { INK }))
-                                        .when(anchor, |s| s.font_weight(font::EMPHASIS))
-                                        .child(div().max_w_full().truncate().child(first))
-                                        .when_some(second, |s, second| s.child(div().max_w_full().truncate().child(second)))
-                                })
-                        })),
-                    )),
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(div().relative().size_0().children(labels.into_iter().map(
+                                |(x, y, label, check, anchor)| {
+                                    div()
+                                        .absolute()
+                                        .left(px(x - sky::LABEL_WIDTH / 2.))
+                                        .top(px(y - sky::LABEL_HEIGHT / 2.))
+                                        .w(px(sky::LABEL_WIDTH))
+                                        .h(px(sky::LABEL_HEIGHT))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .overflow_hidden()
+                                        .child({
+                                            let (first, second) = two_lines(&label);
+                                            div()
+                                                .w_full()
+                                                .flex()
+                                                .flex_col()
+                                                .items_center()
+                                                .type_style(Type::Caption)
+                                                .text_color(rgb(if check {
+                                                    WARNING
+                                                } else if anchor {
+                                                    ACCENT
+                                                } else {
+                                                    INK
+                                                }))
+                                                .when(anchor, |s| s.font_weight(font::EMPHASIS))
+                                                .child(div().max_w_full().truncate().child(first))
+                                                .when_some(second, |s, second| {
+                                                    s.child(
+                                                        div().max_w_full().truncate().child(second),
+                                                    )
+                                                })
+                                        })
+                                },
+                            ))),
+                    ),
             )
-            .child(div().type_style(Type::Small).text_color(rgb(MUTED)).child(match (&map.latest, dumping) {
-                (Some(latest), _) => format!("Latest: {latest}"),
-                (None, true) => "Saving your originals…".into(),
-                (None, false) => "Add documents and ME. starts connecting the dots.".into(),
-            }))
-            .when(!map.clusters.is_empty(), |s| s.child(div().flex().flex_wrap().gap(px(space::SM)).children(map.clusters.iter().map(|(label, n)| {
-                div().h(px(layout::CONTROL_COMPACT)).px(px(space::MD)).rounded(px(radius::STANDARD)).border_1().border_color(rgb(LINE))
-                    .bg(rgb(SURFACE)).flex().items_center().gap(px(space::SM)).type_style(Type::Small)
-                    .child(label.clone()).child(div().font_family(font::MONO).text_color(rgb(MUTED)).child(n.to_string()))
-            }))))
-            .when(self.graph.dump_cancel.is_some() || self.graph.dump_saved + self.graph.dump_duplicates + self.graph.dump_failed > 0, |s| s.child(
-                div().flex().items_center().gap(px(space::LG)).type_style(Type::Caption).text_color(rgb(MUTED))
-                    .child(format!("{} saved", self.graph.dump_saved))
-                    .child(format!("{} duplicates skipped", self.graph.dump_duplicates))
-                    .when(self.graph.dump_failed > 0, |s| s.child(div().text_color(rgb(DANGER)).child(format!("{} not imported", self.graph.dump_failed))))
-                    .when(dumping, |s| s.child(div().id("dump-stop").text_color(rgb(ACCENT)).cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(c) = &this.graph.dump_cancel { c.store(true, Ordering::SeqCst); }
-                            cx.notify();
-                        })).child("Stop adding")))))
-            .when_some(batch.filter(|b| b.openai_calls >= b.openai_allowance && b.openai_allowance > 0), |s, b| {
-                let id = b.id.clone();
-                s.child(div().p(px(space::MD)).rounded(px(radius::STANDARD)).bg(rgb(WARNING_SURFACE)).flex().flex_col().gap(px(space::XS))
-                    .child(div().type_style(Type::Small).text_color(rgb(WARNING)).child("OpenAI allowance for this import is used up. Its remaining documents wait unread until you allow more calls."))
-                    .child(div().id("batch-extend").type_style(Type::Small).text_color(rgb(ACCENT)).cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let id = id.clone();
-                            this.decide(format!("extend-{id}"), cx, move |v| v.extend_batch_allowance(&id));
-                        })).child("Allow more OpenAI calls for this import")))
+            .child(div().type_style(Type::Small).text_color(rgb(MUTED)).child(
+                match (&map.latest, dumping) {
+                    (Some(latest), _) => format!("Latest: {latest}"),
+                    (None, true) => "Saving your originals…".into(),
+                    (None, false) => "Add documents and ME. starts connecting the dots.".into(),
+                },
+            ))
+            .when(!map.clusters.is_empty(), |s| {
+                s.child(div().flex().flex_wrap().gap(px(space::SM)).children(
+                    map.clusters.iter().map(|(label, n)| {
+                        div()
+                            .h(px(layout::CONTROL_COMPACT))
+                            .px(px(space::MD))
+                            .rounded(px(radius::STANDARD))
+                            .border_1()
+                            .border_color(rgb(LINE))
+                            .bg(rgb(SURFACE))
+                            .flex()
+                            .items_center()
+                            .gap(px(space::SM))
+                            .type_style(Type::Small)
+                            .child(label.clone())
+                            .child(
+                                div()
+                                    .font_family(font::MONO)
+                                    .text_color(rgb(MUTED))
+                                    .child(n.to_string()),
+                            )
+                    }),
+                ))
             })
+            .when(
+                self.graph.dump_cancel.is_some()
+                    || self.graph.dump_saved + self.graph.dump_duplicates + self.graph.dump_failed
+                        > 0,
+                |s| {
+                    s.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::LG))
+                            .type_style(Type::Caption)
+                            .text_color(rgb(MUTED))
+                            .child(format!("{} saved", self.graph.dump_saved))
+                            .child(format!("{} duplicates skipped", self.graph.dump_duplicates))
+                            .when(self.graph.dump_failed > 0, |s| {
+                                s.child(
+                                    div()
+                                        .text_color(rgb(DANGER))
+                                        .child(format!("{} not imported", self.graph.dump_failed)),
+                                )
+                            })
+                            .when(dumping, |s| {
+                                s.child(
+                                    div()
+                                        .id("dump-stop")
+                                        .text_color(rgb(ACCENT))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(c) = &this.graph.dump_cancel {
+                                                c.store(true, Ordering::SeqCst);
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child("Stop adding"),
+                                )
+                            }),
+                    )
+                },
+            )
             .into_any_element()
     }
 

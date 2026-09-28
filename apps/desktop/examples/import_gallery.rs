@@ -1,7 +1,8 @@
 //! Synthetic import UI harness; no user vault or provider connection is used.
 //! `ME_VAULT_DIR=/tmp/<fresh>/vault ./scripts/cargo run -p me-app --example
 //! import_gallery -- <mode> [small] [expanded] [scroll=<px>]`; modes: confirm, progress,
-//! failure, budget, complete, read (a document detail after a full read).
+//! failure, budget, batch (stopped at its import's allowance), complete, read (a
+//! document detail after a full read).
 #![allow(dead_code)]
 #[path = "../src/assets.rs"]
 mod assets;
@@ -96,7 +97,7 @@ mod shell {
                 app.active_imports.insert(job.item, active);
             }
         }
-        if mode == "failure" || mode == "budget" {
+        if mode == "failure" || mode == "budget" || mode == "batch" {
             let job = &mut app.import_jobs[0];
             job.state = "failed".into();
             job.stage = me_core::ImportStage::Extracting;
@@ -127,25 +128,39 @@ mod shell {
             job.usage.input_tokens = 19560;
             job.usage.output_tokens = 2940;
             job.usage.unreported_calls = 1;
-            let message = if mode == "budget" {
-                "This file reached its analysis allowance. Saved steps are kept. Review usage before allowing more calls."
-            } else {
-                "OpenAI usage limit reached. Imports are paused. Resume after your account allowance resets."
+            let (provider, kind, message) = match mode.as_str() {
+                "budget" => (
+                    me_core::ImportProvider::Local,
+                    me_core::ImportErrorKind::Budget,
+                    "This file reached its analysis allowance. Saved steps are kept. Review usage before allowing more calls.",
+                ),
+                "batch" => (
+                    me_core::ImportProvider::Local,
+                    me_core::ImportErrorKind::BatchBudget,
+                    "This import reached its OpenAI allowance. Saved steps are kept. Allow more OpenAI calls for this import to continue.",
+                ),
+                _ => (
+                    me_core::ImportProvider::OpenAi,
+                    me_core::ImportErrorKind::Quota,
+                    "OpenAI usage limit reached. Imports are paused. Resume after your account allowance resets.",
+                ),
             };
             job.error = Some(message.into());
-            job.failure = Some(me_core::ImportFailure::new(
-                if mode == "budget" {
-                    me_core::ImportProvider::Local
-                } else {
-                    me_core::ImportProvider::OpenAi
-                },
-                if mode == "budget" {
-                    me_core::ImportErrorKind::Budget
-                } else {
-                    me_core::ImportErrorKind::Quota
-                },
-                message,
-            ));
+            job.failure = Some(me_core::ImportFailure::new(provider, kind, message));
+            if mode == "batch" {
+                job.usage.batch = Some(me_core::BatchAllowance {
+                    id: "synthetic-import".into(),
+                    openai_calls: 200,
+                    openai_allowance: 200,
+                });
+                app.import_batch_stops = vec![me_core::ExhaustedBatch {
+                    id: "synthetic-import".into(),
+                    label: "Folder import".into(),
+                    openai_calls: 200,
+                    openai_allowance: 200,
+                    stopped: 3,
+                }];
+            }
             if mode == "failure" {
                 app.import_pause = Some(message.into());
             }

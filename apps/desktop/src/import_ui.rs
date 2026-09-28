@@ -291,7 +291,11 @@ impl MeApp {
         let task = cx.background_executor().spawn(async move {
             let guard = session.lock().map_err(|_| me_core::Error::Format)?;
             let vault = guard.as_ref().ok_or(me_core::Error::Format)?;
-            Ok::<_, me_core::Error>((vault.import_jobs()?, vault.import_pause_reason()?))
+            Ok::<_, me_core::Error>((
+                vault.import_jobs()?,
+                vault.import_pause_reason()?,
+                vault.exhausted_import_batches()?,
+            ))
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -301,11 +305,12 @@ impl MeApp {
                 }
                 this.import_refresh = false;
                 match result {
-                    Ok((jobs, pause)) => {
+                    Ok((jobs, pause, stops)) => {
                         this.expanded_imports
                             .retain(|item| jobs.iter().any(|job| job.item == *item));
                         this.import_jobs = jobs;
                         this.import_pause = pause;
+                        this.import_batch_stops = stops;
                     }
                     Err(error) => this.error = Some(error.to_string()),
                 }
@@ -371,6 +376,14 @@ impl MeApp {
                 .when_some(self.import_pause.clone(),|s,reason|s.child(div().p(px(space::LG)).rounded(px(radius::STANDARD)).bg(rgb(WARNING_SURFACE)).flex().flex_col().gap(px(space::SM))
                     .child(div().type_style(Type::Body).text_color(rgb(WARNING)).child(reason))
                     .child(div().id("resume-import-queue").type_style(Type::Small).text_color(rgb(ACCENT)).cursor_pointer().on_click(cx.listener(|this,_,_,cx|this.resume_import_queue(cx))).child("I have checked the provider · resume queue"))))
+                .children(self.import_batch_stops.iter().map(|stop| {
+                    let batch = stop.id.clone();
+                    div().p(px(space::LG)).rounded(px(radius::STANDARD)).bg(rgb(WARNING_SURFACE)).flex().flex_col().gap(px(space::SM))
+                        .child(div().type_style(Type::Body).text_color(rgb(WARNING)).child("OpenAI allowance for this import is used up. Its remaining documents wait unread until you allow more calls."))
+                        .child(div().type_style(Type::Caption).text_color(rgb(MUTED)).child(format!("OpenAI {} / {} calls · {} {} waiting",stop.openai_calls,stop.openai_allowance,stop.stopped,if stop.stopped == 1 {"file"} else {"files"})))
+                        .child(div().id(SharedString::from(format!("extend-import-{}",stop.id))).type_style(Type::Small).text_color(rgb(ACCENT)).cursor_pointer()
+                            .on_click(cx.listener(move |this,_,_,cx|this.extend_batch(batch.clone(),None,cx))).child("Allow more OpenAI calls for this import"))
+                }))
                 .child(div().flex().gap(px(space::LG)).type_style(Type::Small).text_color(rgb(MUTED))
                     .child(format!("{active} processing"))
                     .child(format!("{queued} queued"))
@@ -502,11 +515,16 @@ impl MeApp {
             .when(running,|s|s.child(div().id(SharedString::from(format!("stop-import-{item}"))).type_style(Type::Small).text_color(rgb(INK)).cursor_pointer()
                 .on_click(cx.listener(move |this,_,_,cx|{if let Some(a)=this.active_imports.get_mut(&item) {a.cancel.store(true,Ordering::SeqCst);a.message="Stopping; keeping completed steps…".into();}cx.notify();})).child("Pause and keep progress")))
             .when(!running && job.processable && matches!(job.state.as_str(),"failed"|"manual"),|s|{
-                let allowance=job.usage.exhausted() || job.failure.as_ref().is_some_and(|f|f.kind==me_core::ImportErrorKind::Budget);
+                let action=resume_action(job);
                 let available=self.active_imports.len()<MAX_ACTIVE_IMPORTS && self.import_pause.is_none();
+                let label=if self.import_pause.is_some() {"Resume the queue above first".into()} else if !available {"Waiting for an available worker".into()} else {action.label()};
                 s.child(div().id(SharedString::from(format!("retry-import-{item}"))).type_style(Type::Small).text_color(rgb(if available {ACCENT}else{MUTED})).when(available,|s|s.cursor_pointer()
-                    .on_click(cx.listener(move |this,_,_,cx|{if allowance {this.extend_import(item,cx);}else{this.run_ai(item,cx);}})))
-                    .child(if self.import_pause.is_some() {"Resume the queue above first"} else if !available {"Waiting for an available worker"} else if allowance {"Allow 12 more OpenAI + 24 TypeSafe calls and resume"} else if failed {"Resume saved steps"} else {"Start analysis"}))
+                    .on_click(cx.listener(move |this,_,_,cx|match &action {
+                        ResumeAction::ExtendImport(batch)=>this.extend_batch(batch.clone(),Some(item),cx),
+                        ResumeAction::ExtendFile=>this.extend_import(item,cx),
+                        ResumeAction::Resume|ResumeAction::Start=>this.run_ai(item,cx),
+                    })))
+                    .child(label))
             }))
     }
     fn extend_import(&mut self, item: u64, cx: &mut Context<Self>) {
@@ -541,6 +559,47 @@ impl MeApp {
         })
         .detach();
     }
+    /// Allows more OpenAI calls for an import. The vault queues its stopped files
+    /// again; `resume` also starts that file now, as the user asked for it.
+    fn extend_batch(&mut self, batch: String, resume: Option<u64>, cx: &mut Context<Self>) {
+        if self.busy || resume.is_some_and(|item| self.active_imports.contains_key(&item)) {
+            return;
+        }
+        self.busy = true;
+        let session = self.session.clone();
+        let generation = self.generation;
+        let task = cx.background_executor().spawn(async move {
+            session
+                .lock()
+                .map_err(|_| me_core::Error::Format)?
+                .as_mut()
+                .ok_or(me_core::Error::Format)?
+                .extend_batch_allowance(&batch)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.busy = false;
+                match result {
+                    Ok(()) => {
+                        if let Some(item) = resume {
+                            this.run_ai(item, cx);
+                        }
+                    }
+                    Err(e) => this.error = Some(e.to_string()),
+                }
+                this.refresh_imports(cx);
+                this.refresh_graph(cx);
+                this.kick_auto_queue(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
     fn resume_import_queue(&mut self, cx: &mut Context<Self>) {
         let session = self.session.clone();
         let generation = self.generation;
@@ -573,6 +632,51 @@ impl MeApp {
     }
 }
 
+/// What the action under a stopped or waiting file does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ResumeAction {
+    /// The import the file arrived with has no OpenAI calls left: allow more for
+    /// that import (id), then resume the file.
+    ExtendImport(String),
+    /// The file's own allowance is used up.
+    ExtendFile,
+    Resume,
+    Start,
+}
+impl ResumeAction {
+    fn label(&self) -> String {
+        match self {
+            Self::ExtendImport(_) => "Allow more OpenAI calls for this import and resume".into(),
+            Self::ExtendFile => format!(
+                "Allow {} more OpenAI + {} TypeSafe calls and resume",
+                me_core::EXTEND_OPENAI_CALLS,
+                me_core::EXTEND_TYPESAFE_CALLS
+            ),
+            Self::Resume => "Resume saved steps".into(),
+            Self::Start => "Start analysis".into(),
+        }
+    }
+}
+/// Offers the allowance that stopped the file. An import stop is recognized by
+/// its kind, or, for a stop recorded before it had one, by a budget stop of a
+/// file that still has room while its import has none.
+fn resume_action(job: &ImportJob) -> ResumeAction {
+    use me_core::ImportErrorKind::{BatchBudget, Budget};
+    let stop = job.failure.as_ref().map(|f| f.kind);
+    match &job.usage.batch {
+        Some(import)
+            if import.exhausted()
+                && (stop == Some(BatchBudget)
+                    || (stop == Some(Budget) && !job.usage.exhausted())) =>
+        {
+            ResumeAction::ExtendImport(import.id.clone())
+        }
+        _ if job.usage.exhausted() || stop == Some(Budget) => ResumeAction::ExtendFile,
+        _ if job.state == "failed" => ResumeAction::Resume,
+        _ => ResumeAction::Start,
+    }
+}
+
 fn error_label(kind: me_core::ImportErrorKind) -> &'static str {
     use me_core::ImportErrorKind::*;
     match kind {
@@ -583,6 +687,7 @@ fn error_label(kind: me_core::ImportErrorKind) -> &'static str {
         Connection => "Connection interrupted",
         InvalidOutput => "Response needs attention",
         Budget => "Analysis allowance reached",
+        BatchBudget => "Import allowance reached",
         Cancelled => "Paused by you",
         Interrupted => "Interrupted",
         Storage => "Vault or processing error",
@@ -593,6 +698,89 @@ fn error_label(kind: me_core::ImportErrorKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use me_core::{
+        BatchAllowance, ImportErrorKind as K, ImportFailure, ImportProvider, ImportUsage,
+    };
+
+    fn job(state: &str, stop: Option<K>, usage: ImportUsage) -> ImportJob {
+        ImportJob {
+            item: 1,
+            title: "SYNTHETIC".into(),
+            state: state.into(),
+            stage: ImportStage::Extracting,
+            current: 0,
+            total: 0,
+            error: None,
+            warning: None,
+            processable: true,
+            proposals: 0,
+            questions: 0,
+            steps: [me_core::StepProgress::default(); 5],
+            usage,
+            failure: stop.map(|k| ImportFailure::new(ImportProvider::Local, k, "SYNTHETIC")),
+        }
+    }
+    fn from_import(openai_calls: i64) -> ImportUsage {
+        ImportUsage {
+            batch: Some(BatchAllowance {
+                id: "synthetic-import".into(),
+                openai_calls,
+                openai_allowance: 200,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_stopped_file_offers_the_allowance_that_stopped_it() {
+        let import = ResumeAction::ExtendImport("synthetic-import".into());
+        // Stopped at its import's allowance: allow more for that import.
+        assert_eq!(
+            resume_action(&job("failed", Some(K::BatchBudget), from_import(200))),
+            import
+        );
+        // The same stop recorded before it had its own kind: the file still has
+        // room, its import has none.
+        assert_eq!(
+            resume_action(&job("failed", Some(K::Budget), from_import(200))),
+            import
+        );
+        // Stopped at its own allowance, with or without an import.
+        let spent = ImportUsage {
+            openai_calls: me_core::FILE_OPENAI_CALLS,
+            ..from_import(200)
+        };
+        assert_eq!(
+            resume_action(&job("failed", Some(K::Budget), spent)),
+            ResumeAction::ExtendFile
+        );
+        assert_eq!(
+            resume_action(&job("failed", Some(K::Budget), ImportUsage::default())),
+            ResumeAction::ExtendFile
+        );
+        // The import has calls again (it was extended since): just resume.
+        assert_eq!(
+            resume_action(&job("failed", Some(K::BatchBudget), from_import(10))),
+            ResumeAction::Resume
+        );
+        assert_eq!(
+            resume_action(&job("failed", Some(K::Timeout), from_import(200))),
+            ResumeAction::Resume
+        );
+        assert_eq!(
+            resume_action(&job("manual", None, ImportUsage::default())),
+            ResumeAction::Start
+        );
+        assert_eq!(
+            import.label(),
+            "Allow more OpenAI calls for this import and resume"
+        );
+        assert_eq!(
+            ResumeAction::ExtendFile.label(),
+            "Allow 12 more OpenAI + 24 TypeSafe calls and resume"
+        );
+    }
+
     #[test]
     fn preflight_does_not_accept_empty_missing_or_directory_inputs() {
         let dir = tempfile::tempdir().unwrap();

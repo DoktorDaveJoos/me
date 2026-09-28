@@ -44,7 +44,10 @@ pub enum ImportErrorKind {
     Timeout,
     Connection,
     InvalidOutput,
+    /// The file's own allowance is used up.
     Budget,
+    /// The OpenAI allowance of the import the file arrived with is used up.
+    BatchBudget,
     Cancelled,
     Interrupted,
     Storage,
@@ -60,6 +63,7 @@ impl ImportErrorKind {
             Self::Connection => "connection",
             Self::InvalidOutput => "invalid_output",
             Self::Budget => "budget",
+            Self::BatchBudget => "batch_budget",
             Self::Cancelled => "cancelled",
             Self::Interrupted => "interrupted",
             Self::Storage => "storage",
@@ -75,6 +79,7 @@ impl ImportErrorKind {
             "connection" => Self::Connection,
             "invalid_output" => Self::InvalidOutput,
             "budget" => Self::Budget,
+            "batch_budget" => Self::BatchBudget,
             "cancelled" => Self::Cancelled,
             "interrupted" => Self::Interrupted,
             "unprocessable" => Self::Unprocessable,
@@ -103,16 +108,13 @@ impl ImportFailure {
             message: message.into(),
         }
     }
-    /// A paid call the vault refused to reserve: an allowance stop (the file's or
-    /// its import batch's) is a budget failure, a paused queue a quota failure and
-    /// anything else a storage failure.
+    /// A paid call the vault refused to reserve: the file's allowance stop is a
+    /// budget failure, its import batch's a batch budget failure, a paused queue a
+    /// quota failure and anything else a storage failure.
     pub fn refused_reservation(error: &Error) -> Self {
         let kind = match error {
-            Error::Validation(m)
-                if *m == FILE_ALLOWANCE_REACHED || *m == IMPORT_ALLOWANCE_REACHED =>
-            {
-                ImportErrorKind::Budget
-            }
+            Error::Validation(m) if *m == FILE_ALLOWANCE_REACHED => ImportErrorKind::Budget,
+            Error::Validation(m) if *m == IMPORT_ALLOWANCE_REACHED => ImportErrorKind::BatchBudget,
             Error::Validation(m) if *m == IMPORTS_PAUSED => ImportErrorKind::Quota,
             _ => ImportErrorKind::Storage,
         };
@@ -146,6 +148,21 @@ pub struct ImportUsage {
     pub output_tokens: u64,
     pub token_limit: u64,
     pub unreported_calls: u32,
+    /// The import the file arrived with most recently; its OpenAI allowance gates
+    /// the file's OpenAI calls too.
+    pub batch: Option<BatchAllowance>,
+}
+/// The OpenAI allowance of one import batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchAllowance {
+    pub id: String,
+    pub openai_calls: i64,
+    pub openai_allowance: i64,
+}
+impl BatchAllowance {
+    pub fn exhausted(&self) -> bool {
+        self.openai_calls >= self.openai_allowance
+    }
 }
 /// Default per-file allowance. A full read needs one Classify request, two TypeSafe
 /// requests per reader section and one verification request per 20 facts.
@@ -168,20 +185,23 @@ impl Default for ImportUsage {
             output_tokens: 0,
             token_limit: FILE_TOKENS,
             unreported_calls: 0,
+            batch: None,
         }
     }
 }
 
 const FILE_ALLOWANCE_REACHED: &str = "This file reached its analysis allowance. Saved steps are kept. Review usage before allowing more calls.";
-const IMPORT_ALLOWANCE_REACHED: &str = "This import reached its OpenAI allowance. Saved steps are kept. Allow more OpenAI calls for this import to continue.";
+pub(crate) const IMPORT_ALLOWANCE_REACHED: &str = "This import reached its OpenAI allowance. Saved steps are kept. Allow more OpenAI calls for this import to continue.";
 const IMPORTS_PAUSED: &str =
     "Imports are paused. Check the provider connection or quota before resuming.";
 
+/// A file's usage and effective allowance. Limits are never below the current
+/// defaults, so a row written with an earlier, lower default is not binding.
 fn usage_of(db: &Connection, source: &str) -> Result<ImportUsage> {
     let mut usage = db
         .query_row(
-            "SELECT openai_limit,typesafe_limit,token_limit FROM import_budget WHERE source_id=?",
-            [source],
+            "SELECT max(openai_limit,?),max(typesafe_limit,?),max(token_limit,?) FROM import_budget WHERE source_id=?",
+            params![FILE_OPENAI_CALLS, FILE_TYPESAFE_CALLS, FILE_TOKENS as i64, source],
             |r| {
                 Ok(ImportUsage {
                     openai_limit: r.get(0)?,
@@ -199,13 +219,29 @@ fn usage_of(db: &Connection, source: &str) -> Result<ImportUsage> {
     usage.input_tokens = row.2.max(0) as u64;
     usage.output_tokens = row.3.max(0) as u64;
     usage.unreported_calls = row.4;
+    usage.batch = match crate::intake::source_batch(db, source)? {
+        Some(id) => db
+            .query_row(
+                "SELECT openai_calls,openai_allowance FROM import_batch WHERE id=?",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .map(|(openai_calls, openai_allowance)| BatchAllowance {
+                id,
+                openai_calls,
+                openai_allowance,
+            }),
+        None => None,
+    };
     Ok(usage)
 }
 
-/// A file's budget row with the current default allowance.
+/// A file's budget row with at least the current default allowance. A row with
+/// an earlier, lower default is raised; an extended limit is never lowered.
 fn ensure_budget(db: &Connection, source: &str) -> Result<()> {
     db.execute(
-        "INSERT OR IGNORE INTO import_budget(source_id,openai_limit,typesafe_limit,token_limit) VALUES(?,?,?,?)",
+        "INSERT INTO import_budget(source_id,openai_limit,typesafe_limit,token_limit) VALUES(?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET openai_limit=max(openai_limit,excluded.openai_limit),typesafe_limit=max(typesafe_limit,excluded.typesafe_limit),token_limit=max(token_limit,excluded.token_limit)",
         params![source, FILE_OPENAI_CALLS, FILE_TYPESAFE_CALLS, FILE_TOKENS as i64],
     )?;
     Ok(())
@@ -335,6 +371,19 @@ impl Vault {
         tx.commit()?;
         Ok(id)
     }
+    /// Refuses to start a paid step of `item` when the import it arrived with has
+    /// no OpenAI calls left, with the same refusal a reservation would give.
+    /// Nothing is reserved or charged.
+    pub fn ensure_batch_allowance(&self, item: u64) -> Result<()> {
+        if self
+            .import_usage(item)?
+            .batch
+            .is_some_and(|b| b.exhausted())
+        {
+            return Err(Error::Validation(IMPORT_ALLOWANCE_REACHED));
+        }
+        Ok(())
+    }
     /// Reservation for Classify and verification requests, bound to the running
     /// attempt `run` of `item` instead of a reader checkpoint. Same file and batch
     /// allowances, batch accounting and pause.
@@ -462,5 +511,77 @@ impl Vault {
             }
         }
         Ok(steps)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DocumentClass;
+
+    #[test]
+    fn older_file_allowances_rise_to_the_current_defaults_without_lowering_extensions() {
+        let t = tempfile::tempdir().unwrap();
+        let mut v = Vault::create(&t.path().join("vault"), "synthetic-budget-password").unwrap();
+        let mut items = Vec::new();
+        for name in ["older.txt", "extended.txt"] {
+            let file = t.path().join(name);
+            std::fs::write(&file, format!("SYNTHETIC {name}")).unwrap();
+            items.push(
+                v.import_document(&file, name, DocumentClass::Personal)
+                    .unwrap(),
+            );
+        }
+        let (older, extended) = (items[0], items[1]);
+        let source = |v: &Vault, item| v.document_texts(item).unwrap().0;
+        // A row written with the earlier defaults, and one extended beyond today's.
+        for (item, limits) in [(older, (12, 24, 180_000)), (extended, (36, 96, 540_000))] {
+            v.db.execute(
+                "INSERT INTO import_budget(source_id,openai_limit,typesafe_limit,token_limit) VALUES(?,?,?,?)",
+                params![source(&v, item), limits.0, limits.1, limits.2],
+            )
+            .unwrap();
+        }
+        let limits = |v: &Vault, item| {
+            let u = v.import_usage(item).unwrap();
+            (u.openai_limit, u.typesafe_limit, u.token_limit)
+        };
+        let stored = |v: &Vault, item| -> (u32, u32, u64) {
+            v.db.query_row(
+                "SELECT openai_limit,typesafe_limit,token_limit FROM import_budget WHERE source_id=?",
+                [source(v, item)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64)),
+            )
+            .unwrap()
+        };
+        let defaults = (FILE_OPENAI_CALLS, FILE_TYPESAFE_CALLS, FILE_TOKENS);
+        // Shown at no less than today's defaults before any new call.
+        assert_eq!(limits(&v, older), defaults);
+        assert_eq!(limits(&v, extended), (36, 96, 540_000));
+        // Enforced and stored that way once the file reserves a call.
+        for (item, run) in [(older, "o"), (extended, "e")] {
+            v.begin_evaluation(item, false).unwrap();
+            v.begin_import_progress(item, run).unwrap();
+            v.reserve_graph_request(item, run, ImportProvider::TypeSafe)
+                .unwrap();
+        }
+        assert_eq!(stored(&v, older), defaults);
+        assert_eq!(stored(&v, extended), (36, 96, 540_000));
+        for _ in 1..FILE_TYPESAFE_CALLS {
+            v.reserve_graph_request(older, "o", ImportProvider::TypeSafe)
+                .unwrap();
+        }
+        assert!(
+            v.reserve_graph_request(older, "o", ImportProvider::TypeSafe)
+                .is_err()
+        );
+        // An explicit extension adds to the raised limit.
+        v.finish_import_evaluation(older, "o", Some("SYNTHETIC stop"), None)
+            .unwrap();
+        v.extend_import_allowance(older).unwrap();
+        assert_eq!(
+            limits(&v, older).1,
+            FILE_TYPESAFE_CALLS + EXTEND_TYPESAFE_CALLS
+        );
     }
 }
