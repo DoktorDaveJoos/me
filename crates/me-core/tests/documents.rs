@@ -155,6 +155,7 @@ fn failed_cancelled_or_interrupted_jobs_can_retry_and_reject_stale_completions()
 fn long_document_has_no_24kb_gate_and_validates_all_sections_atomically() {
     let temp = tempfile::tempdir().unwrap();
     let mut vault = Vault::create(&temp.path().join("vault"), PASSWORD).unwrap();
+    vault.set_automatic_evaluation(true).unwrap();
     let file = temp.path().join("long.pdf");
     std::fs::write(&file, b"synthetic PDF bytes").unwrap();
     let item = vault

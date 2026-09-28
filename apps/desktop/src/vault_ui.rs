@@ -118,6 +118,7 @@ impl MeApp {
             } else if initialized {
                 Vault::unlock(&root, &password)
             } else {
+                me_core::account::check_new_master_password(&password, None)?;
                 Vault::create(&root, &password)
             }?;
             let collection = vault.collection("", false)?;
@@ -641,7 +642,7 @@ impl MeApp {
                             if restoring {
                                 "Enter the password used for this backup."
                             } else {
-                                "Choose a password with at least 10 characters."
+                                "Choose a long passphrase of unrelated words."
                             },
                         ))
                     })

@@ -18,6 +18,7 @@ ME.'s commercial licensing terms.
 | Rust `curl` / `curl-sys` bindings | [MIT license](apps/desktop/assets/licenses/curl-rust-MIT.txt) |
 | libcurl | [curl license](apps/desktop/assets/licenses/libcurl.txt) |
 | `mail-parser` 0.11.3 | [MIT license](apps/desktop/assets/licenses/mail-parser-0.11.3-MIT.txt) |
+| `zxcvbn` 3.1.1 (Rust port of Dropbox's zxcvbn, with its embedded word lists) | [MIT license](apps/desktop/assets/licenses/zxcvbn-3.1.1-MIT.txt) |
 
 The font files are distributed in the source tree under the OFL. The dependency
 source code is resolved by Cargo rather than vendored here. The macOS development

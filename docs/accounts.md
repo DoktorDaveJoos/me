@@ -10,6 +10,8 @@ identity or encryption protocol ready for public registration.
 
 - First run asks for an email address and a master password (at least 10
   characters, up to 4096 bytes, no composition rules), plus password confirmation.
+  A newly chosen password must also resist offline guessing; see
+  [master password rules](#master-password-rules).
 - The same master password signs in and unlocks the local vault. There is no
   separate app-unlock password. Local unlock works offline after account setup.
 - Show a generated recovery code before submitting registration. The user copies
@@ -62,6 +64,33 @@ password envelope independently uses Argon2id with a random 16-byte salt. The
 server stores a salted Argon2id verifier of the derived authentication secret,
 not the secret itself. The derived authentication secret is nevertheless a
 replayable credential and must be protected like a password; this is not a PAKE.
+
+### Master password rules
+
+The server stores the password-wrapped key envelope, so anyone holding a copy of
+the account database can test password guesses offline; each wrong guess fails
+to decrypt. Argon2id slows every guess, but only an unpredictable password
+prevents this attack. Every newly chosen master password (registration of a new
+vault, recovery, local vault creation) therefore needs a zxcvbn estimate of at
+least 10^10 guesses, its highest score. The estimate considers the email address
+and adds common German password words and QWERTZ keyboard rows to zxcvbn's English
+data. Only the first 128 characters are estimated to bound the cost. Composition
+rules are still not used. Attaching an existing local vault keeps its current
+password, so its data is never stranded; strengthen it afterwards through recovery.
+This rule reduces but does not remove the offline-guessing risk: German or personal
+phrases that zxcvbn does not know can still be overrated.
+
+Before either derivation, every client normalizes the password to Unicode NFC,
+following the RFC 8265 OpaqueString profile. Composed and decomposed input (for
+example `ü` typed as one or two code points on different platforms) then derives
+the same keys. ASCII and already-composed passwords are unaffected, so existing
+envelopes and verifiers remain valid. Builds before this change hashed raw bytes;
+for the rare password entered in decomposed form, unlock retries the raw bytes
+after the normalized key fails, and sign-in retries the raw-byte secret only after
+the server rejects the normalized one. Such a legacy envelope still needs the
+original input form; recovery re-creates it under the normalized password. Future
+clients must reuse the shared Rust derivation and the known-answer vectors in
+`crates/me-core/tests/accounts.rs`.
 
 A recovery code contains 32 OS-random bytes encoded in eight groups of eight hex
 characters (256 bits). Domain-separated SHA-256 derives the recovery authentication

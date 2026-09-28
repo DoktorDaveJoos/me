@@ -24,8 +24,10 @@ frühere OpenAI-exklusive Pro-Annahme ist keine technische Voraussetzung dieses 
 
 - Tresor anlegen, Passwort wiederholen, entsperren, manuell sperren und schließen.
 - Masterpasswort: mindestens zehn Zeichen; keine Pflicht zu Großbuchstaben,
-  Ziffern oder Sonderzeichen. Die Einrichtung zeigt einen unverbindlichen Hinweis
-  zu leicht erratbaren Wörtern, ohne eine zusätzliche Bestätigung zu verlangen.
+  Ziffern oder Sonderzeichen. Ein neu gewähltes Passwort muss zusätzlich eine
+  zxcvbn-Schätzung von mindestens 10^10 Versuchen erreichen; leicht erratbare
+  Passwörter werden abgelehnt. Eingaben werden vor der Ableitung nach Unicode NFC
+  normalisiert. Details: [Master password rules](accounts.md#master-password-rules).
 - Passwortableitung mit Argon2id v19, 64 MiB, drei Durchläufe, Parallelität eins.
   Zufälliges 16-Byte-Salt; Parameter sind an Formatversion 1 gebunden.
 - Zwei unabhängige zufällige 256-Bit-Schlüssel für Datenbank und Objekte. Das

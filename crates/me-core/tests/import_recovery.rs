@@ -169,6 +169,7 @@ fn provider_quota_pauses_other_files_persistently_until_explicit_resume() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("vault");
     let mut v = Vault::create(&root, PASSWORD).unwrap();
+    v.set_automatic_evaluation(true).unwrap();
     let a = document(&mut v, dir.path(), "a.txt");
     let b = document(&mut v, dir.path(), "b.txt");
     v.begin_evaluation(a, true).unwrap();

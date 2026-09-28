@@ -190,8 +190,10 @@ Tags and account labels are compact chips; counts are ordinary visible metadata
 unless explicitly guarded. These fields have no redundant Copy action. Editable
 values retain their original export types and original archives remain unchanged.
 
-Website logos load directly from the saved site's public HTTPS origin while the
-vault is unlocked. Only the origin is derived from the login: saved URL paths,
+Website logos are off by default and load only after Website icons is enabled in
+Settings. Preferences saved before this default (version 1) turn icons off once,
+because they recorded the former default rather than a choice. When enabled, logos
+load directly from the saved site's public HTTPS origin while the vault is unlocked. Only the origin is derived from the login: saved URL paths,
 queries, fragments and embedded credentials are discarded. The loader reads the
 public homepage for same-origin icon links, with conventional icon fallbacks;
 it does not follow redirects, use cookies or authentication, contact third-party
@@ -202,7 +204,8 @@ animated artwork are not rendered; decoded images are downscaled to one frame.
 
 A 256-site memory cache includes failed lookups and is cleared on lock or when
 Website icons is disabled in Settings. It leaves no domain-named files on disk.
-The website still receives the user's IP address and an icon request. Restricted,
+The website still receives the user's IP address and an icon request whose
+`ME-Website-Icons` user agent shows that the visitor uses ME. Restricted,
 redirect-only, unsupported and offline sites retain the honeycomb key fallback.
 The setting is device-local and survives changes to Reduce motion. No icon data
 is placed in the vault search index or shared with AI.

@@ -144,6 +144,9 @@ impl MeApp {
                     })))
                 }
                 AccountMode::Recover => {
+                    // Reject a guessable new password before any network attempt.
+                    account::check_new_master_password(&password, Some(&email))
+                        .map_err(|e| e.to_string())?;
                     let response = account_client::recovery_account(&server, &email, &code)?;
                     let new_code = account::generate_recovery_code().map_err(|e| e.to_string())?;
                     let request = account::prepare_recovery(&response, &code, &password, &new_code)
@@ -555,7 +558,7 @@ impl MeApp {
                 .child(div().type_style(Type::Caption).text_color(rgb(MUTED)).child(
                     if self.initialized && !recovering && !signing_in { "Use your existing vault password (at least 10 characters). Your saved data stays on this device." }
                     else if signing_in { "Initial sign-in requires an internet connection." }
-                    else { "At least 10 characters. Choose something long and memorable." })))
+                    else { "Use a long passphrase of unrelated words. Easy-to-guess passwords are rejected." })))
             .when_some(pending, |s, p| s
                 .child(div().rounded(px(radius::STANDARD)).border_1().border_color(rgb(LINE)).overflow_hidden()
                     .child(div().px(px(space::LG)).py(px(space::SM)).flex().items_center().justify_between().gap(px(space::SM))

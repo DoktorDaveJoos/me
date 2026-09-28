@@ -24,6 +24,9 @@ fn checked_server(value: &str) -> Result<String, String> {
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 fn post(server: &str, route: &str, body: &[u8]) -> Result<AccountResponse, String> {
+    post_status(server, route, body).map_err(|(_, message)| message)
+}
+fn transfer(server: &str, route: &str, body: &[u8]) -> Result<(u32, Zeroizing<Vec<u8>>), String> {
     let server = checked_server(server)?;
     let mut easy = Easy::new();
     let setup = || "Could not prepare the account request.".to_owned();
@@ -66,26 +69,29 @@ fn post(server: &str, route: &str, body: &[u8]) -> Result<AccountResponse, Strin
             "Could not reach ME Cloud. Check your connection and try again.".to_owned()
         })?;
     }
-    match easy.response_code().map_err(|_| setup())? {
-        200 | 201 => {
-            let result: AccountResponse = serde_json::from_slice(&response)
-                .map_err(|_| "The account service returned an invalid response.".to_owned())?;
-            if !result.vault.valid()
-                || result.account.revision < 1
-                || uuid::Uuid::parse_str(&result.account.id).is_err()
-            {
-                return Err("The account service returned an invalid response.".into());
-            }
+    Ok((easy.response_code().map_err(|_| setup())?, response))
+}
+/// Errors carry the HTTP status (0 before a response) for credential fallback.
+fn post_status(server: &str, route: &str, body: &[u8]) -> Result<AccountResponse, (u32, String)> {
+    let (status, response) = transfer(server, route, body).map_err(|message| (0, message))?;
+    let message = match status {
+        200 | 201 => match serde_json::from_slice::<AccountResponse>(&response) {
             Ok(result)
-        }
-        400 | 413 | 422 => Err("Check your email, password and recovery details.".into()),
-        401 => Err("The email and password or recovery code could not be verified.".into()),
-        409 => {
-            Err("This account already exists or has changed. Sign in or restart recovery.".into())
-        }
-        429 => Err("Too many attempts. Wait a minute and try again.".into()),
-        _ => Err("ME Cloud is unavailable. Try again shortly.".into()),
-    }
+                if result.vault.valid()
+                    && result.account.revision >= 1
+                    && uuid::Uuid::parse_str(&result.account.id).is_ok() =>
+            {
+                return Ok(result);
+            }
+            _ => "The account service returned an invalid response.",
+        },
+        400 | 413 | 422 => "Check your email, password and recovery details.",
+        401 => "The email and password or recovery code could not be verified.",
+        409 => "This account already exists or has changed. Sign in or restart recovery.",
+        429 => "Too many attempts. Wait a minute and try again.",
+        _ => "ME Cloud is unavailable. Try again shortly.",
+    };
+    Err((status, message.into()))
 }
 fn checked_identity(result: AccountResponse, email: &str) -> Result<AccountResponse, String> {
     if result.account.email != email {
@@ -110,7 +116,18 @@ pub(super) fn sign_in(
 ) -> Result<AccountResponse, String> {
     let secret =
         me_core::account::authentication_secret(email, password).map_err(|e| e.to_string())?;
-    credentials(server, "sign-in", email, &secret)
+    match credentials_status(server, "sign-in", email, &secret) {
+        // Accounts registered before normalization with decomposed input.
+        Err((401, message)) => {
+            match me_core::account::legacy_authentication_secret(email, password)
+                .map_err(|e| e.to_string())?
+            {
+                Some(legacy) => credentials(server, "sign-in", email, &legacy),
+                None => Err(message),
+            }
+        }
+        result => result.map_err(|(_, message)| message),
+    }
 }
 pub(super) fn recovery_account(
     server: &str,
@@ -126,14 +143,22 @@ fn credentials(
     email: &str,
     secret: &str,
 ) -> Result<AccountResponse, String> {
+    credentials_status(server, route, email, secret).map_err(|(_, message)| message)
+}
+fn credentials_status(
+    server: &str,
+    route: &str,
+    email: &str,
+    secret: &str,
+) -> Result<AccountResponse, (u32, String)> {
     let request = Credentials {
         email: email.into(),
         secret: secret.into(),
     };
     let body = Zeroizing::new(
-        serde_json::to_vec(&request).map_err(|_| "Could not prepare sign-in.".to_owned())?,
+        serde_json::to_vec(&request).map_err(|_| (0, "Could not prepare sign-in.".to_owned()))?,
     );
-    checked_identity(post(server, route, &body)?, email)
+    checked_identity(post_status(server, route, &body)?, email).map_err(|message| (0, message))
 }
 pub(super) fn recover(server: &str, request: &Recovery) -> Result<AccountResponse, String> {
     let body = Zeroizing::new(
@@ -175,5 +200,83 @@ mod tests {
         ] {
             assert!(checked_server(url).is_err());
         }
+    }
+
+    /// Serves each response to one POST, then closes; returns the sent secrets.
+    fn stub(responses: Vec<(u32, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let handle = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut secrets = Vec::new();
+            for (status, body) in responses {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(_) if start.elapsed() < Duration::from_secs(120) => {
+                            std::thread::sleep(Duration::from_millis(10))
+                        }
+                        Err(_) => return secrets,
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut request = vec![0; length];
+                reader.read_exact(&mut request).unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+                secrets.push(request["secret"].as_str().unwrap().to_owned());
+                write!(stream, "HTTP/1.1 {status} Stub\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            secrets
+        });
+        (server, handle)
+    }
+    const EMAIL: &str = "person@example.test";
+    fn accepted() -> String {
+        let (salt, wrapped, recovery) = ([1u8; 16], vec![2u8; 112], vec![3u8; 112]);
+        serde_json::json!({
+            "account": {"id": uuid::Uuid::new_v4().to_string(), "email": EMAIL, "email_verified": false, "revision": 1},
+            "vault": {"vault_id": uuid::Uuid::new_v4().to_string(), "salt": salt, "wrapped_keys": wrapped, "recovery_keys": recovery}
+        })
+        .to_string()
+    }
+    #[test]
+    fn sign_in_falls_back_to_pre_normalization_secret_after_rejection() {
+        let decomposed = "Gru\u{308}ße aus Ko\u{308}ln";
+        let (server, requests) = stub(vec![(401, "{}".into()), (200, accepted())]);
+        sign_in(&server, EMAIL, decomposed).unwrap();
+        let secrets = requests.join().unwrap();
+        assert_eq!(
+            secrets[0],
+            *me_core::account::authentication_secret(EMAIL, decomposed).unwrap()
+        );
+        assert_eq!(
+            secrets[1],
+            *me_core::account::legacy_authentication_secret(EMAIL, decomposed)
+                .unwrap()
+                .unwrap()
+        );
+    }
+    #[test]
+    fn sign_in_never_retries_normalized_input() {
+        let (server, requests) = stub(vec![(401, "{}".into())]);
+        assert_eq!(
+            sign_in(&server, EMAIL, "Grüße aus Köln").err().as_deref(),
+            Some("The email and password or recovery code could not be verified.")
+        );
+        assert_eq!(requests.join().unwrap().len(), 1);
     }
 }

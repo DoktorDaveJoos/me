@@ -1,8 +1,9 @@
 CREATE TABLE app_settings (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
- automatic_evaluation INTEGER NOT NULL DEFAULT 1 CHECK(automatic_evaluation IN (0,1))
+ automatic_evaluation INTEGER NOT NULL DEFAULT 0 CHECK(automatic_evaluation IN (0,1))
 ) STRICT;
-INSERT INTO app_settings VALUES(1,1);
+-- Cloud AI evaluation sends document text to a provider: new vaults start opted out.
+INSERT INTO app_settings VALUES(1,0);
 
 -- Separate orchestration state: indexing and fact extraction keep their own jobs.
 CREATE TABLE document_evaluation (

@@ -13,11 +13,12 @@ fn state(v: &Vault, item: u64) -> String {
     }
 }
 #[test]
-fn automatic_default_opt_out_and_manual_release_survive_restart() {
+fn automatic_opt_in_opt_out_and_manual_release_survive_restart() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("vault");
     let mut v = Vault::create(&root, PASSWORD).unwrap();
     assert_eq!(v.settings().unwrap(), AppSettings::default());
+    v.set_automatic_evaluation(true).unwrap();
     let first = import(
         &mut v,
         temp.path(),
@@ -54,6 +55,7 @@ fn automatic_default_opt_out_and_manual_release_survive_restart() {
 fn queue_skips_credentials_unsupported_files_and_failed_or_finished_work() {
     let temp = tempfile::tempdir().unwrap();
     let mut v = Vault::create(&temp.path().join("vault"), PASSWORD).unwrap();
+    v.set_automatic_evaluation(true).unwrap();
     let secret = import(&mut v, temp.path(), "secret.pdf", DocumentClass::Credential);
     let unsupported = import(
         &mut v,
@@ -86,6 +88,7 @@ fn interrupted_work_waits_for_explicit_resume_even_when_automation_is_enabled() 
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("vault");
     let mut v = Vault::create(&root, PASSWORD).unwrap();
+    v.set_automatic_evaluation(true).unwrap();
     let item = import(&mut v, temp.path(), "one.pdf", DocumentClass::Unclassified);
     assert!(v.begin_evaluation(item, true).unwrap());
     drop(v);
@@ -98,4 +101,15 @@ fn interrupted_work_waits_for_explicit_resume_even_when_automation_is_enabled() 
     let v = Vault::unlock(&root, PASSWORD).unwrap();
     assert_eq!(v.next_automatic_document().unwrap(), None);
     assert_eq!(state(&v, item), "failed");
+}
+#[test]
+fn new_vault_sends_no_document_to_cloud_ai_until_the_user_opts_in() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut v = Vault::create(&temp.path().join("vault"), PASSWORD).unwrap();
+    assert!(!AppSettings::default().automatic_evaluation);
+    assert!(!v.settings().unwrap().automatic_evaluation);
+    let item = import(&mut v, temp.path(), "payslip.pdf", DocumentClass::Personal);
+    assert_eq!(state(&v, item), "manual");
+    assert_eq!(v.next_automatic_document().unwrap(), None);
+    assert!(!v.begin_evaluation(item, true).unwrap());
 }

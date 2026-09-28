@@ -234,3 +234,98 @@ fn authentication_and_recovery_proofs_are_separate_from_wrapping_keys() {
     assert!(!wire.contains(PASSWORD));
     assert!(!wire.contains(code.as_str()));
 }
+const STRONG_PASSWORD: &str = "violet harbor quantum dusk 47";
+#[test]
+fn new_master_passwords_must_resist_offline_guessing() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    let code = generate_recovery_code().unwrap();
+    let email = "kvothe.arliden@example.com";
+    for weak in [
+        "password1234",
+        "Passwort1234",
+        "Sommer2024!!",
+        "qwertzuiop12",
+        "kvothearliden1",
+        "aaaaaaaaaaaaaaaa",
+    ] {
+        assert!(
+            matches!(
+                check_new_master_password(weak, Some(email)),
+                Err(me_core::Error::Validation(_))
+            ),
+            "{weak}"
+        );
+        assert!(
+            prepare_registration(&root, email, weak, &code).is_err(),
+            "{weak}"
+        );
+    }
+    check_new_master_password(STRONG_PASSWORD, Some(email)).unwrap();
+    prepare_registration(&root, email, STRONG_PASSWORD, &code).unwrap();
+}
+#[test]
+fn recovery_requires_strong_password_while_existing_vaults_still_attach() {
+    // Attaching keeps the current vault password so existing data is never stranded.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    drop(Vault::create(&root, "abcdefghij").unwrap());
+    let code = generate_recovery_code().unwrap();
+    let request = prepare_registration(&root, "person@example.com", "abcdefghij", &code).unwrap();
+    let current = response(&request);
+    let next = generate_recovery_code().unwrap();
+    assert!(matches!(
+        prepare_recovery(&current, &code, "abcdefghijk", &next),
+        Err(me_core::Error::Validation(_))
+    ));
+    prepare_recovery(&current, &code, STRONG_PASSWORD, &next).unwrap();
+}
+const COMPOSED: &str = "Grüße aus Köln am Rhein";
+fn decomposed() -> String {
+    COMPOSED.replace('ü', "u\u{308}").replace('ö', "o\u{308}")
+}
+#[test]
+fn composed_and_decomposed_password_input_derive_the_same_keys() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    let nfd = decomposed();
+    assert_ne!(nfd, COMPOSED);
+    drop(Vault::create(&root, &nfd).unwrap());
+    drop(Vault::unlock(&root, COMPOSED).unwrap());
+    drop(Vault::unlock(&root, &nfd).unwrap());
+    let email = "person@example.com";
+    assert_eq!(
+        *authentication_secret(email, COMPOSED).unwrap(),
+        *authentication_secret(email, &nfd).unwrap()
+    );
+    assert!(
+        legacy_authentication_secret(email, COMPOSED)
+            .unwrap()
+            .is_none()
+    );
+    let legacy = legacy_authentication_secret(email, &nfd).unwrap().unwrap();
+    assert_ne!(*legacy, *authentication_secret(email, &nfd).unwrap());
+}
+#[test]
+fn authentication_secret_matches_pre_normalization_vectors() {
+    // Computed by the release before normalization. Shared with future clients.
+    let email = "vector@example.test";
+    assert_eq!(
+        authentication_secret(email, "correct horse battery staple")
+            .unwrap()
+            .as_str(),
+        "956e17ca15deb152712d857378a1b3e61853c55daa0218844281aca9e14fd399"
+    );
+    let decomposed = "Gru\u{308}ße aus Ko\u{308}ln";
+    assert_eq!(
+        legacy_authentication_secret(email, decomposed)
+            .unwrap()
+            .unwrap()
+            .as_str(),
+        "265fe6b629c4728f9ebb75b3620b0cf7be17129e8e0e8bceddef42ffaf1df7dd"
+    );
+    assert_eq!(
+        *authentication_secret(email, decomposed).unwrap(),
+        *authentication_secret(email, "Grüße aus Köln").unwrap()
+    );
+}

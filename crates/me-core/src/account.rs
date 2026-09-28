@@ -27,15 +27,115 @@ pub fn binding(root: &Path) -> Result<Option<AccountBinding>> {
 /// Authentication and local encryption use distinct Argon2id inputs/salts.
 /// Email is the canonical v1 account identity, never a vault encryption key.
 pub fn authentication_secret(email: &str, password: &str) -> Result<Zeroizing<String>> {
-    let email = me_protocol::normalize_email(email).map_err(Error::Validation)?;
-    if password.len() > 4096 {
-        return Err(Error::Validation("This password is too long."));
-    }
-    let salt = Sha256::digest(format!("me-account-auth-v1:{email}").as_bytes());
-    let key = crypto::wrapping_key(password, &salt[..16])?;
+    let key = crypto::wrapping_key(password, &authentication_salt(email)?)?;
     Ok(Zeroizing::new(hex::encode(key.as_ref())))
 }
+/// Accounts registered before password normalization with decomposed input.
+/// Clients retry sign-in with this only after the normalized secret is rejected.
+pub fn legacy_authentication_secret(
+    email: &str,
+    password: &str,
+) -> Result<Option<Zeroizing<String>>> {
+    Ok(
+        crypto::legacy_wrapping_key(password, &authentication_salt(email)?)?
+            .map(|key| Zeroizing::new(hex::encode(key.as_ref()))),
+    )
+}
+fn authentication_salt(email: &str) -> Result<[u8; 16]> {
+    let email = me_protocol::normalize_email(email).map_err(Error::Validation)?;
+    let digest = Sha256::digest(format!("me-account-auth-v1:{email}").as_bytes());
+    let mut salt = [0; 16];
+    salt.copy_from_slice(&digest[..16]);
+    Ok(salt)
+}
 
+/// zxcvbn's top score: at least 10^10 estimated guesses.
+const MIN_GUESSES_LOG10: f64 = 10.0;
+/// zxcvbn cost grows superlinearly with length; a strong prefix is sufficient.
+const ESTIMATED_CHARS: usize = 128;
+/// zxcvbn ships English data. Add common German choices and QWERTZ keyboard rows.
+const LOCAL_DICTIONARY: &[&str] = &[
+    "passwort",
+    "kennwort",
+    "geheim",
+    "hallo",
+    "schatz",
+    "schatzi",
+    "liebe",
+    "ichliebedich",
+    "sommer",
+    "winter",
+    "fruehling",
+    "frühling",
+    "herbst",
+    "sonne",
+    "sonnenschein",
+    "fussball",
+    "fußball",
+    "schalke",
+    "bayern",
+    "borussia",
+    "dortmund",
+    "werder",
+    "hamburg",
+    "berlin",
+    "muenchen",
+    "münchen",
+    "koeln",
+    "köln",
+    "deutschland",
+    "mausi",
+    "hase",
+    "hasi",
+    "baerchen",
+    "bärchen",
+    "engel",
+    "prinzessin",
+    "blume",
+    "katze",
+    "hund",
+    "pferd",
+    "mama",
+    "papa",
+    "familie",
+    "freund",
+    "freundin",
+    "tresor",
+    "masterpasswort",
+    "qwertz",
+    "qwertzu",
+    "qwertzui",
+    "qwertzuiop",
+    "asdfghjkl",
+    "asdfghjklö",
+    "yxcvbnm",
+    "yxcvbn",
+    "einszweidrei",
+];
+
+/// Server-held key envelopes permit offline guessing, so every newly chosen master
+/// password must be hard to guess, not just long. Existing vault passwords are not
+/// re-judged when attaching a vault, so local data is never stranded.
+pub fn check_new_master_password(password: &str, email: Option<&str>) -> Result<()> {
+    let password = crypto::normalized(password);
+    me_protocol::validate_password(&password).map_err(Error::Validation)?;
+    let prefix = Zeroizing::new(password.chars().take(ESTIMATED_CHARS).collect::<String>());
+    let email = email.map(str::to_ascii_lowercase).unwrap_or_default();
+    let local = email.split('@').next().unwrap_or_default();
+    let joined: String = local.chars().filter(char::is_ascii_alphanumeric).collect();
+    let mut inputs: Vec<&str> = email
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| word.len() >= 3)
+        .collect();
+    inputs.push(&joined);
+    inputs.extend(LOCAL_DICTIONARY);
+    if zxcvbn::zxcvbn(&prefix, &inputs).guesses_log10() < MIN_GUESSES_LOG10 {
+        return Err(Error::Validation(
+            "This master password is too easy to guess. Use a longer passphrase of several unrelated words.",
+        ));
+    }
+    Ok(())
+}
 pub fn generate_recovery_code() -> Result<Zeroizing<String>> {
     let mut bytes = Zeroizing::new([0u8; 32]);
     OsRng
@@ -106,6 +206,7 @@ pub fn prepare_registration(
         }
         (vault.header.clone(), vault.keys.clone())
     } else {
+        check_new_master_password(password, Some(&email))?;
         Header::create(password)?
     };
     Ok(Registration {
@@ -121,7 +222,7 @@ pub fn prepare_recovery(
     password: &str,
     new_code: &str,
 ) -> Result<Recovery> {
-    me_protocol::validate_password(password).map_err(Error::Validation)?;
+    check_new_master_password(password, Some(&current.account.email))?;
     if !current.vault.valid() {
         return Err(Error::Format);
     }

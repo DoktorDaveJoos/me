@@ -119,7 +119,7 @@ impl MeApp {
                     .child(div().py(px(space::LG)).border_b_1().border_color(rgb(LINE)).flex().items_center().justify_between().gap(px(space::LG))
                         .child(div().flex_1().min_w_0().flex().flex_col().gap(px(space::SM))
                             .child(div().type_style(Type::Label).child("Website icons"))
-                            .child(div().type_style(Type::Small).text_color(rgb(MUTED)).whitespace_normal().child("Load logos from your login websites. Websites receive your IP address, never your passwords.")))
+                            .child(div().type_style(Type::Small).text_color(rgb(MUTED)).whitespace_normal().child("Load logos from your login websites. Each site sees your IP address and that you use ME.")))
                         .child(secondary_action().flex_shrink_0().id("website-icons-toggle").hover(|s|s.bg(rgb(HOVER))).on_click(cx.listener(|this,_,_,cx|this.toggle_website_icons(cx)))
                             .child(if self.motion.saving {"Saving…"}else if self.motion.website_icons {"On"}else{"Off"})))
                     .when_some(self.motion.error.clone(),|s,error|s.child(div().type_style(Type::Small).text_color(rgb(DANGER)).child(error)))
