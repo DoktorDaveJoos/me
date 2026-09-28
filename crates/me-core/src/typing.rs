@@ -152,7 +152,13 @@ pub fn type_value(
             (CandidateKind::Date, c.value, false)
         }
         ValueKind::Period => {
-            let c = whole(CandidateKind::Period)?;
+            // A year is a period only after a printed keyword ("Veranlagungszeitraum
+            // 2025"), so a bare year value is typed in its source line.
+            let c = whole(CandidateKind::Period).or_else(|| {
+                scan_value(&at.line, ctx.year)
+                    .into_iter()
+                    .find(|c| c.kind == CandidateKind::Period && c.text.trim() == value.trim())
+            })?;
             (CandidateKind::Period, c.value, false)
         }
         ValueKind::Identifier => {
@@ -373,6 +379,26 @@ mod tests {
                 end: "2026-01-31".into()
             }
         );
+    }
+
+    #[test]
+    fn a_year_types_as_a_period_only_in_its_printed_period_context() {
+        let text = "Veranlagungszeitraum   2025\nKundennummer   2025\n";
+        let segments = seg(text);
+        let ctx = TypingContext::new(&segments, Some("tax_assessment"), 2026);
+        let at = locate(&segments, "s0", "Veranlagungszeitraum   2025", "2025").unwrap();
+        let c = type_value(&ctx, &at, "Veranlagungszeitraum", "2025", ValueKind::Period).unwrap();
+        assert_eq!(
+            c.value,
+            V::Period {
+                start: "2025-01-01".into(),
+                end: "2025-12-31".into()
+            }
+        );
+        assert_eq!((c.start, c.end), (at.start, at.end));
+        // A bare year without a period keyword is not a period.
+        let at = locate(&segments, "s0", "Kundennummer   2025", "2025").unwrap();
+        assert!(type_value(&ctx, &at, "Kundennummer", "2025", ValueKind::Period).is_none());
     }
 
     #[test]
