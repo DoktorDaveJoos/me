@@ -335,6 +335,8 @@ mod tests {
     fn identical_content_is_stored_once_and_linked_to_each_envelope() {
         let t = tempfile::tempdir().unwrap();
         let mut v = Vault::create(&t.path().join("vault"), "synthetic-intake-password").unwrap();
+        // New vaults start with automatic analysis off; these tests exercise the queue.
+        v.set_automatic_evaluation(true).unwrap();
         let a = t.path().join("a.txt");
         let b = t.path().join("copy of a.txt");
         std::fs::write(&a, "SYNTHETIC Versicherungsschein 123").unwrap();
@@ -415,6 +417,8 @@ mod tests {
         use crate::{ImportErrorKind, ImportFailure, ImportProvider};
         let t = tempfile::tempdir().unwrap();
         let mut v = Vault::create(&t.path().join("vault"), "synthetic-intake-password").unwrap();
+        // New vaults start with automatic analysis off; these tests exercise the queue.
+        v.set_automatic_evaluation(true).unwrap();
         let file = t.path().join("letter.txt");
         std::fs::write(&file, "SYNTHETIC Erika Beispiel\nSteuer-ID: 01234567890").unwrap();
         let item = v
