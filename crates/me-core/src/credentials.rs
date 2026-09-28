@@ -805,6 +805,7 @@ mod tests {
         v.import_onepassword(&batch(vec![entry])).unwrap();
         let summary = &v.logins().unwrap()[0];
         assert_eq!(summary.website, "https://example.test/");
+        assert_eq!(summary.username, "tester@example.test");
         let details = v.login_details(summary.id).unwrap();
         let count = details
             .fields

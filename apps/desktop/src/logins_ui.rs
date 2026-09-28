@@ -144,7 +144,9 @@ impl MeApp {
                     LoginScope::Archived => i.deleted_at.is_none() && i.archived,
                     LoginScope::Deleted => i.deleted_at.is_some(),
                 }) && query.split_whitespace().all(|q| {
-                    i.title.to_lowercase().contains(q) || i.vault.to_lowercase().contains(q)
+                    i.title.to_lowercase().contains(q)
+                        || i.username.to_lowercase().contains(q)
+                        || i.vault.to_lowercase().contains(q)
                 })
             })
             .map(|(i, _)| i)
@@ -764,7 +766,7 @@ impl MeApp {
                             .text_ellipsis()
                             .child(format!(
                                 "{}{}{}",
-                                item.vault,
+                                login_subtitle(&item),
                                 if item.archived { " · Archived" } else { "" },
                                 if item.versions > 1 {
                                     format!(" · Version {}/{}", item.version, item.versions)
@@ -1484,6 +1486,20 @@ impl MeApp {
     }
 }
 
+/// Rows are told apart by account, so the username leads; the vault is a last resort.
+fn login_subtitle(item: &LoginSummary) -> &str {
+    [item.username.trim(), website_label(&item.website)]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or(&item.vault)
+}
+
+fn website_label(website: &str) -> &str {
+    let website = website.trim();
+    let rest = website.split_once("://").map_or(website, |(_, rest)| rest);
+    rest.split(['/', '?', '#']).next().unwrap_or_default()
+}
+
 fn history_caption(field: &LoginField) -> String {
     match (field.used_until, field.used_until_date.as_deref()) {
         (Some(time), Some(date)) => {
@@ -1525,5 +1541,28 @@ mod detail_tests {
         assert_eq!(history_age(1000, 173800), "2 days ago");
         assert_eq!(history_age(1000, 31537000), "1 year ago");
         assert_eq!(history_age(1001, 1000), "date is in the future");
+    }
+
+    #[test]
+    fn login_subtitle_prefers_username_then_site_then_vault() {
+        let mut item = LoginSummary {
+            id: 1,
+            category: "001".into(),
+            title: "Example".into(),
+            vault: "ME.".into(),
+            website: "https://accounts.example.test/login?next=1".into(),
+            username: " tester@example.test ".into(),
+            archived: false,
+            deleted_at: None,
+            revision: 1,
+            favorite: false,
+            versions: 1,
+            version: 1,
+        };
+        assert_eq!(login_subtitle(&item), "tester@example.test");
+        item.username.clear();
+        assert_eq!(login_subtitle(&item), "accounts.example.test");
+        item.website.clear();
+        assert_eq!(login_subtitle(&item), "ME.");
     }
 }

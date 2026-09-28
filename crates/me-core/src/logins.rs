@@ -17,6 +17,8 @@ pub struct LoginSummary {
     pub title: String,
     pub vault: String,
     pub website: String,
+    /// List-safe account identifier; never a concealed value.
+    pub username: String,
     pub archived: bool,
     pub deleted_at: Option<String>,
     pub revision: i64,
@@ -314,7 +316,7 @@ impl Vault {
         self.login_summaries(true)
     }
     fn login_summaries(&self, deleted: bool) -> Result<Vec<LoginSummary>> {
-        let mut stmt = self.db.prepare("SELECT i.local_id,i.title,c.vault_name,c.archived,i.pinned,count(*) OVER (PARTITION BY c.account_uuid,c.vault_uuid,c.item_uuid),row_number() OVER (PARTITION BY c.account_uuid,c.vault_uuid,c.item_uuid ORDER BY i.local_id),COALESCE(NULLIF(json_extract(c.raw_json,'$.overview.url'),''),json_extract(c.raw_json,'$.overview.urls[0].url'),json_extract(c.raw_json,'$.fields.website'),''),c.category,i.deleted_at,i.revision FROM collection_item i JOIN credential_record c ON c.item_id=i.local_id WHERE (i.deleted_at IS NOT NULL)=? AND i.kind='credential' AND (c.category='001' OR c.format='me-v1') ORDER BY i.title COLLATE NOCASE,c.vault_name,i.local_id")?;
+        let mut stmt = self.db.prepare("SELECT i.local_id,i.title,c.vault_name,c.archived,i.pinned,count(*) OVER (PARTITION BY c.account_uuid,c.vault_uuid,c.item_uuid),row_number() OVER (PARTITION BY c.account_uuid,c.vault_uuid,c.item_uuid ORDER BY i.local_id),COALESCE(NULLIF(json_extract(c.raw_json,'$.overview.url'),''),json_extract(c.raw_json,'$.overview.urls[0].url'),json_extract(c.raw_json,'$.fields.website'),''),c.category,i.deleted_at,i.revision,COALESCE(NULLIF(json_extract(c.raw_json,'$.fields.username'),''),(SELECT NULLIF(json_extract(f.value,'$.value'),'') FROM json_each(c.raw_json,'$.details.loginFields') f WHERE json_extract(f.value,'$.designation')='username' LIMIT 1),NULLIF(json_extract(c.raw_json,'$.overview.ainfo'),''),'') FROM collection_item i JOIN credential_record c ON c.item_id=i.local_id WHERE (i.deleted_at IS NOT NULL)=? AND i.kind='credential' AND (c.category='001' OR c.format='me-v1') ORDER BY i.title COLLATE NOCASE,c.vault_name,i.local_id")?;
         Ok(stmt
             .query_map([deleted], |r| {
                 Ok(LoginSummary {
@@ -329,6 +331,7 @@ impl Vault {
                     category: r.get(8)?,
                     deleted_at: r.get(9)?,
                     revision: r.get(10)?,
+                    username: r.get(11)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?)

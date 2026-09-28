@@ -475,6 +475,7 @@ mod tests {
                 ),
             )
             .unwrap();
+        assert_eq!(v.logins().unwrap()[0].username, "synthetic@example.test");
         for (revision, next) in [(1, "SECOND"), (2, "FIRST"), (3, "")] {
             v.update_login(item, update(revision, &[("password", next)]))
                 .unwrap();
