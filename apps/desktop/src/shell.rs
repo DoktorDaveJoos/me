@@ -79,7 +79,7 @@ mod vault_ui;
 use crate::{assets::icon, input::TextInput, theme::*};
 use gpui::{
     App, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, Focusable, PathPromptOptions,
-    Window, actions, div, prelude::*, px, rgb, rgba,
+    ScrollHandle, Window, actions, div, prelude::*, px, rgb, rgba,
 };
 use me_core::{Collection, Content, Vault};
 
@@ -154,6 +154,11 @@ pub struct MeApp {
     import_batch_stops: Vec<me_core::ExhaustedBatch>,
     import_refresh: bool,
     import_refresh_pending: bool,
+    /// Scroll position of the imports page. `pub(crate)`: the gallery example
+    /// (`examples/import_gallery.rs`) sets its offset directly to bring lower
+    /// content into view for screenshots, using this safe GPUI API instead of
+    /// injecting OS-level scroll events.
+    pub(crate) import_scroll: ScrollHandle,
     pending_imports: Vec<PendingFile>,
     pending_attach_to_search: bool,
     import_scans: usize,
@@ -185,6 +190,9 @@ pub struct MeApp {
     copied_value: Option<zeroize::Zeroizing<String>>,
     clipboard_generation: u64,
     document_open: Option<u64>,
+    /// Scroll position of the open document detail. `pub(crate)`: see
+    /// `import_scroll`.
+    pub(crate) document_scroll: ScrollHandle,
     restore_from: Option<PathBuf>,
     history: Vec<me_core::Revision>,
     bridge: Option<me_agent::BridgeServer>,
@@ -292,6 +300,7 @@ impl MeApp {
             import_batch_stops: Vec::new(),
             import_refresh: false,
             import_refresh_pending: false,
+            import_scroll: ScrollHandle::default(),
             pending_imports: Vec::new(),
             pending_attach_to_search: false,
             import_scans: 0,
@@ -323,6 +332,7 @@ impl MeApp {
             copied_value: None,
             clipboard_generation: 0,
             document_open: None,
+            document_scroll: ScrollHandle::default(),
             restore_from: None,
             history: Vec::new(),
             bridge: None,

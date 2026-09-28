@@ -804,6 +804,7 @@ impl MeApp {
         self.overlay(cx).child(
             modal_panel(550., self.motion_enabled())
                 .id("document-detail")
+                .track_scroll(&self.document_scroll)
                 .max_h(gpui::relative(0.88))
                 .overflow_y_scroll()
                 .child(eyebrow("ORIGINAL"))

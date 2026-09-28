@@ -365,7 +365,7 @@ impl MeApp {
                 j.state == "queued" && j.processable && !self.active_imports.contains_key(&j.item)
             })
             .count();
-        div().id("import-page").flex_1().min_h_0().overflow_y_scroll().px(px(space::PAGE)).pb(px(space::PAGE))
+        div().id("import-page").track_scroll(&self.import_scroll).flex_1().min_h_0().overflow_y_scroll().px(px(space::PAGE)).pb(px(space::PAGE))
             .child(div().max_w(px(layout::SEARCH_WIDTH)).mx_auto().pt(px(space::PAGE_TOP)).flex().flex_col().gap(px(space::XXL))
                 .child(div().flex().items_center().justify_between().gap(px(space::LG))
                     .child(heading("Imports"))

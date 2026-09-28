@@ -189,78 +189,6 @@ use me_core::{
     DocumentRead, FactState, ReadFact, SlotContent, SlotValue, Uncovered,
 };
 
-/// Verification only: sends one in-process scroll event to the gallery window at
-/// its center, so a capture can show the lower part of a scrolling dialog. No
-/// system-wide input is posted. AppKit has no safe scroll-event constructor.
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn scroll_window(width: f32, height: f32, offset: f32) {
-    use objc2::{
-        ClassType, MainThreadMarker,
-        encode::{Encoding, RefEncode},
-        msg_send,
-        rc::Retained,
-    };
-    use objc2_app_kit::{NSApplication, NSEvent, NSScreen};
-    use std::ffi::c_void;
-    #[repr(C)]
-    struct CGPoint {
-        x: f64,
-        y: f64,
-    }
-    #[repr(C)]
-    struct CGEvent {
-        _opaque: [u8; 0],
-    }
-    unsafe impl RefEncode for CGEvent {
-        const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("__CGEvent", &[]));
-    }
-    #[link(name = "CoreGraphics", kind = "framework")]
-    unsafe extern "C" {
-        fn CGEventCreateScrollWheelEvent2(
-            source: *const c_void,
-            units: u32,
-            count: u32,
-            wheel1: i32,
-            wheel2: i32,
-            wheel3: i32,
-        ) -> *mut CGEvent;
-        fn CGEventSetLocation(event: *mut CGEvent, location: CGPoint);
-    }
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        fn CFRelease(object: *const c_void);
-    }
-    let mtm = MainThreadMarker::new().unwrap();
-    let screen = NSScreen::screens(mtm).objectAtIndex(0).frame().size.height;
-    // An event without a window reports screen coordinates (bottom-left origin)
-    // as its window location, so aim at the window center in those terms.
-    let event =
-        unsafe { CGEventCreateScrollWheelEvent2(std::ptr::null(), 0, 1, -offset as i32, 0, 0) };
-    unsafe {
-        CGEventSetLocation(
-            event,
-            CGPoint {
-                x: f64::from(width / 2.),
-                y: screen - f64::from(height / 2.),
-            },
-        )
-    };
-    let native: Option<Retained<NSEvent>> =
-        unsafe { msg_send![NSEvent::class(), eventWithCGEvent: event] };
-    unsafe { CFRelease(event.cast()) };
-    if let Some(native) = native {
-        for window in NSApplication::sharedApplication(mtm).windows().iter() {
-            // GPUI draws into a subview of the content view.
-            if let Some(content) = window.contentView() {
-                for view in content.subviews().iter() {
-                    view.scrollWheel(&native);
-                }
-            }
-        }
-    }
-}
-
 /// A synthetic two-page payslip, read in full: four profile values (one waiting
 /// in Quick checks), other details (two uncertain, one with a long label and
 /// value) and three values nobody interpreted. Returns its collection item.
@@ -494,9 +422,11 @@ fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
     let small = std::env::args().any(|arg| arg == "small");
     let (width, height) = if small { (800., 600.) } else { (1120., 780.) };
-    // `scroll=<px>` scrolls the view under the window center once it is drawn, so
-    // a capture can show the lower part of a scrolling dialog (macOS only).
-    #[cfg(target_os = "macos")]
+    // `scroll=<px>` sets the imports page's and the open document detail's GPUI
+    // scroll offset once the window is drawn, so a capture can show the lower
+    // part of a scrolling dialog. Safe GPUI API only (`ScrollHandle::set_offset`,
+    // clamped to content height on the next layout); no OS-level input is
+    // posted, so this works on every platform, not just macOS.
     let scroll = std::env::args().find_map(|arg| {
         arg.strip_prefix("scroll=")
             .and_then(|v| v.parse::<f32>().ok())
@@ -529,16 +459,17 @@ fn main() {
                     window.set_window_title("ME Import Gallery — Synthetic")
                 })
                 .unwrap();
-            #[cfg(target_os = "macos")]
             if let Some(offset) = scroll {
-                cx.spawn(async move |cx| {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(3000))
-                        .await;
-                    // Outside any app update: the window dispatches the event itself.
-                    scroll_window(width, height, offset);
-                })
-                .detach();
+                window
+                    .update(cx, |app, _, cx| {
+                        // Whichever of the two is on screen for this mode is what a
+                        // capture needs scrolled; setting the other's offset is inert.
+                        let target = gpui::point(px(0.), px(-offset));
+                        app.import_scroll.set_offset(target);
+                        app.document_scroll.set_offset(target);
+                        cx.notify();
+                    })
+                    .unwrap();
             }
             cx.activate(true);
         });
