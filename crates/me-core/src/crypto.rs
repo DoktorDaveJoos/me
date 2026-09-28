@@ -12,6 +12,7 @@ use std::{
     io::{Read, Write},
     path::Path,
 };
+use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
 
 const MAGIC: &[u8] = b"MEOBJ001";
@@ -32,22 +33,51 @@ pub(crate) struct Header {
 
 pub(crate) type Keys = Zeroizing<[u8; 64]>;
 
-pub(crate) fn wrapping_key(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
-    if password.len() > 4096 {
-        return Err(Error::Validation("This password is too long."));
-    }
+fn derive(input: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     let mut key = Zeroizing::new([0u8; 32]);
     let params = Params::new(MEMORY_KIB, ITERATIONS, 1, Some(32)).map_err(|_| Error::Format)?;
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(password.as_bytes(), salt, key.as_mut())
+        .hash_password_into(input, salt, key.as_mut())
         .map_err(|_| Error::Authentication)?;
     Ok(key)
 }
 
+fn bounded(password: &str) -> Result<()> {
+    if password.len() > 4096 {
+        return Err(Error::Validation("This password is too long."));
+    }
+    Ok(())
+}
+
+/// Every client hashes NFC input (RFC 8265 OpaqueString), so composed and
+/// decomposed forms of the same typed password derive the same key everywhere.
+pub(crate) fn wrapping_key(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
+    bounded(password)?;
+    derive(normalized(password).as_bytes(), salt)
+}
+
+pub(crate) fn normalized(password: &str) -> Zeroizing<String> {
+    Zeroizing::new(password.nfc().collect())
+}
+
+/// Builds before normalization hashed raw input bytes. Only non-NFC input differs,
+/// so this is `None` for nearly every password and costs no second derivation.
+pub(crate) fn legacy_wrapping_key(
+    password: &str,
+    salt: &[u8],
+) -> Result<Option<Zeroizing<[u8; 32]>>> {
+    bounded(password)?;
+    if unicode_normalization::is_nfc(password) {
+        return Ok(None);
+    }
+    derive(password.as_bytes(), salt).map(Some)
+}
+
 impl Header {
     pub fn create(password: &str) -> Result<(Self, Keys)> {
-        // Keep onboarding permissive: length only, no character-class rules.
-        if password.chars().count() < 10 {
+        // Floor for every vault, including fixtures. Newly chosen account passwords
+        // also pass `account::check_new_master_password`; no character-class rules.
+        if normalized(password).chars().count() < 10 {
             return Err(Error::Validation(
                 "Use at least 10 characters for your vault password.",
             ));
@@ -90,9 +120,18 @@ impl Header {
         Ok(header)
     }
     pub fn unlock(&self, password: &str) -> Result<Keys> {
-        let key = wrapping_key(password, &self.salt)?;
+        let result = self.unwrap_keys(&*wrapping_key(password, &self.salt)?);
+        if !matches!(result, Err(Error::Authentication)) {
+            return result;
+        }
+        match legacy_wrapping_key(password, &self.salt)? {
+            Some(key) => self.unwrap_keys(&*key),
+            None => result,
+        }
+    }
+    fn unwrap_keys(&self, key: &[u8]) -> Result<Keys> {
         let raw = open(
-            key.as_ref(),
+            key,
             &self.wrapped_keys,
             format!("me-keys-v1:{}", self.vault_id).as_bytes(),
         )?;
@@ -170,4 +209,34 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
         .map_err(|err| Error::Io(err.error))?;
     File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn envelope_from_raw_decomposed_input_still_unlocks_with_that_input() {
+        let composed = "Grüße aus Köln am Rhein";
+        let decomposed = composed.replace('ü', "u\u{308}").replace('ö', "o\u{308}");
+        let vault_id = uuid::Uuid::new_v4().to_string();
+        let salt = [7u8; 16];
+        let keys = [9u8; 64];
+        // Builds before normalization derived the key from the raw input bytes.
+        let raw = legacy_wrapping_key(&decomposed, &salt).unwrap().unwrap();
+        let header = Header {
+            version: 1,
+            wrapped_keys: seal(
+                raw.as_ref(),
+                &keys,
+                format!("me-keys-v1:{vault_id}").as_bytes(),
+            )
+            .unwrap(),
+            vault_id,
+            salt,
+            account: None,
+        };
+        assert_eq!(header.unlock(&decomposed).unwrap()[..], keys[..]);
+        assert!(legacy_wrapping_key(composed, &salt).unwrap().is_none());
+    }
 }

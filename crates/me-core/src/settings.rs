@@ -2,19 +2,12 @@
 use crate::{Error, Result, Vault, processable_document, vault::sql_id};
 use rusqlite::{OptionalExtension, params};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AppSettings {
+    /// Off until the user opts in: evaluation sends document text to a cloud provider.
     pub automatic_evaluation: bool,
     /// First-run setup only; never a substitute for live provider readiness.
     pub onboarding_complete: bool,
-}
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            automatic_evaluation: true,
-            onboarding_complete: false,
-        }
-    }
 }
 
 impl Vault {

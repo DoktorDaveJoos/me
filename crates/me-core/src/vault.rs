@@ -922,8 +922,11 @@ mod recovery_tests {
             )
             .unwrap();
         drop(vault);
-        let vault = Vault::unlock(&root, password).unwrap();
-        assert!(vault.settings().unwrap().automatic_evaluation);
+        let mut vault = Vault::unlock(&root, password).unwrap();
+        // Upgraded vaults never chose cloud evaluation either; queued work waits.
+        assert!(!vault.settings().unwrap().automatic_evaluation);
+        assert_eq!(vault.next_automatic_document().unwrap(), None);
+        vault.set_automatic_evaluation(true).unwrap();
         assert_eq!(vault.next_automatic_document().unwrap(), Some(item));
         assert_eq!(vault.collection("", false).unwrap().total, 1);
     }

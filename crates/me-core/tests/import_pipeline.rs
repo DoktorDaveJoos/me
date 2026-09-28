@@ -11,6 +11,7 @@ fn add(vault: &mut Vault, dir: &std::path::Path, name: &str) -> u64 {
 fn parallel_claims_skip_active_documents_and_keep_failures_independent() {
     let dir = tempfile::tempdir().unwrap();
     let mut vault = Vault::create(&dir.path().join("vault"), PASSWORD).unwrap();
+    vault.set_automatic_evaluation(true).unwrap();
     let a = add(&mut vault, dir.path(), "a.txt");
     let b = add(&mut vault, dir.path(), "b.eml");
     assert_eq!(
@@ -42,6 +43,7 @@ fn progress_survives_restart_and_stale_workers_cannot_overwrite_a_retry() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("vault");
     let mut vault = Vault::create(&root, PASSWORD).unwrap();
+    vault.set_automatic_evaluation(true).unwrap();
     let item = add(&mut vault, dir.path(), "a.txt");
     vault.begin_evaluation(item, true).unwrap();
     vault.begin_import_progress(item, "first").unwrap();
@@ -90,6 +92,7 @@ fn progress_survives_restart_and_stale_workers_cannot_overwrite_a_retry() {
 fn search_form_intake_is_reserved_for_explicit_form_processing() {
     let dir = tempfile::tempdir().unwrap();
     let mut vault = Vault::create(&dir.path().join("vault"), PASSWORD).unwrap();
+    vault.set_automatic_evaluation(true).unwrap();
     let form = add(&mut vault, dir.path(), "form.txt");
     let document = add(&mut vault, dir.path(), "letter.txt");
     vault.defer_automatic_document(form).unwrap();

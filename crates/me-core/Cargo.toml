@@ -24,8 +24,10 @@ sha2 = "0.10.9"
 tempfile = "3"
 thiserror = "2"
 url = "2"
+unicode-normalization = "0.1.25"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
+zxcvbn = { version = "=3.1.1", default-features = false }
 zip = { version = "=8.5.0", default-features = false, features = ["deflate"] }
 
 [lints]

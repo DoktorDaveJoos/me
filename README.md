@@ -76,11 +76,12 @@ the [account service](docs/accounts.md). Older backups still require the passwor
 used to create them. Exporting a document writes an unencrypted copy at your chosen location.
 
 The current app requires Codex installation and ChatGPT sign-in during setup.
-**Automatic AI analysis is enabled by default:** supported imports are read
-locally and their extracted content is sent to TypeSafe AI for typed decisions
-and to OpenAI through the signed-in ChatGPT account for extraction. This consumes that account's available usage. Disable automatic analysis
-in Settings to require manual release for analysis. Disabling it cannot retract
-content already sent. ME. does not ship a shared API key or use a paid OpenAI API fallback. TypeSafe
+**AI analysis sends document content to cloud providers:** supported imports are
+read locally and their extracted content is sent to TypeSafe AI for typed decisions
+and to OpenAI through the signed-in ChatGPT account for extraction. This consumes that account's available usage. New vaults
+start with automatic analysis off; release individual documents, or enable
+automatic analysis in Settings. Existing vaults keep their saved choice. Disabling
+it cannot retract content already sent. ME. does not ship a shared API key or use a paid OpenAI API fallback. TypeSafe
 requires your own API credential and can incur separate charges. See the
 [TypeSafe research, recovery design and spending limits](docs/import-reliability.md).
 

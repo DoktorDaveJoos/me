@@ -6,18 +6,11 @@ use std::{
     path::Path,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Preferences {
     pub reduced: bool,
+    /// Off until chosen: icon requests reveal saved login sites to each website.
     pub website_icons: bool,
-}
-impl Default for Preferences {
-    fn default() -> Self {
-        Self {
-            reduced: false,
-            website_icons: true,
-        }
-    }
 }
 
 pub(super) fn load(path: &Path) -> io::Result<Preferences> {
@@ -39,11 +32,15 @@ pub(super) fn load(path: &Path) -> io::Result<Preferences> {
     let reduced = value["reduce_motion"].as_bool().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "Invalid interface preference")
     })?;
+    // Icon requests reveal saved login sites. Version 1 stored the former default
+    // of on without a user choice, so only a version 2 value counts as consent.
     let website_icons = match value.get("website_icons") {
-        None => true,
-        Some(value) => value.as_bool().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "Invalid interface preference")
-        })?,
+        None => false,
+        Some(icons) => {
+            icons.as_bool().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "Invalid interface preference")
+            })? && value["version"].as_u64() == Some(2)
+        }
     };
     Ok(Preferences {
         reduced,
@@ -65,7 +62,7 @@ pub(super) fn save(path: &Path, preferences: Preferences) -> io::Result<()> {
             .mode(0o600)
             .open(&temporary)?;
         file.write_all(
-            serde_json::json!({"version":1,"reduce_motion":preferences.reduced,"website_icons":preferences.website_icons})
+            serde_json::json!({"version":2,"reduce_motion":preferences.reduced,"website_icons":preferences.website_icons})
                 .to_string()
                 .as_bytes(),
         )?;
@@ -106,17 +103,30 @@ mod tests {
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
     }
     #[test]
-    fn old_preferences_keep_motion_and_enable_website_icons() {
+    fn website_icons_stay_off_until_explicitly_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("interface.json");
-        fs::write(&path, r#"{"version":1,"reduce_motion":true}"#).unwrap();
-        assert_eq!(
-            load(&path).unwrap(),
-            Preferences {
-                reduced: true,
-                website_icons: true
-            }
-        );
+        assert!(!Preferences::default().website_icons);
+        // Version 1 saved the old default of on; it never recorded a choice.
+        for old in [
+            r#"{"version":1,"reduce_motion":true}"#,
+            r#"{"version":1,"reduce_motion":true,"website_icons":true}"#,
+        ] {
+            fs::write(&path, old).unwrap();
+            assert_eq!(
+                load(&path).unwrap(),
+                Preferences {
+                    reduced: true,
+                    website_icons: false
+                }
+            );
+        }
+        let chosen = Preferences {
+            reduced: false,
+            website_icons: true,
+        };
+        save(&path, chosen).unwrap();
+        assert_eq!(load(&path).unwrap(), chosen);
     }
     #[test]
     fn malformed_or_unbounded_preferences_are_rejected() {

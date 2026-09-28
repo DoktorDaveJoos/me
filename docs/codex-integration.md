@@ -113,9 +113,10 @@ Tresor. Erfolgreiche Anmeldung aktiviert keinen MCP-Lesezugriff automatisch.
 
 1. PDF, Foto/Scan, DOCX, ODT, RTF oder UTF-8-Text importieren und das Dokument öffnen.
    [Formatübersicht und lokale Verarbeitung](document-processing.md).
-2. Standardmäßig startet die automatische KI-Auswertung. Unter **Einstellungen**
-   lässt sie sich dauerhaft ausschalten; dann im Dokument **Inhalt freigeben und
-   mit KI auswerten** wählen. Die Oberfläche erklärt die Übermittlung des erkannten
+2. Neue Tresore starten ohne automatische KI-Auswertung, weil sie erkannten
+   Dokumenttext an OpenAI übermittelt. Im Dokument **Inhalt freigeben und mit KI
+   auswerten** wählen oder die Automatik unter **Einstellungen** ausdrücklich
+   einschalten. Bestehende Tresore behalten ihre gespeicherte Einstellung. Die Oberfläche erklärt die Übermittlung des erkannten
    Texts an OpenAI. PDF-Text und OCR werden vorher lokal verarbeitet.
 3. Der bereits eingerichtete Codex-Zugang verwendet das bestehende ChatGPT-Abo.
    Der getrennte Login wird von Codex unter `ME/codex-inbox` neben dem Tresor
@@ -147,7 +148,8 @@ startbaren Auftrag. Laufende Jobs werden beim nächsten Entsperren als
 unterbrochen markiert. Auswertung abbrechen oder Tresor sperren beendet den
 Modellprozess. Erledigte Dokumente werden nicht versehentlich doppelt ausgewertet.
 Die verschlüsselte Warteschlange verarbeitet unterstützte Dateien nacheinander.
-Automatik ist standardmäßig aktiv, einschließlich noch offener Bestandsimporte.
+Automatik ist in neuen Tresoren ausgeschaltet. Einschalten reiht auch bereits
+manuell wartende Dateien ein, einschließlich noch offener Bestandsimporte.
 Ausschalten stoppt laufende automatische Verarbeitung und setzt wartende Dateien
 auf manuelle Freigabe. Fehlgeschlagene Dateien werden nur auf expliziten erneuten
 Start wiederholt; ein Prozessabsturz erlaubt Wiederaufnahme beim Entsperren.
