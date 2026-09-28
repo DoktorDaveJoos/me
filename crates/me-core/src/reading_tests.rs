@@ -1575,3 +1575,31 @@ fn the_document_view_shows_checks_locations_and_periods_and_follows_decisions() 
         DocumentReadView::default()
     );
 }
+
+#[test]
+fn the_self_check_contains_counts_and_codes_but_no_labels_values_or_titles() {
+    let (mut vault, source) = synthetic_payslip_source();
+    let me = vault.profile_entity_id().unwrap();
+    vault.db.execute("INSERT OR REPLACE INTO document_profile(source_id,family,doc_type,family_confidence,type_confidence,tier,graph_state,classified_at) VALUES(?,'employment','payslip',0.9,0.9,'eager','resolved','2026-09-27')", [&source]).unwrap();
+    let read = DocumentRead {
+        run_id: "r".into(),
+        graph: Some(payslip(
+            &me,
+            vec![
+                money("wage_tax", "1032.58", 10),
+                month("2026-01-01", "2026-01-31"),
+            ],
+        )),
+        facts: vec![fact("Lohnsteuer", "1.032,58", Some("wage_tax"))],
+        uninterpreted: vec![],
+        rejected: [("value_not_in_quote".to_owned(), 2)].into(),
+    };
+    vault.apply_read(&source, &read).unwrap();
+    let report = vault.read_self_check().unwrap();
+    assert!(report.contains("employment/payslip"));
+    assert!(report.contains("read 1 · profile 1 · checks 0 · not interpreted 0"));
+    assert!(report.contains("value_not_in_quote=2"));
+    for secret in ["Lohnsteuer", "1.032,58", "1032.58", "payslip.pdf"] {
+        assert!(!report.contains(secret), "leaked {secret}");
+    }
+}

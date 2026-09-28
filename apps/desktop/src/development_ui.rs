@@ -63,6 +63,36 @@ impl MeApp {
         cx.notify();
     }
 
+    pub(super) fn copy_read_self_check(&mut self, cx: &mut Context<Self>) {
+        if !self.app_ready() {
+            return;
+        }
+        let session = self.session.clone();
+        let task = cx.background_executor().spawn(async move {
+            session
+                .lock()
+                .map_err(|_| me_core::Error::Format)?
+                .as_ref()
+                .ok_or(me_core::Error::Validation("Vault locked."))?
+                .read_self_check()
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(report) => {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(report));
+                        this.notice =
+                            Some("Extraction self-check copied. It contains counts only.".into());
+                    }
+                    Err(e) => this.error = Some(e.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn development_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div().w_full().min_w_0().max_w(px(layout::CONTENT_WIDTH)).flex_shrink_0().pt(px(space::LG)).border_t_1().border_color(rgb(LINE))
             .flex().flex_col().gap(px(space::MD))
@@ -70,15 +100,22 @@ impl MeApp {
             .child(div().w_full().min_w_0().max_w_full().flex_shrink_0().whitespace_normal().type_style(Type::Small).text_color(rgb(MUTED))
                 .child("Clear this vault’s files, notes, credentials, extracted data and import history. Your password, preferences and ChatGPT connection are kept."))
             .when(!self.development.confirming, |s| s.child(
-                primary_action().flex_shrink_0().id("wipe-data").bg(rgb(DANGER)).hover(|s| s.bg(rgb(INK)))
-                    .when(self.busy, |s| s.opacity(0.5))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.busy { return; }
-                        this.development.confirming = true;
-                        this.error = None;
-                        this.notice = None;
-                        cx.notify();
-                    })).child("Wipe data")))
+                div().flex().items_center().flex_wrap().gap(px(space::MD))
+                    .child(primary_action().flex_shrink_0().id("wipe-data").bg(rgb(DANGER)).hover(|s| s.bg(rgb(INK)))
+                        .when(self.busy, |s| s.opacity(0.5))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.busy { return; }
+                            this.development.confirming = true;
+                            this.error = None;
+                            this.notice = None;
+                            cx.notify();
+                        })).child("Wipe data"))
+                    .child(secondary_action().flex_shrink_0().id("copy-read-self-check").hover(|s| s.bg(rgb(HOVER)))
+                        .when(self.busy, |s| s.opacity(0.5))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.busy { return; }
+                            this.copy_read_self_check(cx);
+                        })).child("Copy extraction self-check"))))
             .when(self.development.confirming, |s| s.child(
                 div().w_full().flex_shrink_0().p(px(space::LG)).rounded(px(radius::STANDARD)).bg(rgb(DANGER_SURFACE))
                     .flex().flex_col().gap(px(space::MD))

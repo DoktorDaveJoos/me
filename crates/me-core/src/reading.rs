@@ -310,6 +310,41 @@ impl Vault {
         Ok(view)
     }
 
+    /// Counts-only diagnosis of every read document, safe to share: no titles,
+    /// labels, values or names. Documents are numbered in read order.
+    pub fn read_self_check(&self) -> Result<String> {
+        let mut stmt = self.db.prepare("SELECT coalesce(p.family,'unclassified'),coalesce(p.doc_type,'-'),r.values_read,r.in_profile,r.checks,r.uninterpreted,r.rejected_json,r.policy FROM read_summary r LEFT JOIN document_profile p ON p.source_id=r.source_id ORDER BY r.recorded_at")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
+            ))
+        })?;
+        let mut out = String::from("ME. extraction self-check (counts only)\n");
+        for (n, row) in rows.enumerate() {
+            let (family, doc_type, values, profile, checks, open, rejected, policy) = row?;
+            let rejected: BTreeMap<String, usize> =
+                serde_json::from_str(&rejected).unwrap_or_default();
+            let codes = rejected
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&format!(
+                "#{} {family}/{doc_type} · read {values} · profile {profile} · checks {checks} · not interpreted {open} · rejected {} · {policy}\n",
+                n + 1,
+                if codes.is_empty() { "none".into() } else { codes }
+            ));
+        }
+        Ok(out)
+    }
+
     /// Marks a read's extraction run and job finished.
     pub fn complete_read_run(&mut self, run_id: &str) -> Result<()> {
         let tx = self.db.transaction()?;
