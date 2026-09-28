@@ -1,0 +1,28 @@
+Muster Handel AG  Personalabteilung  Musterallee 5  20095 Hamburg
+Entgeltnachweis
+Abrechnungsmonat  02/2026
+Personalnummer  00087311
+Herrn Max Beispiel
+Beispielstraße 12
+10115 Berlin
+Steuer-ID  65929970489  Steuerklasse  1  Konfession  rk
+SV-Nummer  65 170839 J 003  Krankenkasse  Muster BKK
+Eintrittsdatum  01.09.2019
+Lohnart  Text  Betrag EUR
+M010  Tarifgehalt  4.650,00
+M230  Vermögenswirksame Leistungen AG  40,00
+M400  Einmalzahlung Urlaubsgeld  500,00
+/101  Summe Brutto  5.190,00
+Steuerrechtliche Abzüge
+/401  Lohnsteuer  912,41
+/403  Kirchensteuer rk  82,11
+/402  Solidaritätszuschlag  0,00
+SV-rechtliche Abzüge
+/311  KV-Beitrag AN  443,75
+/313  RV-Beitrag AN  482,67
+/314  AV-Beitrag AN  67,47
+/312  PV-Beitrag AN  93,42
+/550  Nettobetrag  3.108,17
+M780  VWL-Überweisung  -40,00
+/559  Auszahlung  3.068,17
+Bankverbindung  DE89 3704 0044 0532 0130 00

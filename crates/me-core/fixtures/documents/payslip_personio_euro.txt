@@ -1,0 +1,26 @@
+Muster Labs GmbH
+Musterstraße 7, 10178 Berlin
+Gehaltsabrechnung März 2026
+Mitarbeiter: Max Beispiel
+Personalnummer: 1042
+Eintrittsdatum: 01.02.2024
+Steuer-ID: 65929970489
+Steuerklasse: 1
+Sozialversicherungsnummer: 65 170839 J 003
+Krankenkasse: Muster Krankenkasse
+Bezüge
+Grundgehalt  4.200,00 €
+Bonus  300,00 €
+Gesamtbrutto  4.500,00 €
+Steuern
+Lohnsteuer  702,33 €
+Solidaritätszuschlag  0,00 €
+Kirchensteuer  0,00 €
+Sozialversicherung
+Krankenversicherung  384,75 €
+Rentenversicherung  418,50 €
+Arbeitslosenversicherung  58,50 €
+Pflegeversicherung  81,00 €
+Nettogehalt  2.854,92 €
+Auszahlungsbetrag  2.854,92 €
+Überweisung auf IBAN DE89 3704 0044 0532 0130 00

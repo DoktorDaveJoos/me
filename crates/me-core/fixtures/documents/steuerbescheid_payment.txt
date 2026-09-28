@@ -1,0 +1,21 @@
+Finanzamt Musterstadt  Musterplatz 1  12345 Musterstadt
+Herrn
+Max Beispiel
+Beispielstraße 12
+10115 Berlin
+Steuernummer   12/345/67890
+Identifikationsnummer   65929970489
+Datum   16.06.2026
+Bescheid für 2025 über Einkommensteuer
+Veranlagungszeitraum   2025
+Berechnungsgrundlagen
+zu versteuerndes Einkommen   48.211
+Festsetzung
+festgesetzt werden:   Einkommensteuer   7.412,00 €
+Solidaritätszuschlag   0,00 €
+Abrechnung
+abzüglich Steuerabzug vom Lohn   6.208,00 €
+verbleibende Beträge
+Nachzahlung   1.204,00 €   fällig am   15.07.2026
+Bitte zahlen Sie unter Angabe der Steuernummer auf das Konto des Finanzamts DE10 4306 0967 2231 5774 00.
+Vorauszahlungen für 2026 und folgende Jahre   0,00 €

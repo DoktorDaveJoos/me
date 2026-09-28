@@ -1,0 +1,16 @@
+BUNDESREPUBLIK DEUTSCHLAND
+REISEPASS / PASSPORT
+Typ / Type   P
+Kode / Code   D
+Pass-Nr. / Passport No.   C01X00T47
+Name / Surname   BEISPIEL
+Vornamen / Given names   ERIKA
+Staatsangehörigkeit / Nationality   DEUTSCH
+Geburtstag / Date of birth   12.08.1983
+Geschlecht / Sex   F
+Geburtsort / Place of birth   BERLIN
+Ausstellungsdatum / Date of issue   02.01.2021
+Behörde / Authority   Stadt Musterstadt
+Gültig bis / Date of expiry   01.01.2031
+P<D<<BEISPIEL<<ERIKA<<<<<<<<<<<<<<<<<<<<<<<<
+C01X00T478D<<8308126F3101012<<<<<<<<<<<<<<04

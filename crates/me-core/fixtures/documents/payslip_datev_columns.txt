@@ -1,0 +1,52 @@
+Muster Software GmbH  Musterweg 1  80331 München
+Abrechnung der Brutto/Netto-Bezüge für Januar 2026
+Pers.-Nr.  00042  Eintritt  01.04.2021
+Herrn  Max Beispiel  Beispielstraße 12  10115 Berlin
+Steuer-ID  65929970489  StKl  1  Kfb  0,0  Konf  --
+SV-Nummer  65 170839 J 003  Krankenkasse  AOK Bayern
+KV-Zusatzbeitrag  2,50 %  Faktor  0,950
+Lohnart
+1000
+1300
+Bezeichnung
+Gehalt
+Fahrtkostenzuschuss
+Gesamt-Brutto
+Lohnsteuer
+Solidaritätszuschlag
+Kirchensteuer
+KV-Beitrag
+RV-Beitrag
+AV-Beitrag
+PV-Beitrag
+Netto-Verdienst
+Auszahlungsbetrag
+Betrag
+5.250,00
+90,00
+5.340,00
+1.032,58
+0,00
+0,00
+435,21
+496,62
+69,42
+96,12
+3.210,05
+3.210,05
+Steuer-Brutto  5.340,00  KV-Brutto  5.340,00  RV-Brutto  5.340,00
+Überweisung an  DE89 3704 0044 0532 0130 00  3.210,05 EUR
+Jahreswerte  Steuer-Brutto  5.340,00  Lohnsteuer  1.032,58
+
+Lohnart   Bezeichnung   Betrag
+1000   Gehalt   5.250,00
+1300   Fahrtkostenzuschuss   90,00
+Gesamt-Brutto   5.340,00
+Solidaritätszuschlag   0,00
+Kirchensteuer   0,00
+KV-Beitrag   435,21
+RV-Beitrag   496,62
+AV-Beitrag   69,42
+PV-Beitrag   96,12
+Netto-Verdienst   3.210,05
+Auszahlungsbetrag   3.210,05

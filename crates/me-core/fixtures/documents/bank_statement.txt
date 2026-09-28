@@ -1,0 +1,15 @@
+Muster Bank eG  Musterstraße 1  10117 Berlin
+Kontoauszug Nr. 3/2026  Blatt 1 von 1
+Kontoinhaber:   Max Beispiel
+IBAN:   DE89 3704 0044 0532 0130 00
+BIC:   MUSTDEBBXXX
+Auszugszeitraum:   01.03.2026 bis 31.03.2026
+Buchungstag  Valuta  Vorgang  Betrag EUR
+alter Kontostand vom 28.02.2026   2.415,30
+02.03.2026  02.03.2026  Lastschrift Muster Versicherung AG  -34,90
+IBAN DE36 1203 0000 1004 2788 00  Mandat ZV2026448120
+27.03.2026  27.03.2026  Gutschrift Lohn/Gehalt Muster Software GmbH  +3.210,05
+IBAN DE23 5001 0517 0911 4823 00  Entgelt März 2026
+30.03.2026  01.04.2026  Dauerauftrag Miete Muster Wohnbau GmbH  -1.150,00
+IBAN DE02 7601 0085 0003 3182 00  Miete April 2026
+neuer Kontostand vom 31.03.2026   4.440,45

@@ -1,0 +1,18 @@
+Muster Elektro GmbH  Musterweg 9  04109 Leipzig
+Herrn
+Max Beispiel
+Beispielstraße 12
+10115 Berlin
+Rechnung
+Rechnungsnummer:   RE-2026-0317
+Rechnungsdatum:   12.03.2026
+Kundennummer:   K-88412
+Leistungsdatum:   05.03.2026
+Pos.   Beschreibung   Menge   Einzelpreis   Gesamt
+1   Austausch Steckdosen   4   18,50   74,00
+2   Arbeitszeit Elektriker (Std.)   2   65,00   130,00
+Nettobetrag   204,00 €
+USt 19 %   38,76 €
+Gesamtbetrag   242,76 €
+Zahlbar bis:   26.03.2026 ohne Abzug
+Bankverbindung: Muster Elektro GmbH   IBAN DE02 7601 0085 0003 3182 00
