@@ -73,6 +73,13 @@ fn reservations_and_step_results_survive_restart_without_resetting_allowance() {
         &json!({"untrusted":"01234567890"}),
     )
     .unwrap();
+    // The omission sweep's focused audit is a resumable step too.
+    v.save_import_step_cache(&first, "test-v1", "sweep_audit", &json!({"facts":[]}))
+        .unwrap();
+    assert!(
+        v.save_import_step_cache(&first, "test-v1", "unknown", &json!({}))
+            .is_err()
+    );
     v.update_import_progress(item, "first", ImportStage::Extracting, 2, 4)
         .unwrap();
     assert!(v.proposals(item).unwrap().is_empty());
@@ -95,6 +102,11 @@ fn reservations_and_step_results_survive_restart_without_resetting_allowance() {
             .unwrap()
             .unwrap()["untrusted"],
         "01234567890"
+    );
+    assert!(
+        v.import_step_cache(&second, "test-v1", "sweep_audit")
+            .unwrap()
+            .is_some()
     );
     assert!(
         v.reserve_import_request(&second, ImportProvider::OpenAi)
@@ -121,7 +133,7 @@ fn reservations_and_step_results_survive_restart_without_resetting_allowance() {
         !v.update_import_progress(item, "first", ImportStage::Complete, 1, 1)
             .unwrap()
     );
-    for _ in 1..24 {
+    for _ in 1..64 {
         v.reserve_import_request(&second, ImportProvider::TypeSafe)
             .unwrap();
     }
@@ -140,11 +152,11 @@ fn reservations_and_step_results_survive_restart_without_resetting_allowance() {
             usage.typesafe_calls,
             usage.unreported_calls
         ),
-        (12, 24, 35)
+        (12, 64, 75)
     );
     v.extend_import_allowance(item).unwrap();
     let usage = v.import_usage(item).unwrap();
-    assert_eq!((usage.openai_limit, usage.typesafe_limit), (24, 48));
+    assert_eq!((usage.openai_limit, usage.typesafe_limit), (24, 88));
     assert_eq!(usage.openai_calls, 12);
     v.begin_evaluation(item, false).unwrap();
     v.begin_import_progress(item, "third").unwrap();
@@ -209,5 +221,43 @@ fn reported_token_cap_prevents_the_next_request_and_does_not_double_count() {
     assert!(
         v.reserve_import_request(&input, ImportProvider::TypeSafe)
             .is_err()
+    );
+}
+#[test]
+fn a_refused_reservation_is_a_budget_quota_or_storage_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut v = Vault::create(&dir.path().join("vault"), PASSWORD).unwrap();
+    let a = document(&mut v, dir.path(), "a.txt");
+    let b = document(&mut v, dir.path(), "b.txt");
+    let kind =
+        |r: me_core::Result<String>| ImportFailure::refused_reservation(&r.unwrap_err()).kind;
+    v.begin_evaluation(a, false).unwrap();
+    v.begin_import_progress(a, "a").unwrap();
+    // Classify and verification requests stop at the file allowance.
+    for _ in 0..me_core::FILE_TYPESAFE_CALLS {
+        v.reserve_graph_request(a, "a", ImportProvider::TypeSafe)
+            .unwrap();
+    }
+    assert_eq!(
+        kind(v.reserve_graph_request(a, "a", ImportProvider::TypeSafe)),
+        ImportErrorKind::Budget
+    );
+    // An attempt that is no longer running cannot reserve anything.
+    assert_eq!(
+        kind(v.reserve_graph_request(a, "stale", ImportProvider::TypeSafe)),
+        ImportErrorKind::Storage
+    );
+    // A paused queue refuses every paid call as a quota stop.
+    v.begin_evaluation(b, false).unwrap();
+    v.begin_import_progress(b, "b").unwrap();
+    let quota = ImportFailure::new(
+        ImportProvider::OpenAi,
+        ImportErrorKind::Quota,
+        "OpenAI usage limit reached.",
+    );
+    v.record_import_failure(a, "a", &quota).unwrap();
+    assert_eq!(
+        kind(v.reserve_graph_request(b, "b", ImportProvider::TypeSafe)),
+        ImportErrorKind::Quota
     );
 }

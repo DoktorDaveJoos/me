@@ -1605,6 +1605,19 @@ fn month_period(year: i32, month: u32) -> Option<(String, String)> {
         iso_date(year, month, days_in_month(year, month))?,
     ))
 }
+/// Whether the inclusive ISO interval `start..=end` is exactly one calendar
+/// month (`Period::Month`) or one calendar year (`Period::Year`). No other
+/// granularity is recognized.
+pub fn whole_period(period: crate::Period, start: &str, end: &str) -> bool {
+    let year = start.get(..4).and_then(|y| y.parse::<i32>().ok());
+    let month = start.get(5..7).and_then(|m| m.parse::<u32>().ok());
+    let expected = match (period, year, month) {
+        (crate::Period::Month, Some(year), Some(month)) => month_period(year, month),
+        (crate::Period::Year, Some(year), _) => iso_date(year, 1, 1).zip(iso_date(year, 12, 31)),
+        _ => None,
+    };
+    expected.is_some_and(|(s, e)| s == start && e == end)
+}
 /// "15. Januar 2026" is a date, not a month.
 fn day_before(s: &str, i: usize) -> bool {
     let head = s[..i].trim_end();
@@ -3038,6 +3051,19 @@ mod tests {
 
     fn scan(text: &str) -> Vec<Candidate> {
         scan_with(text, &[])
+    }
+
+    #[test]
+    fn a_whole_period_is_exactly_one_calendar_month_or_year() {
+        use crate::Period::{Month, Quarter, Year};
+        assert!(whole_period(Month, "2024-02-01", "2024-02-29"));
+        assert!(!whole_period(Month, "2025-02-01", "2025-02-29"));
+        assert!(!whole_period(Month, "2026-02-01", "2026-03-31"));
+        assert!(!whole_period(Month, "2026-01-01", "2026-12-31"));
+        assert!(whole_period(Year, "2025-01-01", "2025-12-31"));
+        assert!(!whole_period(Year, "2025-01-01", "2025-01-31"));
+        assert!(!whole_period(Quarter, "2025-01-01", "2025-03-31"));
+        assert!(!whole_period(Month, "garbage", "2025-01-31"));
     }
 
     fn scan_with(text: &str, names: &[&str]) -> Vec<Candidate> {

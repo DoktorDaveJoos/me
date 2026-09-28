@@ -2,11 +2,9 @@
 //! they can be reviewed together. Thresholds are conservative starting values, not
 //! measured accuracy; tune them on labeled vault outcomes, never on model claims.
 //! Instructions are English (Jev's primary language); German text stays in state.
-use me_core::{
-    Candidate, CandidateKind, DocType, IdentityAnchors, Slot, ValueKind, doc_types::FAMILIES,
-    family_types,
-};
+use me_core::{IdentityAnchors, ValueKind, doc_types::FAMILIES, family_types, normalize_name};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeSet;
 
 /// Pinned model version; answers record the version that produced them.
 pub const MODEL: &str = "jev-1.13.0";
@@ -22,16 +20,14 @@ pub const SUBJECT_CONFIDENT: f64 = 0.6;
 /// Legibility below this skips extraction; the original stays searchable.
 pub const READABLE_FLOOR: f64 = 0.35;
 
-// Slot selection (select, don't generate).
-/// Choice confidence floor for asserting a value at all.
+// Slot mapping of reader facts.
+/// Confidence floor for asserting a value at all.
 pub const SLOT_FLOOR: f64 = 0.6;
-/// Existence Noul: found at or above, absent below `PRESENT_ABSENT`.
+/// Existence Noul: a stated property (such as a correction marker) at or above.
 pub const PRESENT_FOUND: f64 = 0.7;
-pub const PRESENT_ABSENT: f64 = 0.35;
-/// Options offered per slot; the Choice limit is 255.
+/// Competing facts offered per slot Choice in fact verification. The Choice
+/// limit is 255.
 pub const MAX_SLOT_OPTIONS: usize = 60;
-/// Bytes of source lines sent with an extraction request.
-pub const MAX_EXTRACT_STATE: usize = 24_000;
 
 // Universal verification (SDE-cascade heads: true means wrong).
 pub const VERIFY_FIRE: f64 = 0.7;
@@ -39,12 +35,10 @@ pub const VERIFY_FIRE: f64 = 0.7;
 pub const EQUIVALENT: f64 = 0.8;
 /// Score rounding cut point for proposing a merge (levels 0..2).
 pub const ALIGN_PROPOSE: f64 = 0.5;
-// On-demand search over lazy documents.
+// On-demand search over documents not read yet.
 pub const SEARCH_FOUND: f64 = 0.7;
 // Bands must stay ordered when a value is tuned.
-const _: () = assert!(
-    FAMILY_FLOOR < TYPE_CONFIDENT && PRESENT_ABSENT < PRESENT_FOUND && SLOT_FLOOR < TYPE_CONFIDENT
-);
+const _: () = assert!(FAMILY_FLOOR < TYPE_CONFIDENT && SLOT_FLOOR < TYPE_CONFIDENT);
 
 fn choice(instructions: Value, criteria: Map<String, Value>) -> Value {
     json!({"type":"choice","instructions":instructions,"criteria":criteria})
@@ -171,147 +165,34 @@ pub fn classify_questions(subjects: &SubjectOptions) -> Value {
     json!(questions)
 }
 
-fn field(slot: &Slot) -> Value {
-    json!({"name":slot.label,"description":slot.description})
-}
-fn kind_name(kind: CandidateKind) -> &'static str {
-    match kind {
-        CandidateKind::Date => "date",
-        CandidateKind::Money | CandidateKind::Amount => "amount",
-        CandidateKind::Period => "period",
-        CandidateKind::PersonName => "name",
-        CandidateKind::Organization => "organization",
-        _ => "value",
-    }
-}
-
-/// Slot questions for one document type. Returns the questions and, per slot, the
-/// candidate IDs offered (so code can map an answer back to a verbatim candidate).
-pub fn extract_questions(
-    kind: &DocType,
-    candidates: &[Candidate],
-    skip: &[&str],
-) -> (Value, Vec<(String, Vec<String>)>) {
-    let mut questions = Map::new();
-    let mut offered = Vec::new();
-    for slot in kind.slots {
-        if skip.contains(&slot.key) {
-            continue;
-        }
-        if let ValueKind::Category(options) = slot.value {
-            let criteria = options
-                .iter()
-                .map(|(k, d)| ((*k).to_owned(), json!(d)))
-                .collect();
-            questions.insert(
-                format!("slot_{}", slot.key),
-                choice(
-                    json!({"field":field(slot),"question":"Which option describes the `field` for `document`?"}),
-                    criteria,
-                ),
-            );
-            offered.push((slot.key.to_owned(), Vec::new()));
-            continue;
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        let options: Vec<&Candidate> = candidates
-            .iter()
-            .filter(|c| slot.accepts.contains(&c.kind))
-            // Identical text is one option; the first occurrence carries the evidence.
-            .filter(|c| seen.insert(c.text.trim().to_lowercase()))
-            .take(MAX_SLOT_OPTIONS)
-            .collect();
-        if options.is_empty() {
-            continue;
-        }
-        let mut criteria: Map<String, Value> = options
-            .iter()
-            .map(|c| {
-                let mut option = json!({"value":c.text,"line":c.line});
-                if let Some(label) = &c.label {
-                    option["label"] = json!(label);
-                }
-                option["kind"] = json!(kind_name(c.kind));
-                (c.id.clone(), option)
-            })
-            .collect();
-        criteria.insert(
-            "none".into(),
-            json!("None of these is the requested value, or `document` does not state it"),
-        );
-        questions.insert(
-            format!("slot_{}", slot.key),
-            choice(
-                json!({"field":field(slot),"question":"Which option is the value of `field` in `document`?"}),
-                criteria,
-            ),
-        );
-        questions.insert(
-            format!("present_{}", slot.key),
-            noul(json!({"field":field(slot),"question":"Does `document` state the `field`?"})),
-        );
-        if matches!(slot.value, ValueKind::Money(None)) {
-            let periods = me_core::PAYMENT_PERIODS
-                .iter()
-                .map(|(k, d)| ((*k).to_owned(), json!(d)))
-                .collect();
-            questions.insert(
-                format!("period_{}", slot.key),
-                choice(
-                    json!({"field":field(slot),"question":"If `document` states the `field`, how often is it paid?"}),
-                    periods,
-                ),
-            );
-        }
-        offered.push((
-            slot.key.to_owned(),
-            options.iter().map(|c| c.id.clone()).collect(),
-        ));
-    }
-    (json!(questions), offered)
-}
-
-/// SDE-cascade verification of values proposed by another model. Each head is
-/// phrased so that true means the value is wrong; any head above `VERIFY_FIRE` rejects.
-pub fn verify_questions(fields: &[(String, Value, String)]) -> Value {
-    let mut questions = Map::new();
-    for (key, spec, value) in fields {
-        let heads = [
-            (
-                "hallucinated",
-                "Is `extracted` unsupported by, or absent from, `document`?",
-            ),
-            (
-                "off_target",
-                "Does `document` fail to state the thing `field` describes, so that `extracted` was taken from unrelated text?",
-            ),
-            (
-                "wrong_person",
-                "Does `extracted` belong to a different person or organization than the one `field` asks about?",
-            ),
-            (
-                "format_violation",
-                "Is `extracted` not a plausible value of the kind `field` describes, for example a date where a name is expected?",
-            ),
-        ];
-        for (head, question) in heads {
-            questions.insert(
-                format!("{key}::{head}"),
-                json!({"type":"noul","instructions":{"field":spec,"extracted":value,"question":question},"criteria":{"true":"The extracted value is wrong in this way","false":"The extracted value is fine in this respect"}}),
-            );
-        }
-    }
-    json!(questions)
-}
-
 // Verification of reader facts. Every reader assumption is asked; code combines
-// the answers into one confidence (the weakest head) and a band.
+// the answers into one confidence (the weakest head) and a band. The state holds
+// the facts with their quote and line, the claimed slots and `document.excerpt`
+// (the letterhead), so every question is answerable from what is sent.
 /// Facts per verification request.
 pub const FACT_BATCH: usize = 20;
+/// Letterhead sent as `document.excerpt`: at most this many first lines and bytes.
+pub const LETTERHEAD_LINES: usize = 12;
+pub const LETTERHEAD_BYTES: usize = 2_000;
 
-/// Owner options: the anchors, people named in the document, an organization, unclear.
+/// Owner options: the anchors, other people named in the document, an organization,
+/// unclear. A named person who matches an anchor (normalized as in Classify) is
+/// offered only as that anchor, and spelling variants of one name are one option.
 pub fn owner_options(anchors: &IdentityAnchors, named: &[String]) -> SubjectOptions {
-    let mut options = subject_options(anchors, named);
+    let mut seen: BTreeSet<String> = anchors
+        .names()
+        .into_iter()
+        .map(|(_, n)| normalize_name(&n))
+        .collect();
+    let others: Vec<String> = named
+        .iter()
+        .filter(|name| {
+            let key = normalize_name(name);
+            !key.is_empty() && seen.insert(key)
+        })
+        .cloned()
+        .collect();
+    let mut options = subject_options(anchors, &others);
     options.criteria.remove("none");
     options.criteria.insert(
         "organization".into(),
@@ -319,7 +200,7 @@ pub fn owner_options(anchors: &IdentityAnchors, named: &[String]) -> SubjectOpti
     );
     options.criteria.insert(
         "unclear".into(),
-        json!("The document does not say whose detail this is"),
+        json!("Neither the fact's line nor the document excerpt says whose detail this is"),
     );
     options
 }
@@ -337,11 +218,11 @@ pub fn fact_questions(
     let heads = [
         (
             "hallucinated",
-            "Is `facts.{f}.value` unsupported by `facts.{f}.quote`, or not printed in `document` as the value of `facts.{f}.label`?",
+            "Is `facts.{f}.value` absent from `facts.{f}.quote`, or does `facts.{f}.quote` not state it as the value of `facts.{f}.label`?",
         ),
         (
             "off_target",
-            "Does `facts.{f}.label` fail to describe what `facts.{f}.value` is in `document`: for example a year-to-date total taken as a monthly amount, an employer share taken as the employee's, or a value from a different row or column?",
+            "Does `facts.{f}.label` fail to describe what `facts.{f}.value` is in `facts.{f}.quote` and `facts.{f}.line`: for example a year-to-date total taken as a monthly amount, an employer share taken as the employee's, or a value from a different row or column?",
         ),
     ];
     for (i, fact) in batch {
@@ -356,7 +237,7 @@ pub fn fact_questions(
             format!("{f}::owner"),
             choice(
                 json!(format!(
-                    "Whose detail is `facts.{f}` according to `document`?"
+                    "Whose detail is `facts.{f}` according to `facts.{f}.line` and `document.excerpt`?"
                 )),
                 owners.criteria.clone(),
             ),
@@ -365,11 +246,13 @@ pub fn fact_questions(
             q.insert(
                 format!("{f}::period"),
                 choice(
-                    json!(format!("Which period does the amount `facts.{f}` cover?")),
+                    json!(format!(
+                        "Which period does the amount `facts.{f}` cover, according to `facts.{f}.line` and `document.excerpt`?"
+                    )),
                     criteria(&[
                         (
                             "document",
-                            "The period this document is for, such as this payslip's month or this certificate's year",
+                            "The period this document is for, as `document.excerpt` shows: this payslip's month or this certificate's year",
                         ),
                         ("cumulative", "A cumulative or year-to-date total"),
                         (
@@ -388,7 +271,7 @@ pub fn fact_questions(
             q.insert(
                 format!("{f}::mapping"),
                 noul(json!(format!(
-                    "Is `facts.{f}` the `slots.{}` of `document`?",
+                    "Given `document.type` and `document.excerpt`, is `facts.{f}` the `slots.{}` of this document?",
                     slot.key
                 ))),
             );
@@ -398,7 +281,7 @@ pub fn fact_questions(
                         format!("{f}::direction"),
                         choice(
                             json!(format!(
-                                "Does `facts.{f}` state money paid back to the taxpayer or money the taxpayer must pay?"
+                                "According to `facts.{f}.label`, `facts.{f}.line` and `document.excerpt`, is `facts.{f}` money paid back to the taxpayer or money the taxpayer must pay?"
                             )),
                             criteria(&[
                                 ("refund", "Paid back to the taxpayer (Erstattung, Guthaben)"),
@@ -406,7 +289,10 @@ pub fn fact_questions(
                                     "payment",
                                     "The taxpayer must pay it (Nachzahlung, zu zahlen)",
                                 ),
-                                ("unclear", "The document does not say"),
+                                (
+                                    "unclear",
+                                    "Neither the fact nor the document excerpt says",
+                                ),
                             ]),
                         ),
                     );
@@ -415,7 +301,9 @@ pub fn fact_questions(
                     q.insert(
                         format!("{f}::payment_period"),
                         choice(
-                            json!(format!("How often is `facts.{f}` paid?")),
+                            json!(format!(
+                                "How often is `facts.{f}` paid, according to `facts.{f}.line` and `document.excerpt`?"
+                            )),
                             criteria(me_core::PAYMENT_PERIODS),
                         ),
                     );
@@ -424,7 +312,9 @@ pub fn fact_questions(
                     q.insert(
                         format!("{f}::category"),
                         choice(
-                            json!(format!("Which option describes `facts.{f}`?")),
+                            json!(format!(
+                                "Which option describes `facts.{f}`, given `document.type` and `document.excerpt`?"
+                            )),
                             criteria(options),
                         ),
                     );
@@ -436,7 +326,7 @@ pub fn fact_questions(
     if ask_correction {
         q.insert(
             "document::correction".into(),
-            noul(json!("Does `document` state that it corrects, replaces or cancels an earlier document of the same kind (Korrektur, Berichtigung, Stornierung, Nachberechnung, geändert)?")),
+            noul(json!("Does `document.excerpt` or any line in `facts` state that this document corrects, replaces or cancels an earlier document of the same kind (Korrektur, Berichtigung, Stornierung, Nachberechnung, geändert)?")),
         );
     }
     json!(q)
@@ -449,7 +339,7 @@ pub fn competing_questions(slot: &str, facts: &[usize]) -> Value {
         .map(|i| (format!("f{i}"), json!(format!("`facts.f{i}`"))))
         .collect();
     options.insert("none".into(), json!("None of these is the value"));
-    json!({format!("slot_{slot}"): choice(json!(format!("Which fact is the `slots.{slot}` of `document`?")), options)})
+    json!({format!("slot_{slot}"): choice(json!(format!("Which of `facts` is the `slots.{slot}` of this document, given `document.type` and `document.excerpt`?")), options)})
 }
 
 /// Whether two differently written values of one property mean the same thing.
@@ -487,7 +377,8 @@ pub fn alignment_questions(pairs: usize) -> Value {
     json!(questions)
 }
 
-/// One existence Noul per document for an on-demand search over lazy documents.
+/// One existence Noul per document for an on-demand search over documents not
+/// read yet.
 pub fn search_questions(count: usize) -> Value {
     let mut questions = Map::new();
     for i in 0..count {

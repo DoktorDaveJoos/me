@@ -40,7 +40,7 @@ pub(super) struct GraphState {
     reduce_running: bool,
     reduce_done_for: usize,
     busy: BTreeSet<String>,
-    pub lazy_documents: usize,
+    pub unread_documents: usize,
     deep_query: Option<String>,
     deep_running: bool,
     deep_found: Vec<(u64, String)>,
@@ -107,9 +107,9 @@ impl MeApp {
                 Some(b) => Some(v.batch_progress(&b)?),
                 None => None,
             };
-            let lazy = v.lazy_document_count()?;
+            let unread = v.unread_document_count()?;
             Ok::<_, me_core::Error>((
-                lazy,
+                unread,
                 v.identity_anchors()?,
                 v.quick_checks()?,
                 v.household_proposals()?,
@@ -125,10 +125,10 @@ impl MeApp {
                     return;
                 }
                 this.graph.loading = false;
-                if let Ok((lazy, anchors, checks, households, merges, constellation, batch)) =
+                if let Ok((unread, anchors, checks, households, merges, constellation, batch)) =
                     result
                 {
-                    this.graph.lazy_documents = lazy;
+                    this.graph.unread_documents = unread;
                     let was_unknown = this.graph.anchors.is_none();
                     if was_unknown || this.graph.setup_busy {
                         this.identity_name.update(cx, |i, cx| {
@@ -463,6 +463,8 @@ impl MeApp {
                 }
                 this.refresh_graph(cx);
                 this.refresh_search(cx);
+                // An allowance extension queues its stopped documents again.
+                this.kick_auto_queue(cx);
                 cx.notify();
             });
         })
@@ -534,8 +536,8 @@ impl MeApp {
         .detach();
     }
 
-    /// On demand: map an existence question over lazy documents, then read the
-    /// few that answer it in depth (the grounded extraction pipeline).
+    /// On demand: map an existence question over documents that have no read yet,
+    /// then read the few that answer it first (the same deep-first read pipeline).
     fn start_deep_search(&mut self, cx: &mut Context<Self>) {
         let query = self.filter.query.clone();
         if query.is_empty() || self.graph.deep_running || !self.ai_ready() {
@@ -553,7 +555,7 @@ impl MeApp {
                     .lock()
                     .map_err(|_| "Vault unavailable.".to_string())?;
                 let v = guard.as_ref().ok_or("Vault locked.".to_string())?;
-                v.lazy_document_excerpts(400).map_err(|e| e.to_string())?
+                v.unread_document_excerpts(400).map_err(|e| e.to_string())?
             };
             let mut decisions =
                 me_agent::typesafe::TypeSafe::configured().map_err(|f| f.message)?;
@@ -604,7 +606,7 @@ impl MeApp {
     }
     pub(super) fn deep_search_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let current = self.graph.deep_query.as_deref() == Some(self.filter.query.as_str());
-        if self.filter.query.is_empty() || self.graph.lazy_documents == 0 || !self.ai_ready() {
+        if self.filter.query.is_empty() || self.graph.unread_documents == 0 || !self.ai_ready() {
             return div().into_any_element();
         }
         div().mt(px(space::LG)).p(px(space::LG)).rounded(px(radius::STANDARD)).border_1().border_color(rgb(LINE)).bg(rgb(SURFACE))
@@ -612,25 +614,25 @@ impl MeApp {
             .child(div().flex().items_center().gap(px(space::SM))
                 .child(icon(Icon::Spark, IconSize::Medium, ACCENT))
                 .child(div().type_style(Type::Label).child(format!(
-                    "{} filed {} not read in detail yet",
-                    self.graph.lazy_documents,
-                    if self.graph.lazy_documents == 1 { "document is" } else { "documents are" }
+                    "{} filed {} not read yet",
+                    self.graph.unread_documents,
+                    if self.graph.unread_documents == 1 { "document is" } else { "documents are" }
                 ))))
             .child(div().type_style(Type::Small).text_color(rgb(MUTED)).child(match (current, self.graph.deep_running, self.graph.deep_found.len()) {
                 (true, true, _) => "Checking which ones answer your search…".to_owned(),
                 (true, false, 0) if self.graph.deep_error.is_none() => "None of them seems to answer this search.".to_owned(),
                 (true, false, n) if n > 0 => format!(
-                    "Reading {} in detail: {}. New details appear in Review.",
+                    "Reading {} now: {}. New details appear in Review.",
                     if n == 1 { "1 document".to_owned() } else { format!("{n} documents") },
                     self.graph.deep_found.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(", ")
                 ),
-                _ => "ME. can check them for this search and read the matching ones in detail.".to_owned(),
+                _ => "Every document is read in turn. ME. can check these for your search and read the matching ones first.".to_owned(),
             }))
             .when_some(self.graph.deep_error.clone().filter(|_| current), |s, e| s.child(div().type_style(Type::Small).text_color(rgb(DANGER)).child(e)))
             .when(!current || (!self.graph.deep_running && self.graph.deep_error.is_some()), |s| s.child(
                 secondary_action().id("deep-search").hover(|s| s.bg(rgb(HOVER)))
                     .on_click(cx.listener(|this, _, _, cx| this.start_deep_search(cx)))
-                    .child(icon(Icon::Search, IconSize::Medium, INK)).child("Look inside filed documents")))
+                    .child(icon(Icon::Search, IconSize::Medium, INK)).child("Look inside unread documents")))
             .into_any_element()
     }
     fn setup_shell(
@@ -1061,7 +1063,7 @@ impl MeApp {
             .when_some(batch.filter(|b| b.openai_calls >= b.openai_allowance && b.openai_allowance > 0), |s, b| {
                 let id = b.id.clone();
                 s.child(div().p(px(space::MD)).rounded(px(radius::STANDARD)).bg(rgb(WARNING_SURFACE)).flex().flex_col().gap(px(space::XS))
-                    .child(div().type_style(Type::Small).text_color(rgb(WARNING)).child("OpenAI allowance for this import is used up. Documents continue with local reading and TypeSafe only."))
+                    .child(div().type_style(Type::Small).text_color(rgb(WARNING)).child("OpenAI allowance for this import is used up. Its remaining documents wait unread until you allow more calls."))
                     .child(div().id("batch-extend").type_style(Type::Small).text_color(rgb(ACCENT)).cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let id = id.clone();
