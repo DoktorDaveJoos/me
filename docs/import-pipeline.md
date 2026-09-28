@@ -1,6 +1,6 @@
 # Importing documents that people can trust
 
-Research and implementation decision, updated 18 September 2026.
+Research and implementation decision, updated 28 September 2026.
 
 The current [TypeSafe, recovery and spending design](import-reliability.md)
 details the per-stage checkpoint implementation and provider boundaries.
@@ -10,94 +10,225 @@ what remains uncertain. It is not a claim of perfect OCR or perfect AI interpret
 A plausible answer without the right person, period and source is a failed import
 outcome, even when every character in the answer occurs somewhere in the file.
 
-## Tiered pipeline and personal graph
+## Deep-first reading
 
-Implemented 27 September 2026; design in
-[the import pipeline spec](superpowers/specs/2026-09-27-import-pipeline-design.md).
-It replaces full OpenAI extraction for automatically queued files. Explicit
-**Run AI** and on-demand reading keep the grounded deep extraction below.
+Implemented 27–28 September 2026; design in
+[the deep-first extraction spec](superpowers/specs/2026-09-27-deep-first-extraction-design.md).
+It replaces the tiered pipeline's candidate selection and gap fill. Every
+document, automatic or started manually, is read in full by one pipeline
+(`apps/desktop/src/read_import.rs`); the pure steps are in
+`crates/me-agent/src/read_assembly.rs`. The registry type decides which values
+may enter the profile, not whether a document is read.
 
-1. **Intake.** Window drops, file picking and folder dumps create envelopes
-   (`intake_envelope`/`envelope_source`). Identical bytes are stored once; a
-   repeat links the existing source. A folder dump first shows one summary
-   (files, size, unreadable formats, hidden files) instead of a per-file list, and
-   queues behind interactive drops. Scanner and mail sources are envelope kinds
-   without a producer yet.
-2. **Normalize.** Unchanged local OCR and parsing.
-3. **Candidates (Context step).** `me_core::find_candidates` finds typed values
-   locally with their exact source spans: MRZ (ICAO 9303 check digits), IBAN
-   (mod 97), BIC, German tax ID and pension insurance number (check digits),
-   German/ISO dates (no invented centuries), money with an explicit currency,
-   labeled identifiers, names after salutations or matching the anchors, plates,
-   VINs, organizations, streets, postal codes and cities.
-4. **Classify (Interpretation step).** One TypeSafe request per document: family
-   Choice, one speculative type Choice per family, subject Choice with an
-   existence Noul, legibility and mixed-document Nouls. An uncertain type keeps
-   only the family. A valid MRZ decides the subject. Classification is cached by
-   content fingerprint, registry, model and anchors.
-5. **Extract (Extraction step), eager types only.** One TypeSafe request selects
-   candidate IDs per slot, each Choice paired with an existence Noul and, for open
-   payment periods, a closed period Choice. MRZ fields need no judgment. When a
-   required slot is still missing and the import's OpenAI allowance permits, one
-   small grounded deep-extraction section proposes values; they are offered as
-   new candidates and verified with SDE-cascade Nouls (hallucinated, off target,
-   wrong person, format) before use.
-6. **Resolve (Verification step).** Entities are matched by scoped identifiers
-   (passport/ID number, IBAN, VIN, plate, contract number per provider,
-   normalized organization name, normalized street per postal code). Names alone
-   never merge people. Values become assertions accepted by policy
-   `import-graph-v1`, with `assertion_review` confidence and source. Newer
-   documents close older open intervals in any import order; overlapping
-   different values are flagged as conflicts. User decisions are never
-   overridden.
-7. **Reduce.** When the queue is idle, TypeSafe judges flagged conflicts that
-   differ only in spelling and organizations that share a leading name word
-   (Score plus companion Noul). Results become quick checks or merge proposals,
-   never automatic merges.
+1. **Intake.** Window drops, file picking and folder dumps create envelopes.
+   Identical bytes are stored once and a repeat links the existing source. A
+   folder dump first shows one summary (files, size, unreadable formats, hidden
+   files) and queues behind interactive drops.
+2. **Normalize.** Unchanged local parsing and OCR, cut into canonical segments of
+   at most 1,600 bytes.
+3. **Classify.** One TypeSafe request per document: family, type, subject,
+   legibility and mixed sources. A family below 0.5 becomes `other`; an uncertain
+   type keeps only its family. A valid machine-readable zone decides the subject.
+   The result is cached by content, registry, model and identity anchors, and
+   saved as the document's profile on every read.
+4. **Read.** The grounded reader (`codex_pipeline`) reads the whole document in
+   3,200-byte parts with one segment of overlap. Its instructions carry the
+   family/type guide and the type's checklist (slot key, label, description);
+   each fact may carry a `slot` from that checklist or `none`. Each part gets a
+   TypeSafe legibility judgment and an omission/attribution check, and at most one
+   focused re-read when that check or local grounding flags it. Parts are
+   checkpointed under the pipeline version and the guide, so a document classified
+   again with another guide is read again.
+5. **Ground.** Exact quote in its segment, value in the quote, subject and context
+   in the source. A fact that fails is dropped and counted by its rejection code;
+   one that only lacks its owner stays for verification.
+6. **Omission sweep.** The local scanners run over the whole text. Checksum-valid
+   identifiers (IBAN, tax ID, pension insurance number, MRZ) and amounts or dates
+   with a printed label that no fact quotes trigger one focused audit request with
+   the segments that hold them (at most 12,000 bytes). Whatever stays uncovered is
+   stored as **not interpreted** with its label, printed value and location.
+7. **Type locally.** Code locates each fact and types its value for the tagged
+   slot: complete dates, month periods, years only after a printed period keyword
+   (`Veranlagungszeitraum 2025`), checksums, tax class, and amounts with the
+   currency rule (the document's single printed currency, else EUR for payslips,
+   wage tax certificates and tax assessments, else none). A tag whose value cannot
+   hold the slot is removed; the fact stays. A printed category that is not a code
+   (a tariff name) keeps its tag for TypeSafe. Machine-readable-zone fields are
+   filled by position, never from a tag.
+8. **Verify.** One TypeSafe request per 20 facts, with the letterhead (first 12
+   lines, at most 2,000 bytes). Every fact gets two failure Nouls (invented, off
+   target) and an owner Choice (the anchors, up to 24 people named in the document,
+   an organization, unclear). Amounts get a period Choice (this document's period,
+   cumulative, another period, not periodic). Tagged facts get a mapping Noul and,
+   where their slot needs it, a refund/payment, payment-period or category Choice.
+   One correction Noul per document. When several facts claim one slot, one Choice
+   among them decides. A fact's confidence is its weakest head.
+9. **Profile values and persistence.** Machine-readable-zone fields, then every
+   verified mapping, then the pay-month fallback (below). Resolve (policy
+   `import-graph-v2`) turns them into assertions; every located fact becomes a
+   `document_fact` row, and a `read_summary` row keeps counts and rejection codes.
 
-Lazy documents (invoices, letters, health documents, unknown types) are classified
-and searchable. On Search, **Look inside filed documents** asks one existence Noul
-per lazy document, several documents per request, and reads up to three matches
-with the deep extraction.
+**Verification bands.** A fired failure Noul (> 0.7) or a confidence below 0.6
+rejects the assumption: the grounded fact stays on its document, marked
+uncertain and detached from the profile. Below the vault's check threshold
+(starts at 0.8, moves between 0.7 and 0.9 from the user's Quick-check outcomes) a
+profile value is accepted and waits in **Quick checks**; a document fact gets an
+**uncertain** marker and no question. Otherwise it is accepted silently and
+marked unreviewed. A mapping also requires the subject as owner for the person's
+own slots, this document's period for monthly or yearly amounts, a judged
+direction for a refund or back payment, and no cumulative period for an open
+premium or payment. Question texts and thresholds are in
+`crates/me-agent/src/typesafe_questions.rs`; requests pin `jev-1.13.0`.
 
-**Review.** Everything automatic is usable immediately and marked unreviewed.
-Values below the check threshold, value conflicts, household proposals (three
-documents about the same non-anchor person) and merge proposals appear under
-**Quick checks** in Review. The threshold starts at 0.8 and moves to 0.9 or 0.7
-from the user's own review outcomes; no numeric confidence is displayed.
+**Read store and Resolve.** Migration 16 adds `document_fact` (label, printed
+value, location, owner, period, slot, linked assertion and state `verified`,
+`uncertain`, `unverified` or `uninterpreted`) and `read_summary`. Money conflicts
+compare only values of the same payment period, so monthly payslip values never
+conflict with an annual certificate. A document judged a correction retracts
+earlier automatic single-valued values of the same subject, property, employer
+and exact period from other sources. A re-read replaces the source's document
+facts and withdraws its support from earlier automatic values it no longer finds;
+a value no other source supports is retracted. User decisions are never
+overridden.
 
-**Identity setup.** “Who are you?” records the self name, former names, birth
-date and household anchors before the first dump. It can be skipped and does not
-block imports. The Imports page shows the growing constellation of entities,
-completed-work progress, family clusters and the latest discovery in words.
+**Re-reading.** Migration 16 queues documents finished by the tiered reader for
+a full read behind new imports (priority 0). The queue respects automatic
+analysis, allowances and pauses. Cached classification is reused; reading and
+verification run again.
 
-All TypeSafe questions and thresholds are in
-`crates/me-agent/src/typesafe_questions.rs`. Requests pin `jev-1.13.0`, record the
-answering model, and retry 429/529 up to three times honoring `retry-after`.
-Every request is reserved against the per-file allowance before it is sent.
+**Allowances.** Every paid request is reserved durably before it is sent. Each
+file has a lifetime allowance of 12 OpenAI calls, 64 TypeSafe requests and
+180,000 reported tokens, extendable by 12/24/180,000. Files of a folder import
+also share the import's allowance of 200 OpenAI calls, extendable by 200. Once
+an import is used up, its remaining files stop before any paid step (before
+Classify, before the reader and before the audit) with the typed reason
+**Import allowance reached** (`BatchBudget`); a file at its own limit shows
+**Analysis allowance reached**. Imports shows one notice per exhausted import
+(“Allow more OpenAI calls for this import”); the stopped file offers “Allow more
+OpenAI calls for this import and resume”. Extending an import re-queues only the
+files it stopped, as queued while automatic analysis is on and as ready to start
+otherwise. A file that runs out mid-document keeps its finished parts.
 
-### Verification — 27 September 2026
+**Imports line.** A finished read shows its counts, for example “9 values read ·
+4 in profile · 1 check · 3 not interpreted”. A file stopped at an allowance without a stored read
+shows **Not read yet** or, once its extraction step had progress, **Partly
+read**, with the reason. It is never shown as done. A stopped re-read keeps its
+earlier read and its “Paused at …” line.
 
-- Workspace formatting, the design-system guard and its regression checks, and
-  workspace Clippy with all targets and features pass.
-- Tests pass across the workspace, including migration 14 → 15, the registry,
-  candidates (34 synthetic tests), Resolve (order independence, identifier
-  matching, spelling-equivalent addresses, conflicts, user decisions, household
-  proposals, threshold tuning), intake deduplication and queue priority, and the
-  TypeSafe pipeline with scripted answers.
-- One opt-in live test (`live_synthetic_payslip_is_classified_and_its_values_selected`)
-  sent two requests with a synthetic payslip to TypeSafe: it was classified as
-  an employment payslip about the anchor, and employer, gross and net were
-  selected correctly.
-- Release measurement on this Mac: 1 000 synthetic payslips resolved in 9.5 s
-  (about 10 ms each, local SQLCipher); constellation and quick checks read back
-  in 27 ms. Conflict marking compares only a document's new assertions, so the
-  cost stays linear in a property's history.
-- The synthetic `identity_gallery` example was inspected at 1120×780 and 800×600:
-  all four setup steps, the dump summary, the constellation and quick checks.
-- Not verified: live accuracy on real German documents, the OpenAI gap-fill path
-  end to end, OS folder drops, Linux rendering and screen readers. Thresholds are
-  starting values, not calibrated accuracy.
+**Read from this document.** The document detail groups what was read into **In
+your profile** (linked to an accepted profile value), **Other details** and **Not
+interpreted**. Each row shows the printed label, the value in Geist Mono, its
+location (“Page 1 · OCR”) and period, and “Waiting in Quick checks” or “Uncertain
+reading” where they apply. The earlier “Found in this document” list stays below
+it for older proposals.
+
+**Failures.** A reader failure stops the file with a typed reason; usage-limit
+and sign-in failures pause the queue. A failed verification stores every located
+fact as unverified (owner unknown, never linked) and keeps the source's existing
+profile values; the run stays resumable. A stopped verification stores nothing.
+
+**Search.** **Look inside unread documents** asks one existence Noul per unread
+document, several documents per request, and reads up to three matches first.
+
+**Review, identity and reduce.** Quick checks, the identity setup, household and
+merge proposals and the idle-time reduce judgments (spelling-equivalent
+conflicts, organizations sharing a leading name word) are unchanged from the
+tiered pipeline. No numeric confidence is displayed.
+
+**Extraction self-check.** In builds with development tools (ME Dev), Settings →
+Development → **Copy extraction self-check** copies one line per read document: family and type, values read, in
+profile, checks, not interpreted, rejection codes and policy. It contains counts
+and codes only, never titles, labels or values
+([development.md](development.md#extraction-self-check)).
+
+**Synthetic corpus and live evaluation.** `crates/me-core/fixtures/documents`
+holds eleven invented documents in real layouts: DATEV payslips as OCR rows and
+as a split-column text layer with appended OCR rows, SAP and Personio payslips,
+a Lohnsteuerbescheinigung with EUR/Ct columns, a Steuerbescheid with a refund
+and one with a back payment, an insurance letter, a bank statement, an invoice
+and a passport with a machine-readable zone. `expectations.json` lists 191
+expected facts with slot, period and owner. `crates/me-core/tests/corpus.rs`
+checks that every value the scanners count as worth reading is expected, every
+quote is verbatim and every expected profile value type-checks.
+`crates/me-agent/tests/live_eval.rs` runs the real reader and TypeSafe over the
+corpus and prints, per family, classification, slot recall and precision, fact
+recall, owner and period accuracy, false completions, checks, values not
+interpreted, and reader and TypeSafe requests per document. It is opt-in and
+spends ChatGPT usage and TypeSafe requests:
+
+```sh
+ME_CODEX_TEST_HOME=<signed-in ME. Codex home> \
+  ./scripts/cargo test -p me-agent --test live_eval -- --ignored --nocapture
+```
+
+### Known limits
+
+- The omission audit runs only when scanner-visible values are uncovered. A
+  missing required checklist slot alone does not trigger one. It sends at most
+  12,000 bytes of the segments holding uncovered values; values beyond that stay
+  not interpreted.
+- The scanners do not label every layout, so some misses are never audited:
+  amounts in the Lohnsteuerbescheinigung's EUR/Ct columns, the cells of a
+  split-column text layer below the column's first, and table rows whose
+  wage-type code contains a letter (`M010  Tarifgehalt  4.650,00`).
+- Reader checkpoints are namespaced by guide; a new classification with another
+  guide pays for a new read.
+- Pay-month fallback: when no fact fills `pay_month` or `tax_year`, the one
+  period of the matching granularity printed in the context quotes of verified
+  amounts for this document's period is used. Two different periods, or none,
+  leave the slot empty.
+- A failed verification stores unverified facts and keeps the source's earlier
+  profile values until a resume succeeds.
+- Corrections supersede only through an employer role. A corrected tax
+  assessment never supersedes the earlier one; the difference stays a Quick
+  check.
+- `document_fact` and `read_summary` rows have no single-source purge path yet;
+  only the development wipe removes them.
+- Virtual filing uses the Classify family at its 0.5 floor.
+- Digit-only identifiers (a tax ID, a personnel number) also parse as whole
+  amounts, so verification asks them the period question and its confidence
+  counts toward theirs.
+- The queue is ordered by priority and import order, not by type.
+- Every automatic import pays for a full read, including documents whose type
+  fills no profile values. A one-page document needs one reader request, one
+  more per flagged part and one for the omission audit when values stay
+  uncovered; on TypeSafe, one Classify request, two per part, one verification
+  request per 20 facts and one per contested slot.
+
+### Verification — 28 September 2026
+
+Run on this Mac from the repository root, with the shared build cache:
+
+- `./scripts/cargo fmt --all -- --check`: clean.
+- `./scripts/check-design-system`: “Design system OK: 55 Rust files, 34
+  consistent icons.” `python3 scripts/test-design-system.py`: 5 tests OK.
+- `./scripts/cargo clippy --workspace --all-targets --all-features -- -D
+  warnings`: clean (only the existing future-incompatibility note for `block` and
+  `proc-macro-error2`).
+- `./scripts/cargo test --workspace`: 407 passed, 0 failed, 11 ignored. Among
+  them me-core 179 unit tests (1 ignored) with the new year-typing test, the
+  corpus (2), me-agent 79 unit tests (4 ignored), the live evaluation's offline
+  scorer check (1; the live evaluation itself is ignored), and me-app 51.
+  `./scripts/cargo test -p me-agent --no-run` builds every me-agent test target.
+- Synthetic gallery states inspected during the implementation (27–28
+  September), window-only, at 1120×780 and 800×600: the “Read from this document”
+  groups, the Imports read line with Not read yet and Partly read, and the
+  exhausted-import notice; at 1120×820 and 800×600, the self-check button beside
+  Wipe data, with the copied text and the notice. No UI changed for this
+  documentation step, and these states were not inspected again.
+
+Not verified:
+
+- Live accuracy on the user's real documents. The user checks it in ME Dev.app;
+  the self-check reports counts without contents.
+- The live evaluation baseline: `live_eval` has not been run, so no recall,
+  precision or cost figures exist yet. Eleven synthetic documents would not be a
+  population accuracy measurement either, and thresholds are starting values,
+  not calibrated accuracy.
+- OS file drops, Linux rendering and runtime, screen readers, and the dark
+  appearance of the new views.
+- The expanded Not read yet and Partly read rows, and the `budget` and `complete`
+  gallery modes.
 
 ## Findings from primary sources
 
@@ -131,8 +262,9 @@ PDFKit/Vision and Poppler/Tesseract implementations.
    section counts, elapsed time, failure and retry controls, or review outcome.
    The overall percentage measures completed work across five stage bars, never
    estimated elapsed time. Each planned section moves through the stages in order.
-5. Suggestions remain subject to the existing Review flow. Confirming file import
-   never confirms inferred facts. No suggestions is not proof of completeness.
+5. What was read is usable at once and marked unreviewed; doubtful profile
+   values wait in Quick checks. Confirming the file import never confirms what
+   was read, and few values read is not proof of completeness.
 
 Search’s explicit Add a file / file-paste flow retains its existing form-matching
 behavior after confirmation. It reserves these files for the form reader so the
@@ -148,11 +280,11 @@ family, semantic colors, spacing tokens and the standard 8 px radius.
 | --- | --- | --- |
 | Save original | Read a bounded regular file; encrypt and durably store it. | Per-file saving/queued state; success only after persistence. |
 | Normalization | Decode text/Office/MIME or locally recognize PDF/image text. Preserve source sections and attachment boundaries. | Real OCR page counts where the parser provides them. |
-| Interpretation | TypeSafe evaluates document family, readability, table layout and mixed sources. | Completed section count and cached typed decisions. |
-| Context | Apply local document guidance. Today this includes payslip distinctions and correspondence/insurance/email reading rules. | Explicitly says local guidance; no web search is claimed. |
-| Extraction | Extract documented values with their labels, person, period and exact source references. | Section counts; the immutable original is retained. |
-| Verification | Local grounding and TypeSafe omission/attribution checks; at most one focused OpenAI audit when indicated. | Completed checks; unresolved candidates remain questions. |
-| Review | Persist supported suggestions and unresolved questions separately. | Counts and links to the existing document/review UI. |
+| Interpretation | TypeSafe classifies the document (family, type, subject, legibility, mixed sources) and judges each part's legibility. | Completed section count and cached typed decisions. |
+| Context | Apply the local reading guide of the document's family and type, and its profile checklist. | Explicitly says local guidance; no web search is claimed. |
+| Extraction | Extract documented values with their labels, person, period, proposed profile slot and exact source references. | Section counts; the immutable original is retained. |
+| Verification | Local grounding; per-part TypeSafe omission/attribution checks with at most one focused re-read; the document's omission sweep with at most one audit; local typing; TypeSafe verification of each fact's meaning, owner, period and slot. | Completed checks; doubtful profile values become Quick checks; values nobody interpreted stay listed. |
+| Review | Store profile values through Resolve, document facts and not-interpreted values. | The Imports read line and “Read from this document”. |
 
 For an insurance letter, sender, recipient, insured person and policyholder must
 not collapse into one person. Policy number, issue date, coverage dates, amount,
@@ -227,8 +359,9 @@ changes, avoiding reuse of older cached semantics for a new analysis.
 ## Quality gates and evaluation plan
 
 Existing guarantees: bounded parsing, exact source grounding, no silent text
-truncation, typed omission check and conditional audit, checkpoint validation, separate uncertain
-questions, and no automatic fact confirmation. These are necessary, but an exact
+truncation, typed omission sweep and conditional audit, checkpoint validation,
+TypeSafe verification of every fact with Quick checks for doubtful profile
+values, and no automatic user confirmation. These are necessary, but an exact
 quote alone does not establish correct semantics or full recall.
 
 The next extractor milestone should introduce a structured intermediate document:
@@ -238,7 +371,9 @@ A quality gate can then route ambiguous regions to a second local pass or to a
 consented visual model. Neither that richer layout model nor a visual-model
 fallback is implemented in this change.
 
-Build a versioned, consented or synthetic evaluation corpus spanning plain text,
+A first synthetic corpus of eleven layouts and its opt-in live evaluation exist
+(see [Deep-first reading](#deep-first-reading)); no baseline has been recorded
+yet. Still to build: a versioned, consented or synthetic corpus spanning plain text,
 German posted letters, health-insurance notices, policies/claims, invoices, native
 and scanned PDFs, mixed PDFs, rotated phone photos, multi-column tables, email
 alternatives, nested attachments, mixed languages and multi-person bundles. Hold

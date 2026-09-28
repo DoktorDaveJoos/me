@@ -1,6 +1,8 @@
 # Deep-first extraction with TypeSafe verification — design
 
-Design agreed 27 September 2026. Status: approved design, not implemented.
+Design agreed 27 September 2026. Status: implemented 27–28 September 2026; see
+[import-pipeline.md](../../import-pipeline.md#deep-first-reading) for verified
+behavior and limits.
 Supersedes the extraction part of
 [the tiered import pipeline design](2026-09-27-import-pipeline-design.md)
 (steps 4 and 5 of its architecture). Intake, normalization, classification,

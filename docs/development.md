@@ -71,6 +71,26 @@ adds private entitlements or weakens code requirements. See Apple's
 [code requirements note](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements)
 and [ScreenCaptureKit signing explanation](https://developer.apple.com/forums/thread/819406).
 
+## Extraction self-check
+
+To diagnose how ME Dev read real documents without sharing them, unlock the
+vault, open **Settings** and choose **Copy extraction self-check** in the
+Development section (development-tools builds only: ME Dev and previews, never a
+release candidate). The vault is read on a background thread and the clipboard
+receives one line per read document, in the order the reads were stored:
+
+```text
+ME. extraction self-check (counts only)
+#1 employment/payslip · read 24 · profile 15 · checks 1 · not interpreted 0 · rejected none · import-graph-v2
+```
+
+Each line holds the Classify family and type, the values read, those in the
+profile, Quick checks, values not interpreted, grounding rejection codes with
+counts, and the graph policy. It contains counts and codes only: no titles, file
+names, labels, values or names are read for it. Review the text before pasting it
+anywhere. See [import-pipeline.md](import-pipeline.md#deep-first-reading) for what
+the counts mean.
+
 ## Checks before handing out a build
 
 Run `./scripts/check-design-system`, the Python design/packaging regression tests,

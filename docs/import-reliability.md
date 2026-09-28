@@ -38,12 +38,13 @@ choices. See [TypeSafe confidence](https://docs.typesafe.ai/confidence) and the
 | Interpretation | TypeSafe family, legibility, tabular-layout and mixed-source decisions. | One completed decision per section; validated decisions are cached. |
 | Context | Apply local payroll/correspondence guidance and cautious layout instructions. | Local completed sections. No web research or generation call. |
 | Extraction | OpenAI generates documented facts with exact source quotations, person and period. | Completed sections. Raw structured results are saved before later checks. |
-| Verification | Deterministic source grounding plus TypeSafe omission and attribution checks. If indicated, allow one OpenAI audit. Ground its results again. | Complete only after the checks finish. Unsupported candidates remain questions. |
+| Verification | Deterministic source grounding plus TypeSafe omission and attribution checks. If indicated, allow one OpenAI audit. Ground its results again. Then the document's omission sweep (at most one audit) and TypeSafe verification of every fact; see [deep-first reading](import-pipeline.md#deep-first-reading). | Complete only after the checks finish. Doubtful profile values become Quick checks; values nobody interpreted stay listed. |
 
-Virtual filing reuses the saved TypeSafe categories locally. Consistent,
-sufficiently confident classifications map to Employment, Insurance,
-Correspondence or Invoices; missing/mixed decisions map to Unsorted. This removes
-the previous additional OpenAI organization loop. Search, chat and explicit form
+Virtual filing reuses the family Classify saved for each document (a family
+below 0.5 confidence counts as other). Employment, insurance, correspondence and
+invoice families map to their folders; every other family and unclassified
+documents map to Unsorted. This removes the previous additional OpenAI
+organization loop. Search, chat and explicit form
 assistance are separate features; their decisions have not all been migrated to
 TypeSafe in this change.
 
@@ -61,11 +62,14 @@ because time passed. Stage counters advance only on completion.
 
 Extraction favors retaining legible, source-backed candidates even when ownership,
 terminology or context is uncertain. Unknown meanings keep their printed document
-label; they are not guessed into a profile field. An empty `subject_quote` explicitly
-requests ownership review. Grounding checks the source, value and any supplied
-context first, then stores a question such as **Is this your tax ID?**. Only an
-explicit user confirmation makes it personal. Missing ownership alone does not
-trigger a paid audit; TypeSafe still checks for omissions and incorrect associations.
+label; they are not guessed into a profile field. An empty `subject_quote` leaves
+ownership open. Grounding checks the source, value and any supplied context first;
+TypeSafe's owner Choice then decides whose detail it is. A doubtful owner or
+mapping becomes a Quick check for a profile value, or an uncertain marker on the
+document, never a silent assignment. Questions such as **Is this your tax ID?**
+from earlier reads stay until the user answers them. Missing ownership alone does
+not trigger a paid audit; TypeSafe still checks for omissions and incorrect
+associations.
 The request schema and cache namespace stay compatible so existing paid steps are
 reused. New or unfinished extraction calls use the more inclusive guidance;
 completed imports are not silently reanalyzed.
