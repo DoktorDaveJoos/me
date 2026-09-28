@@ -46,7 +46,12 @@ may enter the profile, not whether a document is read.
    identifiers (IBAN, tax ID, pension insurance number, MRZ) and amounts or dates
    with a printed label that no fact quotes trigger one focused audit request with
    the segments that hold them (at most 12,000 bytes). Whatever stays uncovered is
-   stored as **not interpreted** with its label, printed value and location.
+   stored as **not interpreted** with its label, printed value and location. An
+   amount that starts a table cell takes the row's label cell on its left: text
+   with more letters than digits, no `Label:` colon of its own and at most 256
+   bytes. Joined EUR/Ct amounts on the Lohnsteuerbescheinigung, long numbered
+   form rows and SAP rows with a letter wage-type code (`M010`) are therefore
+   labeled and audited.
 7. **Type locally.** Code locates each fact and types its value for the tagged
    slot: complete dates, month periods, years only after a printed period keyword
    (`Veranlagungszeitraum 2025`), checksums, tax class, and amounts with the
@@ -59,7 +64,10 @@ may enter the profile, not whether a document is read.
    lines, at most 2,000 bytes). Every fact gets two failure Nouls (invented, off
    target) and an owner Choice (the anchors, up to 24 people named in the document,
    an organization, unclear). Amounts get a period Choice (this document's period,
-   cumulative, another period, not periodic). Tagged facts get a mapping Noul and,
+   cumulative, another period, not periodic). A value counts as an amount when it
+   prints a currency marker, exactly two decimals or a joined EUR/Ct pair. A whole
+   number counts only when it is tagged for a money slot, so a tax ID or a
+   personnel number is not asked about a period. Tagged facts get a mapping Noul and,
    where their slot needs it, a refund/payment, payment-period or category Choice.
    One correction Noul per document. When several facts claim one slot, one Choice
    among them decides. A fact's confidence is its weakest head.
@@ -167,10 +175,12 @@ ME_CODEX_TEST_HOME=<signed-in ME. Codex home> \
   missing required checklist slot alone does not trigger one. It sends at most
   12,000 bytes of the segments holding uncovered values; values beyond that stay
   not interpreted.
-- The scanners do not label every layout, so some misses are never audited:
-  amounts in the Lohnsteuerbescheinigung's EUR/Ct columns, the cells of a
-  split-column text layer below the column's first, and table rows whose
-  wage-type code contains a letter (`M010  Tarifgehalt  4.650,00`).
+- The scanners still do not label every layout, so some misses are never
+  audited. In a split-column text layer, the cells below a column's first have
+  their label in another column block, not in their own row. Invoice line items
+  have a quantity or unit price as the left cell, not a label. An amount after a
+  value cell (a date, an IBAN) or after a label cell longer than 256 bytes is
+  also missed.
 - Reader checkpoints are namespaced by guide; a new classification with another
   guide pays for a new read.
 - Pay-month fallback: when no fact fills `pay_month` or `tax_year`, the one
@@ -185,9 +195,10 @@ ME_CODEX_TEST_HOME=<signed-in ME. Codex home> \
 - `document_fact` and `read_summary` rows have no single-source purge path yet;
   only the development wipe removes them.
 - Virtual filing uses the Classify family at its 0.5 floor.
-- Digit-only identifiers (a tax ID, a personnel number) also parse as whole
-  amounts, so verification asks them the period question and its confidence
-  counts toward theirs.
+- A whole number with no currency marker, decimals or money-slot tag (a free
+  `4.200` on a tax assessment) is not asked the period question, so its
+  document fact has no period. A reader tag for a money slot still asks it, also
+  when the reader wrongly tagged an identifier; the mapping Noul judges that tag.
 - The queue is ordered by priority and import order, not by type.
 - Every automatic import pays for a full read, including documents whose type
   fills no profile values. A one-page document needs one reader request, one
@@ -210,6 +221,12 @@ Run on this Mac from the repository root, with the shared build cache:
   corpus (2), me-agent 79 unit tests (4 ignored), the live evaluation's offline
   scorer check (1; the live evaluation itself is ignored), and me-app 51.
   `./scripts/cargo test -p me-agent --no-run` builds every me-agent test target.
+- The row-label and amount-flag fix came later the same day. After it, `test
+  --workspace` gave 410 passed, 0 failed, 11 ignored: me-core 181 unit tests,
+  with the row-label and omission-sweep tests, and me-agent 80 unit tests, with
+  the amount-flag test. The corpus stayed green without new expectations,
+  because its quotes already covered every newly labeled value. `fmt` and
+  `clippy` were clean.
 - Synthetic gallery states inspected during the implementation (27–28
   September), window-only, at 1120×780 and 800×600: the “Read from this document”
   groups, the Imports read line with Not read yet and Partly read, and the

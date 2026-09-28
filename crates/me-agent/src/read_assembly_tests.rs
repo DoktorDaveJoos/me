@@ -118,6 +118,67 @@ fn facts_are_located_typed_and_keep_only_slots_their_value_can_hold() {
 }
 
 #[test]
+fn only_values_printed_as_money_or_tagged_for_money_are_asked_their_period() {
+    let segments = seg(PAYSLIP);
+    let typing = TypingContext::new(&segments, Some("payslip"), 2026);
+    let payslip = me_core::doc_type("payslip").unwrap();
+    let assessment = me_core::doc_type("tax_assessment").unwrap();
+    let (gross, tax_id) = (payslip.slot("gross"), payslip.slot("tax_id"));
+    let balance = assessment.slot("tax_balance");
+
+    // Digit-only identifiers are no amounts, tagged or not.
+    assert!(!looks_like_money(&typing, "65929970489", None));
+    assert!(!looks_like_money(&typing, "65929970489", tax_id));
+    assert!(!looks_like_money(&typing, "00042", None));
+    // Two decimals or a currency marker say "amount" by themselves.
+    assert!(looks_like_money(&typing, "1.032,58", None));
+    assert!(looks_like_money(&typing, "-40,00", None));
+    assert!(looks_like_money(&typing, "812,00 €", None));
+    assert!(looks_like_money(&typing, "4.200 EUR", None));
+    // A whole amount is money only in a money slot, where it types as one.
+    assert!(!looks_like_money(&typing, "4.200", None));
+    assert!(looks_like_money(&typing, "4.200", gross));
+    assert!(looks_like_money(&typing, "1.204", balance));
+    assert!(!looks_like_money(&typing, "Acme GmbH", gross));
+    // Joined EUR/Ct cells are an amount only under an EUR/Ct header.
+    assert!(!looks_like_money(&typing, "64.080   00", None));
+    let lstb = seg("EUR   Ct\n3. Bruttoarbeitslohn   64.080   00\n");
+    let typing = TypingContext::new(&lstb, Some("wage_tax_certificate"), 2026);
+    assert!(looks_like_money(&typing, "64.080   00", None));
+
+    // type_facts sets the flag with the same rule.
+    let text = "Steuer-ID 65929970489\nPersonalnummer 00042\nLohnsteuer 1.032,58\n";
+    let segments = seg(text);
+    let typing = TypingContext::new(&segments, Some("payslip"), 2026);
+    let facts = vec![
+        fact(
+            "person.tax_id",
+            "65929970489",
+            "Steuer-ID 65929970489",
+            "",
+            "tax_id",
+        ),
+        fact(
+            "document.Personalnummer",
+            "00042",
+            "Personalnummer 00042",
+            "",
+            "none",
+        ),
+        fact(
+            "document.Lohnsteuer",
+            "1.032,58",
+            "Lohnsteuer 1.032,58",
+            "",
+            "wage_tax",
+        ),
+    ];
+    let (_, inputs) = type_facts(&facts, &segments, &typing, Some(payslip));
+    let money: Vec<bool> = inputs.iter().map(|i| i.money).collect();
+    assert_eq!(money, [false, false, true]);
+}
+
+#[test]
 fn verdicts_become_stored_facts_linked_only_when_mapped() {
     let segments = seg(PAYSLIP);
     let typing = TypingContext::new(&segments, Some("payslip"), 2026);

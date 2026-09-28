@@ -5,7 +5,7 @@
 use crate::fact_verification::{Band, FactInput, Owner, PeriodKind, Verdict};
 use me_core::{
     Candidate, CandidateKind, CandidateValue, ConfidenceSource, DocType, DocumentRead,
-    ExtractedFact, FactState, ImportErrorKind, Located, ReadFact, RejectedFact, SlotContent,
+    ExtractedFact, FactState, ImportErrorKind, Located, ReadFact, RejectedFact, Slot, SlotContent,
     SlotValue, SourceSegment, TypingContext, Uncovered, ValueKind, doc_types::MrzField, locate,
     type_value,
 };
@@ -79,6 +79,28 @@ pub fn fact_label(property: &str) -> String {
         .unwrap_or_else(|| property.to_owned())
 }
 
+/// Whether a fact's value is an amount, so verification asks which period it
+/// covers. A value printed as money says so itself: a currency marker, exactly
+/// two decimals, or a joined EUR/Ct cell pair under an EUR/Ct header. A whole
+/// number counts only when the reader tagged a money slot, where it types as a
+/// whole amount; untagged, a digit-only value is an identifier (a tax ID, a
+/// personnel number) and is never asked the period question.
+pub fn looks_like_money(typing: &TypingContext, value: &str, slot: Option<&Slot>) -> bool {
+    if slot.is_some_and(|s| matches!(s.value, ValueKind::Money(_) | ValueKind::Balance)) {
+        return me_core::amount_of(typing, value).is_some();
+    }
+    if me_core::parse_bare_amount(value, typing.euro_cent, false).is_some() {
+        return true;
+    }
+    let printed = [SourceSegment {
+        id: "v",
+        text: value,
+    }];
+    me_core::find_candidates(&printed, &[], typing.year)
+        .iter()
+        .any(|c| c.kind == CandidateKind::Money && c.text.trim() == value.trim())
+}
+
 /// Locates and types every reader fact. Facts whose quote or value is not
 /// verbatim in their segment are left out. A slot tag is kept only when the value
 /// type-checks for it, or when it names a category code could not map.
@@ -99,6 +121,7 @@ pub fn type_facts<'f>(
         let slot = kind
             .and_then(|k| k.slot(&fact.slot))
             .filter(|s| s.mrz.is_none());
+        let money = looks_like_money(typing, &fact.value, slot);
         let candidate = slot.and_then(|s| type_value(typing, &at, &label, &fact.value, s.value));
         let category_unmapped =
             matches!(slot.map(|s| s.value), Some(ValueKind::Category(_))) && candidate.is_none();
@@ -108,7 +131,7 @@ pub fn type_facts<'f>(
             value: fact.value.clone(),
             quote: fact.quote.clone(),
             line: at.line.clone(),
-            money: me_core::amount_of(typing, &fact.value).is_some(),
+            money,
             slot,
             category_unmapped,
         });

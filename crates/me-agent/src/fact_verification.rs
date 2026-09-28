@@ -15,7 +15,9 @@ pub struct FactInput {
     pub value: String,
     pub quote: String,
     pub line: String,
-    /// The value parses as an amount; the period question applies.
+    /// The value is printed as an amount, or is a whole amount the reader tagged
+    /// for a money slot (`read_assembly::looks_like_money`); the period question
+    /// applies. Digit-only identifiers are not amounts.
     pub money: bool,
     /// Slot the reader tagged and the value type-checked for.
     pub slot: Option<&'static Slot>,

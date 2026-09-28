@@ -53,6 +53,36 @@ mod tests {
     use crate::{SourceSegment, find_candidates, locate};
 
     const PAYSLIP: &str = include_str!("../fixtures/documents/payslip_datev_rows.txt");
+    const LSTB: &str = include_str!("../fixtures/documents/lstb_2026.txt");
+
+    #[test]
+    fn official_form_amounts_nobody_read_are_listed_with_their_row_label() {
+        let segments = [SourceSegment {
+            id: "s0",
+            text: LSTB,
+        }];
+        let found = find_candidates(&segments, &[], 2026);
+        let at = locate(
+            &segments,
+            "s0",
+            "4. Einbehaltene Lohnsteuer von 3.   12.390   96",
+            "12.390   96",
+        )
+        .unwrap();
+        let open = uncovered(&found, &[("s0".to_owned(), at.quote_start, at.quote_end)]);
+        let amounts: Vec<(Option<&str>, &str)> = open
+            .iter()
+            .filter(|u| u.kind == CandidateKind::Amount)
+            .map(|u| (u.label.as_deref(), u.text.as_str()))
+            .collect();
+        assert!(amounts.contains(&(
+            Some("3. Bruttoarbeitslohn einschl. Sachbezüge"),
+            "64.080   00"
+        )));
+        // Eight of the form's nine EUR/Ct amounts; the quoted one is covered.
+        assert_eq!(amounts.len(), 8, "{amounts:?}");
+        assert!(!amounts.iter().any(|(_, t)| *t == "12.390   96"));
+    }
 
     #[test]
     fn values_no_fact_covers_are_listed_and_covered_ones_are_not() {

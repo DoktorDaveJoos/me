@@ -1854,9 +1854,12 @@ fn parse_amount(s: &str, i: usize) -> Option<(usize, String)> {
     Some((j, amount))
 }
 
+/// Amounts with a currency marker. One that starts a cell takes the row label
+/// cell on its left (see [`is_row_label`]).
 fn scan_money(ctx: &LineCtx<'_>, out: &mut Vec<Raw>) {
     let s = ctx.text;
     let b = s.as_bytes();
+    let mut cells = None;
     let mut i = 0;
     while i < b.len() {
         let signed = matches!(b[i], b'-' | b'+') || s.get(i..).is_some_and(|r| r.starts_with('−'));
@@ -1888,15 +1891,12 @@ fn scan_money(ctx: &LineCtx<'_>, out: &mut Vec<Raw>) {
             None => None,
         };
         if let Some((currency, start, stop)) = marker {
-            out.push(ctx.raw(
-                CandidateKind::Money,
-                start,
-                stop,
-                CandidateValue::Money {
-                    amount,
-                    currency: currency.to_string(),
-                },
-            ));
+            let value = CandidateValue::Money {
+                amount,
+                currency: currency.to_string(),
+            };
+            let raw = ctx.raw(CandidateKind::Money, start, stop, value);
+            out.push(with_row_label(ctx, &mut cells, raw));
         }
         i = end.max(i + 1);
     }
@@ -1969,9 +1969,21 @@ pub fn parse_bare_amount(text: &str, euro_cent: bool, allow_whole: bool) -> Opti
 }
 
 /// Bare amounts: exactly two decimals and no adjacent currency marker or `%`.
+/// An amount that starts a cell takes the row label cell on its left (see
+/// [`is_row_label`]), also when it joins separate EUR and Ct cells.
 fn scan_amounts(ctx: &LineCtx<'_>, out: &mut Vec<Raw>) {
     let s = ctx.text;
     let b = s.as_bytes();
+    let mut cells = None;
+    let mut push = |start: usize, stop: usize, amount: String, out: &mut Vec<Raw>| {
+        let raw = ctx.raw(
+            CandidateKind::Amount,
+            start,
+            stop,
+            CandidateValue::Amount(amount),
+        );
+        out.push(with_row_label(ctx, &mut cells, raw));
+    };
     let mut i = 0;
     while i < b.len() {
         let signed = matches!(b[i], b'-' | b'+')
@@ -1994,22 +2006,12 @@ fn scan_amounts(ctx: &LineCtx<'_>, out: &mut Vec<Raw>) {
             || next_char(s, after) == Some('%');
         let two_decimals = amount.rsplit_once('.').is_some_and(|(_, f)| f.len() == 2);
         if !marked && two_decimals && number_end(s, end) {
-            out.push(ctx.raw(
-                CandidateKind::Amount,
-                i,
-                end,
-                CandidateValue::Amount(amount),
-            ));
+            push(i, end, amount, out);
         } else if !marked
             && ctx.doc.euro_cent
             && let Some((stop, joined)) = euro_cent_pair(s, end, &amount)
         {
-            out.push(ctx.raw(
-                CandidateKind::Amount,
-                i,
-                stop,
-                CandidateValue::Amount(joined),
-            ));
+            push(i, stop, joined, out);
             i = stop;
             continue;
         }
@@ -2995,6 +2997,39 @@ fn is_label_text(s: &str) -> bool {
     (2..=40).contains(&s.len()) && has_letter(s)
 }
 
+/// A table row's label cell for the value cell to its right: text rather than a
+/// value or code (more letters than digits, not a lone currency code), without
+/// a `Label:` colon of its own (the same-line rule finds those) and no longer
+/// than a same-line label is searched. Longer than a catch-all label, because
+/// official forms print long numbered row labels
+/// ("22. a) Arbeitgeberanteil zur gesetzlichen Rentenversicherung").
+fn is_row_label(cell: &str) -> bool {
+    let letters = cell.chars().filter(|c| c.is_alphabetic()).count();
+    cell.len() <= LABEL_SCAN
+        && letters > digit_count(cell)
+        && label_colon(cell).is_none()
+        && currency_at(cell, 0).is_none_or(|(_, end)| end < cell.len())
+}
+
+/// `raw` with the row label cell left of the cell it starts, when there is one.
+/// A joined EUR/Ct amount starts its euro cell, so it takes that row's label
+/// too. `cells` caches the line's cells across the line's candidates.
+fn with_row_label(ctx: &LineCtx<'_>, cells: &mut Option<Vec<(usize, usize)>>, raw: Raw) -> Raw {
+    let s = ctx.text;
+    let cells = cells.get_or_insert_with(|| split_cells(s));
+    let start = raw.start - ctx.base;
+    let label = cells
+        .iter()
+        .position(|&(cs, _)| cs == start)
+        .and_then(|k| cells[..k].last().copied())
+        .filter(|&(ls, le)| is_row_label(&s[ls..le]))
+        .map(|l| ctx.abs(l));
+    Raw {
+        label: label.or(raw.label),
+        ..raw
+    }
+}
+
 fn scan_label_values(ctx: &LineCtx<'_>, out: &mut Vec<Raw>) {
     let s = ctx.text;
     let cells = split_cells(s);
@@ -3701,6 +3736,97 @@ mod tests {
         // Without the header, two separate numbers stay separate.
         let plain = scan("Kostenstelle   4711   12\n");
         assert!(!plain.iter().any(|c| c.kind == CandidateKind::Amount));
+    }
+
+    #[test]
+    fn an_amount_cell_takes_the_row_label_cell_on_its_left() {
+        let found = scan(include_str!("../fixtures/documents/lstb_2026.txt"));
+        // Joined EUR/Ct cells take the row's label, also one longer than a
+        // label/value catch-all label (41 and 60 bytes here).
+        assert_eq!(
+            labeled_amount(&found, "3. Bruttoarbeitslohn einschl. Sachbezüge").as_deref(),
+            Some("64080.00")
+        );
+        assert_eq!(
+            labeled_amount(&found, "4. Einbehaltene Lohnsteuer von 3.").as_deref(),
+            Some("12390.96")
+        );
+        assert_eq!(
+            labeled_amount(
+                &found,
+                "22. a) Arbeitgeberanteil zur gesetzlichen Rentenversicherung"
+            )
+            .as_deref(),
+            Some("5959.44")
+        );
+        assert_eq!(
+            labeled_amount(
+                &found,
+                "27. Arbeitnehmerbeiträge zur Arbeitslosenversicherung"
+            )
+            .as_deref(),
+            Some("833.04")
+        );
+        let amounts = of_kind(&found, CandidateKind::Amount);
+        assert_eq!(amounts.len(), 9);
+        assert!(amounts.iter().all(|c| c.label.is_some()), "{amounts:?}");
+        assert!(amounts.iter().all(|c| crate::worth_reading(c)));
+
+        // A wage-type code before the label cell no longer shifts the label.
+        let sap = scan(include_str!("../fixtures/documents/payslip_sap.txt"));
+        assert_eq!(
+            labeled_amount(&sap, "Tarifgehalt").as_deref(),
+            Some("4650.00")
+        );
+        assert_eq!(
+            labeled_amount(&sap, "Einmalzahlung Urlaubsgeld").as_deref(),
+            Some("500.00")
+        );
+        assert_eq!(
+            labeled_amount(&sap, "VWL-Überweisung").as_deref(),
+            Some("-40.00")
+        );
+
+        // Money that starts a cell takes the row label the same way, before a
+        // `Label:` earlier on the line.
+        let money = scan(
+            "festgesetzt werden:   Einkommensteuer   7.412,00 €\n\
+             Vorauszahlungen für 2026 und folgende Jahre   0,00 €\n",
+        );
+        let labels: Vec<Option<&str>> = of_kind(&money, CandidateKind::Money)
+            .into_iter()
+            .map(|c| c.label.as_deref())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                Some("Einkommensteuer"),
+                Some("Vorauszahlungen für 2026 und folgende Jahre")
+            ]
+        );
+
+        // A left cell holding a value (an IBAN, a date) is no label; the amount
+        // stays unlabeled.
+        let values = scan(
+            "Konto  DE89 3704 0044 0532 0130 00  1.234,56\n\
+             Valuta  01.02.2026  99,00\n\
+             Überweisung an  DE89 3704 0044 0532 0130 00  3.210,05 EUR\n",
+        );
+        let unlabeled: Vec<&str> = values
+            .iter()
+            .filter(|c| matches!(c.kind, CandidateKind::Amount | CandidateKind::Money))
+            .filter(|c| c.label.is_none())
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(unlabeled, ["1.234,56", "99,00", "3.210,05 EUR"]);
+        // Codes, currency codes, `Label:` cells (found by the same-line rule) and
+        // prose longer than a label scan are no row labels.
+        assert!(!is_row_label("EUR"));
+        assert!(!is_row_label("M010"));
+        assert!(!is_row_label("Lohnsteuer:"));
+        assert!(!is_row_label(&"Lohn ".repeat(60)));
+        assert!(is_row_label("Januar 2026"));
+        assert!(is_row_label("4. Einbehaltene Lohnsteuer von 3."));
     }
 
     #[test]
