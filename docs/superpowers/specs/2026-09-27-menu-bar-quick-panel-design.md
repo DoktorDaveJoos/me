@@ -64,7 +64,8 @@ quick panel for search and fast intake of documents and notes.
 - Its view holds a handle to the kept `MeApp` entity and calls narrow
   `pub(crate)` methods on it: unlock, search query/results, `accept_documents`,
   pending-import confirmation and `save_note`.
-- Closes on Esc, and when the panel window loses activation.
+- Closes on Esc, a second status item click or "Open ME.". It does not close
+  on deactivation: dragging a file from Finder activates Finder first.
 - States:
   - Locked: master-password field and unlock action; errors reuse the existing
     unlock messages. Busy state while key derivation runs off the UI thread.

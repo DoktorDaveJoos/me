@@ -232,7 +232,7 @@ impl MeApp {
         })
         .detach();
     }
-    fn copy_detail(&mut self, fact: me_core::DataFact, cx: &mut Context<Self>) {
+    pub(super) fn copy_detail(&mut self, fact: me_core::DataFact, cx: &mut Context<Self>) {
         if !self.app_ready() {
             return;
         }

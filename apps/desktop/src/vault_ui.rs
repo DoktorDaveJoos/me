@@ -177,9 +177,17 @@ impl MeApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.lock(cx) {
+            window.focus(&self.password.focus_handle(cx));
+        }
+    }
+
+    /// Locks without a window, e.g. from the menu bar while the main window is
+    /// closed. Returns false while a development wipe owns the vault.
+    pub(crate) fn lock(&mut self, cx: &mut Context<Self>) -> bool {
         #[cfg(any(debug_assertions, feature = "development-tools"))]
         if self.development.wiping {
-            return;
+            return false;
         }
         let knowledge_view = self.knowledge.loaded.then(|| self.knowledge.view.clone());
         let old = self.detach_vault(cx);
@@ -202,8 +210,8 @@ impl MeApp {
             });
         })
         .detach();
-        window.focus(&self.password.focus_handle(cx));
         cx.notify();
+        true
     }
 
     /// Invalidate callbacks, cancel workers, and disconnect their session before

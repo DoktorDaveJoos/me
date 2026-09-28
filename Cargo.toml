@@ -23,7 +23,7 @@ gpui = { version = "=0.2.2", default-features = false }
 me-core = { path = "crates/me-core" }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [profile.release]
 lto = "thin"

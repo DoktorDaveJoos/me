@@ -548,3 +548,19 @@ lists with a `+N` count per row; zero counts use `FAINT`. Done uses a success
 card and the shared warning surface for deleting the plaintext export. Errors use
 the danger surface inside the current step. No new tokens were added.
 
+
+## Menu bar quick panel
+
+The macOS status item uses the bundled `honeycomb.svg`, rasterized at 18 pt as an
+AppKit template image so the system tints it. Left click toggles the quick panel;
+right or control click shows Open ME., Lock ME. and Quit ME.
+
+The panel is a fixed `layout::QUICK_PANEL_WIDTH` × `QUICK_PANEL_HEIGHT` pop-up
+below the item: `SURFACE`, 1 px `LINE` border, standard radius, `XXL` inset.
+Its header is the compact wordmark with an "Open ME." link. Fields reuse the
+44 px input frame. Locked: body text, password field, 44 px primary Unlock with
+`action_indicator`. Ready: search field, up to five result rows (Caption label,
+Small Geist Mono value, "Copy"/"Copied" in words), a `QUICK_DROP_HEIGHT` drop
+zone (dashed `DECORATIVE` border on `BG`, `ACCENT` border and `HOVER` fill while
+dragging), a note field and a secondary "Save note". Pending drops list each
+file and need the compact "Add" confirmation. Errors use the danger notice.

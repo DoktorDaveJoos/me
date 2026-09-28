@@ -52,6 +52,8 @@ mod credential_tools_ui;
 mod credentials_ui;
 #[path = "logins_ui.rs"]
 mod logins_ui;
+#[path = "quick_api.rs"]
+pub(crate) mod quick_api;
 #[path = "site_icons.rs"]
 mod site_icons;
 use logins_ui::LoginsState;

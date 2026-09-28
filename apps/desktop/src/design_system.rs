@@ -171,6 +171,11 @@ pub mod layout {
     pub const CONTROL_COMPACT: f32 = 32.;
     pub const CONTROL: f32 = 36.;
     pub const CONTROL_LARGE: f32 = 44.;
+    /// Menu bar quick panel: a fixed pop-up below the status item.
+    pub const QUICK_PANEL_WIDTH: f32 = 400.;
+    pub const QUICK_PANEL_HEIGHT: f32 = 520.;
+    /// Height of the quick panel's document drop zone.
+    pub const QUICK_DROP_HEIGHT: f32 = 88.;
 }
 
 #[derive(Clone, Copy)]

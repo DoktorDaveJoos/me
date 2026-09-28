@@ -114,7 +114,7 @@ impl Icon {
             Self::User => "icons/user.svg",
         }
     }
-    fn bytes(self) -> &'static [u8] {
+    pub(crate) fn bytes(self) -> &'static [u8] {
         match self {
             Self::Arrow => include_bytes!("../assets/icons/arrow.svg"),
             Self::Attach => include_bytes!("../assets/icons/attach.svg"),

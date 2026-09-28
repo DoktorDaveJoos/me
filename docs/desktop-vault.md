@@ -87,9 +87,15 @@ Originaltresors. Das ist kein externer Sicherheitsnachweis.
 
 - macOS wurde gebaut; Linux-Build/Wayland/X11 und Release-Leistung müssen separat
   geprüft werden. Keine Performance-Zahlen aus Debug-Builds ableiten.
+- macOS: Menüleistensymbol (Wabe). Linksklick öffnet ein Schnellfenster mit
+  Entsperren, Suche, Dokument-Ablage und Notiz; Rechtsklick zeigt Öffnen, Sperren
+  und Beenden. Das Schließen des Hauptfensters beendet ME. nicht; der Tresor bleibt
+  bis zum Sperren oder Beenden entsperrt (keine automatische Sperre). Pro
+  App-Identität läuft nur eine Instanz. `status_item.rs` ist das einzige Modul mit
+  `unsafe` (AppKit über objc2).
 - Die Liste zeigt höchstens 200 Treffer. Es gibt noch keine Pagination.
 - Noch kein vollständiger zeitlicher Resolver, Konfliktreview, typisierte
-  PDF-Vorschau, Embeddings, Tray, automatische Sperre, Geräteverwaltung oder Sync.
+  PDF-Vorschau, Embeddings, Linux-Tray, automatische Sperre, Geräteverwaltung oder Sync.
   Der Stand von Standardfeldern, KI-Adapter und begrenzter Codex-Autorisierung
   steht in [Codex-Integration](codex-integration.md).
 - Kein Credential-Manager: normale Angaben sind kein Ort für Passwörter oder
